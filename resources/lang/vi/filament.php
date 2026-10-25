@@ -20,6 +20,11 @@ return [
         'intro' => 'Release Widget/Workflow bất biến do RPA Admin publish qua Service API.',
         'empty' => 'Chưa có package.',
     ],
+    'action_tags' => [
+        'nav' => 'Action Tags',
+        'title' => 'Action Tag Registry',
+        'intro' => 'Định nghĩa việc cần làm (Platform → Target → Action) và quản lý Script Requests cho RPA Admin.',
+    ],
     'scripts' => [
         'nav' => 'Scripts',
         'title' => 'Scripts',

@@ -24,6 +24,7 @@ use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationDashboard
 use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationJobsPage;
 use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationPackagesPage;
 use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationSchedulesPage;
+use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationActionTagsPage;
 use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationScriptsPage;
 use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationServiceStatusPage;
 use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationSessionsPage;
@@ -51,6 +52,7 @@ final class SocialAutomationPanelProvider extends PanelProvider
             ->sidebarCollapsibleOnDesktop()
             ->pages([
                 SocialAutomationDashboardPage::class,
+                SocialAutomationActionTagsPage::class,
                 SocialAutomationScriptsPage::class,
                 SocialAutomationWidgetsPage::class,
                 SocialAutomationWorkflowsPage::class,

@@ -28,6 +28,7 @@ final class PackagePublishValidator
 
     public function __construct(
         private readonly WidgetFormSchema $widgetForms = new WidgetFormSchema,
+        private readonly ?\Closure $actionTagChecker = null,
     ) {}
 
     /**
@@ -273,6 +274,31 @@ final class PackagePublishValidator
             }
             if (array_key_exists('desktop_capture', $video) && $video['desktop_capture'] === true) {
                 $errors[] = 'script_video_demo_desktop_forbidden';
+            }
+        }
+
+        $resultType = $manifest['result_type'] ?? 'status';
+        if (! in_array($resultType, ['status', 'collection'], true)) {
+            $errors[] = 'script_result_type_invalid';
+        }
+
+        if ($resultType === 'collection') {
+            $collectionType = trim((string) ($manifest['collection_type'] ?? ''));
+            if ($collectionType === '') {
+                $errors[] = 'script_collection_type_required';
+            } elseif (! preg_match('/^[a-zA-Z0-9._-]+$/', $collectionType)) {
+                $errors[] = 'script_collection_type_invalid';
+            }
+        }
+
+        $actionTagKey = isset($manifest['action_tag_key']) ? trim((string) $manifest['action_tag_key']) : null;
+        if ($actionTagKey !== null && $actionTagKey !== '') {
+            if (! preg_match('/^[a-zA-Z0-9._-]+$/', $actionTagKey)) {
+                $errors[] = 'script_action_tag_key_invalid';
+            } elseif ($this->actionTagChecker !== null) {
+                if (! ($this->actionTagChecker)($actionTagKey)) {
+                    $errors[] = 'action_tag_not_found';
+                }
             }
         }
 

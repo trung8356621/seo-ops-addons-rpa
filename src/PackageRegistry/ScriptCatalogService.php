@@ -79,6 +79,9 @@ final class ScriptCatalogService
                 'lineage' => $lineage,
                 'incomplete' => ! $assetsComplete,
                 'demo_status' => $demoReady ? 'ready' : 'missing',
+                'action_tag_key' => isset($manifest['action_tag_key']) ? (string) $manifest['action_tag_key'] : null,
+                'result_type' => isset($manifest['result_type']) ? (string) $manifest['result_type'] : 'status',
+                'collection_type' => isset($manifest['collection_type']) ? (string) $manifest['collection_type'] : null,
             ];
         }
 

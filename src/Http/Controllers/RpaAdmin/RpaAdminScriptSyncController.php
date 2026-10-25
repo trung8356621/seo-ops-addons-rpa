@@ -21,6 +21,9 @@ use Omnichannel\Addons\SocialAutomation\Models\SaRpaExecutionReport;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackage;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
 use Omnichannel\Addons\SocialAutomation\Models\SaScriptReleaseAsset;
+use Omnichannel\Addons\SocialAutomation\Models\SaActionTag;
+use Omnichannel\Addons\SocialAutomation\Models\SaActionTagScript;
+use Omnichannel\Addons\SocialAutomation\Models\SaScriptRequest;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationApiStatus;
 
@@ -255,5 +258,109 @@ final class RpaAdminScriptSyncController extends Controller
         );
 
         return response()->json($result, ($result['ok'] ?? false) ? 201 : 422);
+    }
+
+    public function actionTags(): JsonResponse
+    {
+        if (! Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable('sa_action_tags')) {
+            return response()->json(['ok' => false, 'errors' => ['action_tags_schema_unavailable']], 503);
+        }
+
+        $tags = SaActionTag::query()->with(['site', 'path'])->orderBy('platform')->orderBy('target')->orderBy('action')->get()->map(function (SaActionTag $t) {
+            $linkedCount = Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable('sa_action_tag_scripts')
+                ? SaActionTagScript::query()->where('action_tag_id', $t->id)->count()
+                : 0;
+
+            $siteKey = $t->site_key ?: $t->platform;
+            $pathKey = $t->path_key ?: $t->target;
+            $actionKey = $t->action_key ?: $t->action;
+
+            return [
+                'id' => (int) $t->id,
+                'tag_key' => $t->tag_key,
+                'site_key' => $siteKey,
+                'path_key' => $pathKey,
+                'action_key' => $actionKey,
+                'platform' => $t->platform ?: $siteKey,
+                'target' => $t->target ?: $pathKey,
+                'action' => $t->action ?: $actionKey,
+                'name' => $t->name,
+                'description' => $t->description,
+                'linked_scripts_count' => $linkedCount,
+                'base_url' => $t->site?->base_url,
+                'url_pattern' => $t->path?->url_pattern,
+                'path_inputs' => $t->path?->path_inputs ?? [],
+            ];
+        })->all();
+
+        return response()->json(['ok' => true, 'action_tags' => $tags]);
+    }
+
+    public function scriptRequests(Request $request): JsonResponse
+    {
+        if (! Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable('sa_script_requests')) {
+            return response()->json(['ok' => false, 'errors' => ['script_requests_schema_unavailable']], 503);
+        }
+
+        $query = SaScriptRequest::query()->with(['actionTag.site', 'actionTag.path'])->orderBy('id', 'desc');
+        $status = trim((string) $request->query('status', ''));
+        if ($status !== '') {
+            $query->where('status', $status);
+        }
+
+        $rows = $query->limit(200)->get()->map(function (SaScriptRequest $r) {
+            $tag = $r->actionTag;
+            $siteKey = $r->site_key ?: ($tag?->site_key ?: $tag?->platform);
+            $siteBaseUrl = $r->site_base_url ?: $tag?->site?->base_url;
+            $pathKey = $r->path_key ?: ($tag?->path_key ?: $tag?->target);
+            $urlPattern = $r->url_pattern ?: $tag?->path?->url_pattern;
+            $pathInputs = $r->path_inputs ?: ($tag?->path?->path_inputs ?? []);
+            $actionKey = $r->action_key ?: ($tag?->action_key ?: $tag?->action);
+
+            return [
+                'id' => (int) $r->id,
+                'request_id' => $r->request_id,
+                'action_tag_id' => (int) $r->action_tag_id,
+                'action_tag_key' => $r->action_tag_key,
+                'site_key' => $siteKey,
+                'site_base_url' => $siteBaseUrl,
+                'path_key' => $pathKey,
+                'url_pattern' => $urlPattern,
+                'path_inputs' => $pathInputs,
+                'action_key' => $actionKey,
+                'request_type' => $r->request_type,
+                'status' => $r->status,
+                'script_id' => $r->script_id,
+                'script_version' => $r->script_version,
+                'error_reason' => $r->error_reason,
+                'metadata' => $r->metadata,
+                'created_at' => $r->created_at?->toIso8601String(),
+            ];
+        })->all();
+
+        return response()->json(['ok' => true, 'script_requests' => $rows]);
+    }
+
+    public function claimScriptRequest(Request $request, string $requestId): JsonResponse
+    {
+        if (! Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable('sa_script_requests')) {
+            return response()->json(['ok' => false, 'errors' => ['script_requests_schema_unavailable']], 503);
+        }
+
+        $row = SaScriptRequest::query()->where('request_id', $requestId)->first();
+        if (! $row instanceof SaScriptRequest) {
+            return response()->json(['ok' => false, 'errors' => ['script_request_not_found']], 404);
+        }
+
+        if ($row->status === SaScriptRequest::STATUS_PENDING || $row->status === SaScriptRequest::STATUS_NEEDS_FIX) {
+            $row->update(['status' => SaScriptRequest::STATUS_DEVELOPING]);
+        }
+
+        return response()->json(['ok' => true, 'request' => [
+            'id' => (int) $row->id,
+            'request_id' => $row->request_id,
+            'action_tag_key' => $row->action_tag_key,
+            'status' => $row->status,
+        ]]);
     }
 }

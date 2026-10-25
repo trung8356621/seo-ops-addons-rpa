@@ -207,6 +207,26 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                 Route::get('/script-media/{mediaId}', [ScriptReleaseMediaController::class, 'show'])
                     ->whereNumber('mediaId')
                     ->name('social-automation.script-media.show');
+
+                Route::prefix('api/action-registry')->group(function (): void {
+                    Route::get('/data', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'data'])
+                        ->name('social-automation.action-registry.data');
+                    Route::post('/sites', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'storeSite'])
+                        ->name('social-automation.action-registry.sites.store');
+                    Route::put('/sites/{id}', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'updateSite'])
+                        ->whereNumber('id')
+                        ->name('social-automation.action-registry.sites.update');
+                    Route::post('/paths', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'storePath'])
+                        ->name('social-automation.action-registry.paths.store');
+                    Route::put('/paths/{id}', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'updatePath'])
+                        ->whereNumber('id')
+                        ->name('social-automation.action-registry.paths.update');
+                    Route::post('/tags', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'storeTag'])
+                        ->name('social-automation.action-registry.tags.store');
+                    Route::post('/tags/{id}/requests', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'createRequest'])
+                        ->whereNumber('id')
+                        ->name('social-automation.action-registry.tags.requests.create');
+                });
             });
 
         // RPA Admin user auth + Script sync (not Runner service_api_credentials).
@@ -237,6 +257,13 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     Route::post('/backup/download', [RpaAdminScriptSyncController::class, 'backupDownload']);
                     Route::get('/execution-reports', [RpaAdminScriptSyncController::class, 'reports']);
                     Route::post('/execution-reports', [RpaAdminScriptSyncController::class, 'storeReport']);
+                    Route::get('/action-tags', [RpaAdminScriptSyncController::class, 'actionTags'])
+                        ->name('social-automation.rpa-admin.action-tags');
+                    Route::get('/script-requests', [RpaAdminScriptSyncController::class, 'scriptRequests'])
+                        ->name('social-automation.rpa-admin.script-requests');
+                    Route::post('/script-requests/{requestId}/claim', [RpaAdminScriptSyncController::class, 'claimScriptRequest'])
+                        ->where('requestId', '[A-Za-z0-9._-]+')
+                        ->name('social-automation.rpa-admin.script-requests.claim');
                 });
             });
     }

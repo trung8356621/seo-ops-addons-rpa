@@ -1,0 +1,13 @@
+{
+  "resources/css/action-tags.css": {
+    "file": "assets/action-tags-CDVYETQ4.css",
+    "src": "resources/css/action-tags.css",
+    "isEntry": true
+  },
+  "resources/js/action-tags/index.tsx": {
+    "file": "assets/index-CWhXq_bE.js",
+    "name": "index",
+    "src": "resources/js/action-tags/index.tsx",
+    "isEntry": true
+  }
+}

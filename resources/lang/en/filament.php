@@ -20,6 +20,11 @@ return [
         'intro' => 'Immutable Widget/Workflow releases published by RPA Admin via Service API.',
         'empty' => 'No packages registered yet.',
     ],
+    'action_tags' => [
+        'nav' => 'Action Tags',
+        'title' => 'Action Tag Registry',
+        'intro' => 'Manage Action Tags taxonomy (Platform → Target → Action) and Script Requests for RPA Admin.',
+    ],
     'scripts' => [
         'nav' => 'Scripts',
         'title' => 'Scripts',

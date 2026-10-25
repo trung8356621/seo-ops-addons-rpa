@@ -1,0 +1,122 @@
+@import 'tailwindcss';
+
+@source '../js/**/*.{js,jsx,ts,tsx}';
+
+/* Action Tags & Sites/Paths React Workspace Styles */
+
+.action-tags-workspace {
+  width: 100%;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color: #111827;
+}
+
+#action-registry-root {
+  width: 100%;
+}
+
+/* Button styling overrides to defeat Filament unlayered button background reset */
+.action-tags-workspace button.btn-primary,
+.action-tags-workspace .btn-primary {
+  background-color: #059669 !important;
+  color: #ffffff !important;
+  border: 1px solid transparent !important;
+}
+.action-tags-workspace button.btn-primary:hover,
+.action-tags-workspace .btn-primary:hover {
+  background-color: #047857 !important;
+}
+.action-tags-workspace button.btn-primary:disabled,
+.action-tags-workspace .btn-primary:disabled {
+  opacity: 0.5 !important;
+  cursor: not-allowed !important;
+}
+
+.action-tags-workspace button.btn-secondary,
+.action-tags-workspace .btn-secondary {
+  background-color: #ffffff !important;
+  color: #374151 !important;
+  border: 1px solid #d1d5db !important;
+}
+.action-tags-workspace button.btn-secondary:hover,
+.action-tags-workspace .btn-secondary:hover {
+  background-color: #f9fafb !important;
+}
+
+/* Catch-all for utility button background classes in action workspace */
+.action-tags-workspace button[class*="bg-emerald-600"] {
+  background-color: #059669 !important;
+  color: #ffffff !important;
+}
+.action-tags-workspace button[class*="bg-emerald-600"]:hover {
+  background-color: #047857 !important;
+}
+.action-tags-workspace button[class*="bg-white"] {
+  background-color: #ffffff !important;
+}
+.action-tags-workspace button[class*="bg-white"]:hover {
+  background-color: #f9fafb !important;
+}
+
+/* Custom transitions and scrollbars */
+.action-tags-workspace * {
+  box-sizing: border-box;
+}
+
+.action-tags-workspace input:focus,
+.action-tags-workspace select:focus,
+.action-tags-workspace textarea:focus {
+  outline: none;
+  border-color: #059669;
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.2);
+}
+
+/* Badge styles */
+.badge-ready {
+  background-color: #d1fae5;
+  color: #065f46;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.badge-pending {
+  background-color: #fef3c7;
+  color: #92400e;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.badge-required {
+  background-color: #e0f2fe;
+  color: #0369a1;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: scale(0.98); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes slideInRight {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.15s ease-out forwards;
+}
+
+.animate-slide-right {
+  animation: slideInRight 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}

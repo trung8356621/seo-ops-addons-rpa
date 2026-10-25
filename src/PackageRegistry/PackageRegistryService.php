@@ -9,6 +9,9 @@ use Illuminate\Support\Facades\Schema;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackage;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageDependency;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
+use Omnichannel\Addons\SocialAutomation\Models\SaActionTag;
+use Omnichannel\Addons\SocialAutomation\Models\SaActionTagScript;
+use Omnichannel\Addons\SocialAutomation\Models\SaScriptRequest;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
 use Throwable;
 
@@ -75,6 +78,35 @@ final class PackageRegistryService
                     );
                 }
             }
+
+            $actionTagKey = trim((string) ($manifest['action_tag_key'] ?? $input['action_tag_key'] ?? ''));
+            $requestId = trim((string) ($input['script_request_id'] ?? $manifest['script_request_id'] ?? ''));
+
+            if ($actionTagKey !== '' && Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable('sa_action_tags')) {
+                $tagExists = SaActionTag::query()->where('tag_key', $actionTagKey)->exists();
+                if (! $tagExists) {
+                    return new PackagePublishResult(
+                        PackagePublishResult::OUTCOME_VALIDATION,
+                        errors: ['action_tag_not_found'],
+                    );
+                }
+            }
+
+            if ($requestId !== '' && Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable('sa_script_requests')) {
+                $req = SaScriptRequest::query()->where('request_id', $requestId)->first();
+                if (! $req instanceof SaScriptRequest) {
+                    return new PackagePublishResult(
+                        PackagePublishResult::OUTCOME_VALIDATION,
+                        errors: ['script_request_not_found'],
+                    );
+                }
+                if ($actionTagKey !== '' && $req->action_tag_key !== $actionTagKey) {
+                    return new PackagePublishResult(
+                        PackagePublishResult::OUTCOME_VALIDATION,
+                        errors: ['script_request_action_tag_mismatch'],
+                    );
+                }
+            }
         }
 
         try {
@@ -113,6 +145,7 @@ final class PackageRegistryService
 
                 if ($existing instanceof SaPackageRelease) {
                     if (PackageDigest::equals((string) $existing->content_digest, (string) $data['content_digest'])) {
+                        $this->linkActionTagAndRequest($package, $existing, $data, $input);
                         return new PackagePublishResult(
                             PackagePublishResult::OUTCOME_IDEMPOTENT,
                             release: $this->releaseArray($package, $existing, idempotent: true),
@@ -196,6 +229,7 @@ final class PackageRegistryService
                     ]);
                 }
 
+                $this->linkActionTagAndRequest($package, $release, $data, $input);
                 $publishResult = new PackagePublishResult(
                     PackagePublishResult::OUTCOME_CREATED,
                     release: $this->releaseArray($package, $release, idempotent: false),
@@ -355,6 +389,44 @@ final class PackageRegistryService
             'dependencies' => $deps,
             'published_at' => $release->published_at?->toIso8601String(),
         ];
+    }
+
+    private function linkActionTagAndRequest(
+        SaPackage $package,
+        SaPackageRelease $release,
+        array $data,
+        array $input
+    ): void {
+        $manifest = is_array($data['manifest'] ?? null) ? $data['manifest'] : [];
+        $actionTagKey = trim((string) ($manifest['action_tag_key'] ?? $input['action_tag_key'] ?? ''));
+        $scriptId = trim((string) ($manifest['script_id'] ?? $package->package_key));
+
+        if ($actionTagKey !== '' && Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable('sa_action_tag_scripts')) {
+            $tag = SaActionTag::query()->where('tag_key', $actionTagKey)->first();
+            if ($tag instanceof SaActionTag) {
+                SaActionTagScript::query()->firstOrCreate([
+                    'action_tag_id' => $tag->id,
+                    'script_id' => $scriptId,
+                    'script_version' => (string) $release->version,
+                ], [
+                    'action_tag_key' => $tag->tag_key,
+                    'package_id' => $package->id,
+                    'release_id' => $release->id,
+                ]);
+            }
+        }
+
+        $requestId = trim((string) ($input['script_request_id'] ?? $manifest['script_request_id'] ?? ''));
+        if ($requestId !== '' && Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable('sa_script_requests')) {
+            $req = SaScriptRequest::query()->where('request_id', $requestId)->first();
+            if ($req instanceof SaScriptRequest) {
+                $req->update([
+                    'status' => SaScriptRequest::STATUS_PUBLISHED,
+                    'script_id' => $scriptId,
+                    'script_version' => (string) $release->version,
+                ]);
+            }
+        }
     }
 
     private function tablesReady(): bool
