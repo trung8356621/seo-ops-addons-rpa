@@ -41,7 +41,20 @@ final class SocialAutomationFoundationContractTest extends TestCase
 
     public function test_composer_autoload_maps_namespace(): void
     {
-        $composer = json_decode((string) file_get_contents(dirname($this->root).'/composer.json'), true);
+        $composerPath = dirname($this->root).'/composer.json';
+        if (! file_exists($composerPath)) {
+            $candidates = [
+                dirname($this->root, 3).'/work/omnichannel-addons/composer.json',
+                dirname($this->root, 2).'/omnichannel-addons/composer.json',
+            ];
+            foreach ($candidates as $cand) {
+                if (file_exists($cand)) {
+                    $composerPath = $cand;
+                    break;
+                }
+            }
+        }
+        $composer = json_decode((string) file_get_contents($composerPath), true);
         self::assertIsArray($composer);
         $psr4 = $composer['autoload']['psr-4'] ?? [];
         self::assertSame(
