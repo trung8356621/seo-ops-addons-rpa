@@ -42,4 +42,16 @@ final class SaBrowserSession extends Model
     {
         return $this->hasMany(SaSessionAccount::class, 'browser_session_id');
     }
+
+    public function getNameAttribute(): string
+    {
+        $caps = is_array($this->capabilities) ? $this->capabilities : [];
+        return (string) ($caps['name'] ?? $this->session_uuid);
+    }
+
+    public function getBrowserStatusAttribute(): string
+    {
+        $caps = is_array($this->capabilities) ? $this->capabilities : [];
+        return (string) ($caps['status'] ?? ($this->ready_status === 'ready' ? 'running' : 'stopped'));
+    }
 }

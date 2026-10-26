@@ -132,4 +132,8 @@ Route::middleware([
         ->name('api.v1.services.social-automation.client.register');
     Route::post('{service}/social-automation/client/heartbeat', [RpaClientApiController::class, 'heartbeat'])
         ->name('api.v1.services.social-automation.client.heartbeat');
+    Route::post('{service}/social-automation/client/browser-sync', [RpaClientApiController::class, 'syncBrowserSessions'])
+        ->name('api.v1.services.social-automation.client.browser-sync');
+    Route::post('{service}/social-automation/client/browser-delete', [RpaClientApiController::class, 'deleteBrowserSession'])
+        ->name('api.v1.services.social-automation.client.browser-delete');
 });

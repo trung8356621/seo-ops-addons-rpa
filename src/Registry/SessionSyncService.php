@@ -6,6 +6,7 @@ namespace Omnichannel\Addons\SocialAutomation\Registry;
 
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Omnichannel\Addons\SocialAutomation\Domain\OnlineStateCalculator;
 use Omnichannel\Addons\SocialAutomation\Enums\AccountIdentitySource;
 use Omnichannel\Addons\SocialAutomation\Enums\SessionReadyStatus;
 use Omnichannel\Addons\SocialAutomation\Models\SaAccount;
@@ -17,11 +18,15 @@ use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
 use Throwable;
 
 /**
- * Sync browser sessions + account metadata from Runner.
+ * Sync browser sessions + account metadata from Runner / RPA Client.
  * Ready ≠ verified login. Never stores cookies/secrets.
  */
 final class SessionSyncService
 {
+    public function __construct(
+        private readonly OnlineStateCalculator $online = new OnlineStateCalculator,
+    ) {}
+
     /**
      * @param  array<string, mixed>  $payload
      * @return array{ok: bool, sessions?: list<array<string, mixed>>, errors?: list<string>}
@@ -82,6 +87,117 @@ final class SessionSyncService
     }
 
     /**
+     * Synchronize Browser Profiles from RPA Client machine.
+     * Enforces strict secrecy: rejects cookies, passwords, tokens, profile paths.
+     * Idempotent by browser_id (session_uuid).
+     *
+     * @param  list<array<string, mixed>>  $browsers
+     * @return array{ok: bool, synced_count?: int, browsers?: list<array<string, mixed>>, errors?: list<string>}
+     */
+    public function syncClientBrowsers(SaAgent $agent, array $browsers): array
+    {
+        // Validate forbidden fields first
+        foreach ($browsers as $item) {
+            if (! is_array($item)) {
+                continue;
+            }
+            foreach (['cookies', 'cookie', 'password', 'passwords', 'token', 'secret', 'profile_path', 'user_data_dir'] as $forbidden) {
+                if (array_key_exists($forbidden, $item)) {
+                    return ['ok' => false, 'errors' => ['session_forbidden_field:'.$forbidden]];
+                }
+            }
+        }
+
+        if (! SocialAutomationSchema::agentsReady()) {
+            return ['ok' => false, 'errors' => ['schema_unavailable']];
+        }
+
+        try {
+            $out = DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($agent, $browsers): array {
+                $result = [];
+                foreach ($browsers as $item) {
+                    if (! is_array($item)) {
+                        continue;
+                    }
+
+                    $browserId = trim((string) ($item['browser_id'] ?? $item['session_uuid'] ?? ''));
+                    if ($browserId === '') {
+                        continue;
+                    }
+
+                    $name = trim((string) ($item['name'] ?? ''));
+                    if ($name === '') {
+                        $name = 'Browser '.substr($browserId, 0, 8);
+                    }
+
+                    $platform = strtolower(trim((string) ($item['platform'] ?? 'facebook')));
+                    $domain = trim((string) ($item['domain'] ?? ($platform !== '' ? $platform.'.com' : 'facebook.com')));
+                    $status = strtolower(trim((string) ($item['status'] ?? 'stopped')));
+                    if (! in_array($status, ['running', 'stopped', 'error', 'crashed'], true)) {
+                        $status = 'stopped';
+                    }
+
+                    $session = SaBrowserSession::query()->firstOrNew(['session_uuid' => $browserId]);
+
+                    $existingCaps = is_array($session->capabilities) ? $session->capabilities : [];
+                    $mergedCaps = array_merge($existingCaps, [
+                        'name' => $name,
+                        'status' => $status,
+                        'browser_id' => $browserId,
+                        'platform' => $platform,
+                        'last_reported_at' => now()->toIso8601String(),
+                    ]);
+
+                    $readyStatus = $status === 'running' ? SessionReadyStatus::Ready->value : SessionReadyStatus::Pending->value;
+
+                    $session->fill([
+                        'agent_id' => $agent->id,
+                        'platform' => $platform,
+                        'domain' => $domain,
+                        'ready_status' => $readyStatus,
+                        'last_confirmed_at' => now(),
+                        'capabilities' => $mergedCaps,
+                    ])->save();
+
+                    $result[] = [
+                        'browser_id' => $session->session_uuid,
+                        'name' => $name,
+                        'platform' => $platform,
+                        'status' => $status,
+                        'ready_status' => $readyStatus,
+                        'last_reported_at' => $mergedCaps['last_reported_at'],
+                    ];
+                }
+
+                return $result;
+            });
+        } catch (Throwable $e) {
+            return ['ok' => false, 'errors' => ['sync_failed: '.$e->getMessage()]];
+        }
+
+        return [
+            'ok' => true,
+            'synced_count' => count($out),
+            'browsers' => $out,
+        ];
+    }
+
+    /**
+     * Delete a single browser session for a client.
+     */
+    public function deleteClientBrowser(SaAgent $agent, string $browserId): bool
+    {
+        if (! SocialAutomationSchema::agentsReady()) {
+            return false;
+        }
+
+        return (bool) SaBrowserSession::query()
+            ->where('agent_id', $agent->id)
+            ->where('session_uuid', $browserId)
+            ->delete();
+    }
+
+    /**
      * @return list<array<string, mixed>>
      */
     public function listForUi(): array
@@ -91,16 +207,37 @@ final class SessionSyncService
         }
 
         return SaBrowserSession::query()->with('agent')->orderByDesc('updated_at')->limit(200)->get()
-            ->map(static function (SaBrowserSession $s): array {
+            ->map(function (SaBrowserSession $s): array {
+                $capabilities = is_array($s->capabilities) ? $s->capabilities : [];
+                $name = (string) ($capabilities['name'] ?? $s->session_uuid);
+                $reportedStatus = (string) ($capabilities['status'] ?? ($s->ready_status === 'ready' ? 'running' : 'stopped'));
+
+                $agent = $s->agent;
+                $deviceOnline = $agent instanceof SaAgent && $this->online->isOnline($agent->last_heartbeat_at);
+
+                // Section 6: When Device is Offline, SEO-OPS must show Browser Unknown/Stale
+                $effectiveStatus = ! $deviceOnline
+                    ? 'unknown_stale'
+                    : (in_array($reportedStatus, ['running', 'stopped', 'error', 'crashed'], true) ? $reportedStatus : 'stopped');
+
                 return [
                     'session_uuid' => $s->session_uuid,
-                    'agent_uuid' => $s->agent?->agent_uuid,
-                    'platform' => $s->platform,
-                    'domain' => $s->domain,
+                    'browser_id' => $s->session_uuid,
+                    'name' => $name,
+                    'agent_uuid' => $agent?->agent_uuid,
+                    'device_name' => $agent?->display_name ?? '—',
+                    'device_id' => $agent?->device_id ?? '—',
+                    'device_online' => $deviceOnline,
+                    'platform' => $s->platform ?? 'facebook',
+                    'domain' => $s->domain ?? 'facebook.com',
+                    'reported_status' => $reportedStatus,
+                    'effective_status' => $effectiveStatus,
+                    'status' => $effectiveStatus,
                     'ready_status' => $s->ready_status,
                     'busy' => $s->locked_job_id !== null
                         && ($s->lock_expires_at === null || $s->lock_expires_at->isFuture()),
                     'last_confirmed_at' => $s->last_confirmed_at?->toIso8601String(),
+                    'last_seen_at' => $capabilities['last_reported_at'] ?? $s->last_confirmed_at?->toIso8601String(),
                 ];
             })->all();
     }

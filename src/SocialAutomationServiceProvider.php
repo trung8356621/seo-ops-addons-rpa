@@ -292,6 +292,16 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                 Route::post('/agents/{agentUuid}/heartbeat', [RpaClientApiController::class, 'heartbeatWithParam'])
                     ->where('agentUuid', '[A-Za-z0-9-]+')
                     ->name('social-automation.client.agent-heartbeat');
+
+                // E4: Browser Profile Sync & Management
+                Route::post('/browser-sync', [RpaClientApiController::class, 'syncBrowserSessions'])
+                    ->name('social-automation.client.browser-sync');
+                Route::post('/browser-delete', [RpaClientApiController::class, 'deleteBrowserSession'])
+                    ->name('social-automation.client.browser-delete');
+                Route::delete('/browsers/{browserId}', [RpaClientApiController::class, 'deleteBrowserSession'])
+                    ->name('social-automation.client.browser-delete-param');
+                Route::get('/browser-sessions', [RpaClientApiController::class, 'listBrowserSessions'])
+                    ->name('social-automation.client.browser-sessions');
             });
 
         // RPA Admin user auth + Script sync (not Runner service_api_credentials).
