@@ -22,14 +22,18 @@ use Omnichannel\Addons\SocialAutomation\Console\SocialAutomationScheduleTickComm
 use Omnichannel\Addons\SocialAutomation\Domain\EligibilitySelector;
 use Omnichannel\Addons\SocialAutomation\Domain\JobStateMachine;
 use Omnichannel\Addons\SocialAutomation\Domain\OnlineStateCalculator;
+use Omnichannel\Addons\SocialAutomation\Domain\RpaClientApiKeyGenerator;
 use Omnichannel\Addons\SocialAutomation\Auth\RpaAdminRoleGate;
 use Omnichannel\Addons\SocialAutomation\Auth\RpaAdminSessionService;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaAdmin\RpaAdminAuthController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaAdmin\RpaAdminScriptSyncController;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaClientApiController;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaClientApiKeyManagementController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ScriptReleaseMediaController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\SocialAutomationBootstrapController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\SocialAutomationHealthController;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureRpaAdminUserApi;
+use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureRpaClientApiKey;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\RenderRpaAdminRateLimitJson;
 use Omnichannel\Addons\SocialAutomation\Orchestration\JobOrchestrator;
 use Omnichannel\Addons\SocialAutomation\PackageRegistry\PackagePublishValidator;
@@ -45,10 +49,12 @@ use Omnichannel\Addons\SocialAutomation\PackageRegistry\WidgetWorkflowComposerSe
 use Omnichannel\Addons\SocialAutomation\Registry\AgentRegistryService;
 use Omnichannel\Addons\SocialAutomation\Registry\SessionSyncService;
 use Omnichannel\Addons\SocialAutomation\Scheduling\ScheduleDispatcher;
+use Omnichannel\Addons\SocialAutomation\Services\RpaClientApiKeyService;
 use Omnichannel\Addons\SocialAutomation\Services\SocialAutomationDatabaseConnectionService;
 use Omnichannel\Addons\SocialAutomation\Support\DashboardMetrics;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationAccess;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationDatabaseHealth;
+use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationInstallationResolver;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceHealth;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceResolver;
 use Throwable;
@@ -61,6 +67,7 @@ final class SocialAutomationServiceProvider extends ServiceProvider
     {
         $this->app->singleton(SocialAutomationServiceResolver::class);
         $this->app->singleton(SocialAutomationAccess::class);
+        $this->app->singleton(SocialAutomationInstallationResolver::class);
         $this->app->singleton(SocialAutomationDatabaseConnectionService::class);
         $this->app->singleton(SocialAutomationDatabaseHealth::class);
         $this->app->singleton(SocialAutomationServiceHealth::class);
@@ -84,6 +91,9 @@ final class SocialAutomationServiceProvider extends ServiceProvider
         $this->app->singleton(JobOrchestrator::class);
         $this->app->singleton(ScheduleDispatcher::class);
         $this->app->singleton(DashboardMetrics::class);
+        $this->app->singleton(RpaClientApiKeyGenerator::class);
+        $this->app->singleton(RpaClientApiKeyService::class);
+        $this->app->singleton(EnsureRpaClientApiKey::class);
 
         try {
             $this->registerCapabilities();
@@ -233,6 +243,25 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                         ->whereNumber('id')
                         ->name('social-automation.action-registry.tags.destroy');
                 });
+
+                // Client API Key Management for SEO-OPS UI / Staff session
+                Route::prefix('api/client-keys')->group(function (): void {
+                    Route::get('/', [RpaClientApiKeyManagementController::class, 'index'])
+                        ->name('social-automation.client-keys.index');
+                    Route::post('/', [RpaClientApiKeyManagementController::class, 'store'])
+                        ->name('social-automation.client-keys.store');
+                    Route::post('/{id}/revoke', [RpaClientApiKeyManagementController::class, 'revoke'])
+                        ->whereNumber('id')
+                        ->name('social-automation.client-keys.revoke');
+                });
+            });
+
+        // RPA Client Key Validation Endpoint (Bearer <client_api_key>)
+        Route::prefix('api/v1/social-automation/client')
+            ->middleware([EnsureRpaClientApiKey::class])
+            ->group(function (): void {
+                Route::get('/validate', [RpaClientApiController::class, 'validateKey'])
+                    ->name('social-automation.client.validate');
             });
 
         // RPA Admin user auth + Script sync (not Runner service_api_credentials).

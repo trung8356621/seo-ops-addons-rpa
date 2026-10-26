@@ -20,6 +20,7 @@ use Illuminate\Session\Middleware\StartSession;
 use Illuminate\View\Middleware\ShareErrorsFromSession;
 use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationAccountsPage;
 use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationAgentsPage;
+use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationClientKeysPage;
 use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationDashboardPage;
 use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationJobsPage;
 use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationPackagesPage;
@@ -59,6 +60,7 @@ final class SocialAutomationPanelProvider extends PanelProvider
                 // Legacy packages route kept registered but hidden from nav.
                 SocialAutomationPackagesPage::class,
                 SocialAutomationAgentsPage::class,
+                SocialAutomationClientKeysPage::class,
                 // Accounts DB/API kept; nav hidden per navigation redesign.
                 SocialAutomationAccountsPage::class,
                 SocialAutomationSessionsPage::class,

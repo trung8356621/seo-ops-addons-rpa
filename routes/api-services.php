@@ -3,6 +3,8 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Route;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaClientApiController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ServiceApi\Admin\ManualDispatchController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ServiceApi\Admin\TaskAdminController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ServiceApi\Admin\WidgetInputController;
@@ -11,6 +13,7 @@ use Omnichannel\Addons\SocialAutomation\Http\Controllers\ServiceApi\PackageRegis
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ServiceApi\Runner\RunnerAgentController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ServiceApi\Runner\RunnerJobController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ServiceApi\Runner\RunnerSessionController;
+use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureRpaClientApiKey;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureSocialAutomationServiceApi;
 
 /*
@@ -26,6 +29,9 @@ use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureSocialAutomationSe
 |   social-automation:runner:agent
 |   social-automation:runner:session
 |   social-automation:runner:job
+|
+| RPA Client Key Authentication (Phase 1 Foundation):
+|   Authorization: Bearer <client_api_key>
 */
 
 if (! class_exists(ManualDispatchController::class) || ! class_exists(EnsureSocialAutomationServiceApi::class)) {
@@ -114,4 +120,12 @@ Route::middleware([
     Route::post('{service}/social-automation/runner/agents/{agentUuid}/jobs/{jobUuid}/artifacts', [RunnerJobController::class, 'uploadArtifact'])
         ->where(['agentUuid' => '[A-Za-z0-9-]+', 'jobUuid' => '[A-Za-z0-9-]+'])
         ->name('api.v1.services.social-automation.runner.jobs.artifacts');
+});
+
+// RPA Client Key Validation
+Route::middleware([
+    EnsureRpaClientApiKey::class,
+])->group(function (): void {
+    Route::get('{service}/social-automation/client/validate', [RpaClientApiController::class, 'validateKey'])
+        ->name('api.v1.services.social-automation.client.validate');
 });
