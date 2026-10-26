@@ -94,6 +94,11 @@ final class SocialAutomationServiceProvider extends ServiceProvider
         $this->app->singleton(RpaClientApiKeyGenerator::class);
         $this->app->singleton(RpaClientApiKeyService::class);
         $this->app->singleton(EnsureRpaClientApiKey::class);
+        $this->app->singleton(
+            \Omnichannel\Addons\SocialAutomation\Contracts\SaAccountRepositoryContract::class,
+            \Omnichannel\Addons\SocialAutomation\Repositories\EloquentSaAccountRepository::class
+        );
+        $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\SaAccountService::class);
 
         try {
             $this->registerCapabilities();
@@ -258,6 +263,20 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                         ->whereNumber('id')
                         ->name('social-automation.client-keys.revoke');
                 });
+
+                // Account Inventory Management for SEO-OPS UI / API
+                Route::prefix('api/accounts')->group(function (): void {
+                    Route::get('/', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\SocialAutomationAccountManagementController::class, 'index'])
+                        ->name('social-automation.accounts.index');
+                    Route::post('/', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\SocialAutomationAccountManagementController::class, 'store'])
+                        ->name('social-automation.accounts.store');
+                    Route::put('/{id}', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\SocialAutomationAccountManagementController::class, 'update'])
+                        ->whereNumber('id')
+                        ->name('social-automation.accounts.update');
+                    Route::delete('/{id}', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\SocialAutomationAccountManagementController::class, 'destroy'])
+                        ->whereNumber('id')
+                        ->name('social-automation.accounts.destroy');
+                });
             });
 
         // RPA Client Key Validation Endpoint (Bearer <client_api_key>)
@@ -290,7 +309,13 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                         ->name('social-automation.rpa-admin.scripts.pull');
                     Route::post('/scripts/video-demo', [RpaAdminScriptSyncController::class, 'attachVideoDemo'])
                         ->name('social-automation.rpa-admin.scripts.video-demo');
+                    Route::get('/scripts/video-demo', [RpaAdminScriptSyncController::class, 'getVideoDemo'])
+                        ->name('social-automation.rpa-admin.scripts.video-demo.get');
                     Route::post('/scripts/asset', [RpaAdminScriptSyncController::class, 'attachAsset']);
+                    Route::get('/scripts/asset', [RpaAdminScriptSyncController::class, 'getAsset'])
+                        ->name('social-automation.rpa-admin.scripts.asset');
+                    Route::get('/active-scripts', [RpaAdminScriptSyncController::class, 'activeScripts'])
+                        ->name('social-automation.rpa-admin.active-scripts');
                     Route::post('/backup', [RpaAdminScriptSyncController::class, 'backup']);
                     Route::get('/backup', [RpaAdminScriptSyncController::class, 'backupInfo']);
                     Route::post('/backup/download', [RpaAdminScriptSyncController::class, 'backupDownload']);

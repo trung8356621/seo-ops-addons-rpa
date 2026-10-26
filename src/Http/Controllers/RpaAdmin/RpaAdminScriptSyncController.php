@@ -21,6 +21,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaRpaExecutionReport;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackage;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
 use Omnichannel\Addons\SocialAutomation\Models\SaScriptReleaseAsset;
+use Omnichannel\Addons\SocialAutomation\Models\SaScriptReleaseMedia;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTag;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTagScript;
 use Omnichannel\Addons\SocialAutomation\Models\SaScriptRequest;
@@ -294,6 +295,285 @@ final class RpaAdminScriptSyncController extends Controller
         })->all();
 
         return response()->json(['ok' => true, 'action_tags' => $tags]);
+    }
+
+    public function activeScripts(Request $request): JsonResponse
+    {
+        if (! Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable('sa_action_tags')) {
+            return response()->json(['ok' => false, 'errors' => ['action_tags_schema_unavailable']], 503);
+        }
+
+        $tagKeyFilter = trim((string) $request->query('tag_key', ''));
+        $tagIdFilter = $request->query('action_tag_id');
+
+        $query = SaActionTag::query()->with(['site', 'path']);
+        if ($tagKeyFilter !== '') {
+            $query->where('tag_key', $tagKeyFilter);
+        }
+        if ($tagIdFilter !== null && $tagIdFilter !== '') {
+            $query->where('id', (int) $tagIdFilter);
+        }
+
+        $tags = $query->orderBy('platform')->orderBy('target')->orderBy('action')->get();
+        $hasTagScripts = Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable('sa_action_tag_scripts');
+        $hasPackages = Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable('sa_packages');
+
+        $activeScripts = [];
+
+        if ($hasPackages) {
+            foreach ($tags as $tag) {
+                $release = null;
+                $package = null;
+
+                // Priority 1: sa_action_tag_scripts linkage (latest release)
+                if ($hasTagScripts) {
+                    $links = SaActionTagScript::query()
+                        ->where('action_tag_id', $tag->id)
+                        ->orWhere('action_tag_key', $tag->tag_key)
+                        ->orderByDesc('release_id')
+                        ->orderByDesc('id')
+                        ->get();
+
+                    foreach ($links as $link) {
+                        if ($link->release_id) {
+                            $rel = SaPackageRelease::query()
+                                ->where('id', $link->release_id)
+                                ->where('status', 'published')
+                                ->first();
+                            if ($rel instanceof SaPackageRelease) {
+                                $pkg = SaPackage::query()->where('id', $rel->package_id)->where('kind', 'script')->first();
+                                if ($pkg instanceof SaPackage) {
+                                    $release = $rel;
+                                    $package = $pkg;
+                                    break;
+                                }
+                            }
+                        }
+                        if ($link->package_id) {
+                            $pkg = SaPackage::query()->where('id', $link->package_id)->where('kind', 'script')->first();
+                            if ($pkg instanceof SaPackage) {
+                                $rel = SaPackageRelease::query()
+                                    ->where('package_id', $pkg->id)
+                                    ->where('status', 'published')
+                                    ->orderByDesc('published_at')
+                                    ->orderByDesc('id')
+                                    ->first();
+                                if ($rel instanceof SaPackageRelease) {
+                                    $release = $rel;
+                                    $package = $pkg;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Priority 2: Look up by action_tag_key matching package_key
+                if (! $release) {
+                    $pkg = SaPackage::query()->where('kind', 'script')->where('package_key', $tag->tag_key)->first();
+                    if ($pkg instanceof SaPackage) {
+                        $rel = SaPackageRelease::query()
+                            ->where('package_id', $pkg->id)
+                            ->where('status', 'published')
+                            ->orderByDesc('published_at')
+                            ->orderByDesc('id')
+                            ->first();
+                        if ($rel instanceof SaPackageRelease) {
+                            $release = $rel;
+                            $package = $pkg;
+                        }
+                    }
+                }
+
+                // Priority 3: Check all published script releases whose manifest has action_tag_key
+                if (! $release) {
+                    $candidates = SaPackageRelease::query()
+                        ->where('status', 'published')
+                        ->whereHas('package', fn ($q) => $q->where('kind', 'script'))
+                        ->orderByDesc('published_at')
+                        ->orderByDesc('id')
+                        ->get();
+
+                    foreach ($candidates as $cand) {
+                        $man = is_array($cand->manifest) ? $cand->manifest : [];
+                        if (($man['action_tag_key'] ?? '') === $tag->tag_key) {
+                            $release = $cand;
+                            $package = $cand->package;
+                            break;
+                        }
+                    }
+                }
+
+                if ($release instanceof SaPackageRelease && $package instanceof SaPackage) {
+                    $releaseData = $this->registry->findRelease($package->package_key, (string) $release->version);
+                    if ($releaseData !== null) {
+                        if (! isset($releaseData['manifest']) || ! is_array($releaseData['manifest'])) {
+                            $releaseData['manifest'] = [];
+                        }
+                        $releaseData['manifest']['action_tag_key'] = $tag->tag_key;
+                        $releaseData['manifest']['action_tag_id'] = (int) $tag->id;
+
+                        if (Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable('sa_script_release_media')) {
+                            $videoMedia = SaScriptReleaseMedia::query()
+                                ->where('release_id', $release->id)
+                                ->where('kind', SaScriptReleaseMedia::KIND_VIDEO_DEMO)
+                                ->first();
+                            $thumbMedia = SaScriptReleaseMedia::query()
+                                ->where('release_id', $release->id)
+                                ->where('kind', SaScriptReleaseMedia::KIND_THUMBNAIL)
+                                ->first();
+
+                            if ($videoMedia instanceof SaScriptReleaseMedia) {
+                                $existingVd = is_array($releaseData['manifest']['video_demo'] ?? null)
+                                    ? $releaseData['manifest']['video_demo']
+                                    : [];
+                                $mediaStatus = $this->media->statusForRelease((int) $release->id);
+                                $scriptIdKey = (string) ($releaseData['manifest']['script_id'] ?? $package->package_key);
+                                $testRunId = (string) ($existingVd['test_run_id'] ?? 'run-1');
+                                $videoExt = $videoMedia->mime === 'video/mp4' ? 'mp4' : 'webm';
+                                $releaseData['manifest']['video_demo'] = array_merge($existingVd, [
+                                    'artifact_ref' => $existingVd['artifact_ref'] ?? ("demos/{$scriptIdKey}/{$testRunId}/recording.{$videoExt}"),
+                                    'sha256' => $videoMedia->checksum_sha256 ?: ($existingVd['sha256'] ?? null),
+                                    'mime' => $videoMedia->mime ?: ($existingVd['mime'] ?? 'video/webm'),
+                                    'test_run_id' => $testRunId,
+                                    'reviewed' => true,
+                                    'thumbnail_ref' => $existingVd['thumbnail_ref'] ?? ("demos/{$scriptIdKey}/{$testRunId}/recording-thumb.jpg"),
+                                    'thumbnail_sha256' => $thumbMedia?->checksum_sha256 ?: ($existingVd['thumbnail_sha256'] ?? null),
+                                    'status' => $mediaStatus['video_demo_status'] ?? 'ready',
+                                ]);
+                            }
+                        }
+
+                        $activeScripts[] = [
+                            'action_tag_id' => (int) $tag->id,
+                            'action_tag_key' => $tag->tag_key,
+                            'script_id' => (string) ($releaseData['manifest']['script_id'] ?? $package->package_key),
+                            'package_key' => (string) $package->package_key,
+                            'version' => (string) $release->version,
+                            'content_digest' => (string) $release->content_digest,
+                            'execution_digest' => (string) ($release->execution_digest ?? ''),
+                            'name' => (string) $package->name,
+                            'release' => $releaseData,
+                        ];
+                    }
+                }
+            }
+        }
+
+        return response()->json([
+            'ok' => true,
+            'active_scripts' => $activeScripts,
+        ]);
+    }
+
+    public function getAsset(Request $request): JsonResponse
+    {
+        $packageKey = trim((string) $request->query('package_key', ''));
+        $version = trim((string) $request->query('version', ''));
+        $assetPath = trim((string) $request->query('asset_path', ''));
+
+        if ($packageKey === '' || $version === '' || $assetPath === '') {
+            return response()->json(['ok' => false, 'errors' => ['package_key_version_asset_path_required']], 422);
+        }
+
+        $package = SaPackage::query()->where('package_key', $packageKey)->where('kind', 'script')->first();
+        if (! $package instanceof SaPackage) {
+            return response()->json(['ok' => false, 'errors' => ['package_not_found']], 404);
+        }
+
+        $release = SaPackageRelease::query()->where('package_id', $package->id)->where('version', $version)->first();
+        if (! $release instanceof SaPackageRelease) {
+            return response()->json(['ok' => false, 'errors' => ['release_not_found']], 404);
+        }
+
+        $asset = SaScriptReleaseAsset::query()
+            ->where('release_id', $release->id)
+            ->where('asset_path', $assetPath)
+            ->first();
+
+        if (! $asset instanceof SaScriptReleaseAsset) {
+            return response()->json(['ok' => false, 'errors' => ['asset_not_found']], 404);
+        }
+
+        if (! Storage::disk('local')->exists($asset->storage_path)) {
+            return response()->json(['ok' => false, 'errors' => ['asset_file_missing']], 404);
+        }
+
+        $content = Storage::disk('local')->get($asset->storage_path);
+
+        return response()->json([
+            'ok' => true,
+            'asset_path' => $assetPath,
+            'sha256' => $asset->checksum_sha256,
+            'mime' => $asset->mime,
+            'asset_base64' => base64_encode($content),
+        ]);
+    }
+
+    public function getVideoDemo(Request $request): mixed
+    {
+        $packageKey = trim((string) $request->query('package_key', ''));
+        $version = trim((string) $request->query('version', ''));
+        $kind = trim((string) $request->query('kind', 'video_demo'));
+        if ($kind !== 'thumbnail') {
+            $kind = 'video_demo';
+        }
+
+        if ($packageKey === '' || $version === '') {
+            return response()->json(['ok' => false, 'errors' => ['package_key_and_version_required']], 422);
+        }
+
+        $package = SaPackage::query()->where('package_key', $packageKey)->where('kind', 'script')->first();
+        if (! $package instanceof SaPackage) {
+            return response()->json(['ok' => false, 'errors' => ['package_not_found']], 404);
+        }
+
+        $release = SaPackageRelease::query()
+            ->where('package_id', $package->id)
+            ->where('version', $version)
+            ->first();
+        if (! $release instanceof SaPackageRelease) {
+            return response()->json(['ok' => false, 'errors' => ['release_not_found']], 404);
+        }
+
+        $mediaKind = $kind === 'thumbnail' ? SaScriptReleaseMedia::KIND_THUMBNAIL : SaScriptReleaseMedia::KIND_VIDEO_DEMO;
+        $row = SaScriptReleaseMedia::query()
+            ->where('release_id', $release->id)
+            ->where('kind', $mediaKind)
+            ->first();
+
+        if (! $row instanceof SaScriptReleaseMedia || $row->storage_path === '') {
+            return response()->json(['ok' => false, 'errors' => ['media_not_found']], 404);
+        }
+
+        $disk = Storage::disk($row->storage_disk ?: 'local');
+        if (! $disk->exists($row->storage_path)) {
+            return response()->json(['ok' => false, 'errors' => ['media_file_missing']], 404);
+        }
+
+        $format = strtolower(trim((string) $request->query('format', '')));
+        if ($format === 'binary') {
+            return $disk->response(
+                $row->storage_path,
+                basename($row->storage_path),
+                [
+                    'Content-Type' => (string) ($row->mime ?: ($kind === 'thumbnail' ? 'image/jpeg' : 'video/webm')),
+                    'Cache-Control' => 'private, no-cache',
+                    'X-Checksum-Sha256' => (string) ($row->checksum_sha256 ?? ''),
+                ]
+            );
+        }
+
+        $content = $disk->get($row->storage_path);
+
+        return response()->json([
+            'ok' => true,
+            'kind' => $mediaKind,
+            'mime' => $row->mime ?: ($kind === 'thumbnail' ? 'image/jpeg' : 'video/webm'),
+            'sha256' => $row->checksum_sha256,
+            'size_bytes' => $row->size_bytes ?: strlen($content),
+            'content_base64' => base64_encode($content),
+        ]);
     }
 
     public function scriptRequests(Request $request): JsonResponse

@@ -49,8 +49,8 @@
                                 type="button"
                                 wire:click="copyAndActivateKey"
                                 wire:loading.attr="disabled"
-                                class="inline-flex items-center gap-1.5 px-5 py-2.5 text-xs font-semibold rounded-lg transition shadow-xs whitespace-nowrap"
-                                :class="copied ? 'bg-green-600 text-white' : 'bg-teal-600 hover:bg-teal-700 text-white'"
+                                class="inline-flex items-center gap-1.5 px-5 py-2.5 text-xs font-semibold rounded-lg text-white transition shadow-xs whitespace-nowrap"
+                                :style="copied ? 'background-color: #16a34a;' : 'background-color: #0d9488;'"
                             >
                                 <x-heroicon-o-clipboard-document class="w-4 h-4" />
                                 <span wire:loading.remove wire:target="copyAndActivateKey" x-show="!copied">Sao chép Key</span>
@@ -171,8 +171,8 @@
                                 type="button"
                                 wire:click="copyAndActivateKey"
                                 wire:loading.attr="disabled"
-                                class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg transition shadow-xs whitespace-nowrap"
-                                :class="copied ? 'bg-green-600 text-white' : 'bg-teal-600 hover:bg-teal-700 text-white'"
+                                class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg text-white transition shadow-xs whitespace-nowrap"
+                                :style="copied ? 'background-color: #16a34a;' : 'background-color: #0d9488;'"
                             >
                                 <span wire:loading.remove wire:target="copyAndActivateKey" x-show="!copied">Sao chép Key</span>
                                 <span wire:loading wire:target="copyAndActivateKey">Đang xử lý...</span>

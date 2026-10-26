@@ -131,18 +131,62 @@ class SocialAutomationAccess
         return $this->canManageClientKeys($user);
     }
 
+    public function canManageAccounts(?User $user = null): bool
+    {
+        $user ??= Auth::user();
+        if (! $this->canAccess($user)) {
+            return false;
+        }
+
+        if (in_array((string) $user->role, [User::ROLE_OWNER, User::ROLE_ADMIN], true)) {
+            return true;
+        }
+
+        if ($this->rpaAdminGate?->allows($user)) {
+            return true;
+        }
+
+        return false;
+    }
+
     public function assertCanAccess(?User $user = null): void
     {
-        abort_unless($this->canAccess($user), 403);
+        if (! $this->canAccess($user)) {
+            $this->abort403();
+        }
     }
 
     public function assertCanAccessAdminPages(?User $user = null): void
     {
-        abort_unless($this->canAccessAdminPages($user), 403);
+        if (! $this->canAccessAdminPages($user)) {
+            $this->abort403();
+        }
     }
 
     public function assertCanMutate(?User $user = null): void
     {
-        abort_unless($this->canMutate($user), 403);
+        if (! $this->canMutate($user)) {
+            $this->abort403();
+        }
+    }
+
+    public function assertCanManageAccounts(?User $user = null): void
+    {
+        if (! $this->canManageAccounts($user)) {
+            $this->abort403();
+        }
+    }
+
+    private function abort403(): void
+    {
+        if (function_exists('abort')) {
+            try {
+                abort(403, 'Forbidden');
+            } catch (\BadMethodCallException | \Error) {
+                // In standalone container tests, Application::abort might not be present
+            }
+        }
+
+        throw new \Symfony\Component\HttpKernel\Exception\HttpException(403, 'Forbidden');
     }
 }

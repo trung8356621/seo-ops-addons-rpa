@@ -26,8 +26,22 @@
             </label>
             <p class="text-xs text-gray-500">Widgets khả dụng: {{ collect($widgets)->map(fn ($w) => $w['package_key'].($w['is_enabled'] ? '' : ' [disabled]'))->implode(', ') ?: '—' }}</p>
             <div class="flex gap-2">
-                <button type="button" wire:click="validateSteps" class="rounded bg-gray-800 px-3 py-1.5 text-sm text-white">Validate</button>
-                <button type="button" wire:click="publish" class="rounded bg-teal-700 px-3 py-1.5 text-sm text-white">Publish Workflow</button>
+                <x-filament::button
+                    type="button"
+                    wire:click="validateSteps"
+                    color="gray"
+                    size="sm"
+                >
+                    Validate
+                </x-filament::button>
+                <x-filament::button
+                    type="button"
+                    wire:click="publish"
+                    color="primary"
+                    size="sm"
+                >
+                    Publish Workflow
+                </x-filament::button>
             </div>
         </div>
 

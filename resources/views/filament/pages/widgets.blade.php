@@ -39,8 +39,24 @@
                 <textarea wire:model="formFieldsJson" rows="8" class="mt-1 w-full rounded border-gray-300 font-mono text-xs dark:border-gray-600 dark:bg-gray-900"></textarea>
             </label>
             <div class="flex flex-wrap gap-2">
-                <button type="button" wire:click="previewCompose" wire:loading.attr="disabled" class="rounded bg-gray-800 px-3 py-1.5 text-sm text-white dark:bg-gray-200 dark:text-gray-900">Preview form / compose</button>
-                <button type="button" wire:click="publish" wire:loading.attr="disabled" class="rounded bg-teal-700 px-3 py-1.5 text-sm text-white">Publish Widget</button>
+                <x-filament::button
+                    type="button"
+                    wire:click="previewCompose"
+                    wire:loading.attr="disabled"
+                    color="gray"
+                    size="sm"
+                >
+                    Preview form / compose
+                </x-filament::button>
+                <x-filament::button
+                    type="button"
+                    wire:click="publish"
+                    wire:loading.attr="disabled"
+                    color="primary"
+                    size="sm"
+                >
+                    Publish Widget
+                </x-filament::button>
             </div>
             @if ($this->previewJson)
                 <pre class="overflow-auto rounded bg-gray-50 p-2 text-xs dark:bg-gray-900">{{ $this->previewJson }}</pre>

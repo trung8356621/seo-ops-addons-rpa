@@ -16,14 +16,14 @@
                 </p>
             </div>
             <div>
-                <button
+                <x-filament::button
                     wire:click="openCreateModal"
-                    type="button"
-                    class="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-teal-600 hover:bg-teal-700 active:bg-teal-800 rounded-lg shadow-sm transition"
+                    icon="heroicon-m-plus"
+                    size="sm"
+                    color="primary"
                 >
-                    <x-heroicon-m-plus class="w-4 h-4" />
                     {{ __('social-automation::filament.client_keys.create_btn') }}
-                </button>
+                </x-filament::button>
             </div>
         </div>
 
@@ -61,8 +61,8 @@
                     <button
                         type="button"
                         @click="navigator.clipboard.writeText(text); copied = true; setTimeout(() => copied = false, 3000)"
-                        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition shadow-xs"
-                        :class="copied ? 'bg-green-600 text-white' : 'bg-teal-600 hover:bg-teal-700 text-white'"
+                        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition shadow-xs text-white"
+                        :style="copied ? 'background-color: #16a34a;' : 'background-color: #0d9488;'"
                     >
                         <span x-show="!copied">{{ __('social-automation::filament.client_keys.copy_btn') }}</span>
                         <span x-show="copied" style="display: none;">{{ __('social-automation::filament.client_keys.copied') }}</span>
@@ -73,17 +73,24 @@
 
         <!-- Keys Table -->
         @if ($rows->isEmpty())
-            <div class="rounded-xl border border-dashed border-gray-300 dark:border-gray-700 p-8 text-center text-sm text-gray-500 dark:text-gray-400">
-                <x-heroicon-o-key class="w-12 h-12 mx-auto text-gray-400 dark:text-gray-500 mb-2" />
-                <p class="font-medium text-base mb-1">{{ __('social-automation::filament.client_keys.empty_title') }}</p>
-                <p class="text-xs mb-4">{{ __('social-automation::filament.client_keys.empty_desc') }}</p>
-                <button
+            <div class="max-w-xl mx-auto my-4 rounded-xl border border-dashed border-gray-300 dark:border-gray-700 p-6 sm:p-7 text-center">
+                <div class="w-12 h-12 flex items-center justify-center rounded-full bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-500 mx-auto mb-3" style="width: 48px; height: 48px;">
+                    <x-heroicon-o-key class="w-6 h-6" style="width: 24px; height: 24px; max-width: 24px; max-height: 24px;" />
+                </div>
+                <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-1">
+                    {{ __('social-automation::filament.client_keys.empty_title') }}
+                </h4>
+                <p class="text-xs text-gray-500 dark:text-gray-400 mb-4 max-w-sm mx-auto">
+                    {{ __('social-automation::filament.client_keys.empty_desc') }}
+                </p>
+                <x-filament::button
                     wire:click="openCreateModal"
-                    type="button"
-                    class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-teal-700 dark:text-teal-400 hover:underline"
+                    icon="heroicon-m-plus"
+                    size="xs"
+                    color="primary"
                 >
-                    + {{ __('social-automation::filament.client_keys.create_first') }}
-                </button>
+                    {{ __('social-automation::filament.client_keys.create_first') }}
+                </x-filament::button>
             </div>
         @else
             <div class="overflow-x-auto rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-xs">
@@ -197,20 +204,22 @@
                 </div>
 
                 <div class="flex items-center justify-end gap-3 pt-3 border-t border-gray-100 dark:border-gray-800">
-                    <button
+                    <x-filament::button
                         wire:click="closeCreateModal"
-                        type="button"
-                        class="px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition"
+                        color="gray"
+                        size="sm"
                     >
                         {{ __('social-automation::filament.client_keys.btn_cancel') }}
-                    </button>
-                    <button
+                    </x-filament::button>
+                    <x-filament::button
                         wire:click="createKey"
-                        type="button"
-                        class="px-4 py-1.5 text-xs font-semibold text-white bg-teal-600 hover:bg-teal-700 rounded-md transition shadow-xs"
+                        color="primary"
+                        size="sm"
+                        wire:loading.attr="disabled"
+                        wire:target="createKey"
                     >
                         {{ __('social-automation::filament.client_keys.btn_confirm_create') }}
-                    </button>
+                    </x-filament::button>
                 </div>
             </div>
         </div>
