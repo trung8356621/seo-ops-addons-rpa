@@ -25,7 +25,7 @@ final class AgentRegistryService
      * @param  array<string, mixed>  $payload
      * @return array{ok: bool, agent?: array<string, mixed>, errors?: list<string>}
      */
-    public function register(array $payload, ?int $credentialId): array
+    public function register(array $payload, ?int $credentialId = null, ?int $clientApiKeyId = null): array
     {
         if (! SocialAutomationSchema::agentsReady()) {
             return ['ok' => false, 'errors' => ['schema_unavailable']];
@@ -36,12 +36,13 @@ final class AgentRegistryService
             return ['ok' => false, 'errors' => ['device_id_required']];
         }
 
+        $defaultKind = $clientApiKeyId !== null ? AgentKindPolicy::KIND_CLIENT : AgentKindPolicy::KIND_RUNNER;
         $kind = $this->agentKinds->normalize(
-            isset($payload['agent_kind']) ? (string) $payload['agent_kind'] : AgentKindPolicy::KIND_RUNNER
+            isset($payload['agent_kind']) ? (string) $payload['agent_kind'] : $defaultKind
         );
 
         try {
-            $agent = DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($payload, $deviceId, $credentialId, $kind): SaAgent {
+            $agent = DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($payload, $deviceId, $credentialId, $clientApiKeyId, $kind): SaAgent {
                 $existing = SaAgent::query()->where('device_id', $deviceId)->first();
                 if ($existing instanceof SaAgent) {
                     if ($credentialId !== null && $existing->credential_id !== null
@@ -56,6 +57,7 @@ final class AgentRegistryService
                         'capabilities' => is_array($payload['capabilities'] ?? null) ? $payload['capabilities'] : $existing->capabilities,
                         'max_concurrency' => max(1, (int) ($payload['max_concurrency'] ?? $existing->max_concurrency ?? 1)),
                         'credential_id' => $credentialId ?? $existing->credential_id,
+                        'client_api_key_id' => $clientApiKeyId ?? $existing->client_api_key_id,
                         'last_heartbeat_at' => now(),
                     ])->save();
 
@@ -75,6 +77,7 @@ final class AgentRegistryService
                     'active_jobs' => 0,
                     'last_heartbeat_at' => now(),
                     'credential_id' => $credentialId,
+                    'client_api_key_id' => $clientApiKeyId,
                 ]);
             });
         } catch (Throwable $e) {
@@ -90,19 +93,23 @@ final class AgentRegistryService
      * @param  array<string, mixed>  $payload
      * @return array{ok: bool, agent?: array<string, mixed>, errors?: list<string>}
      */
-    public function heartbeat(string $agentUuid, array $payload, ?int $credentialId): array
+    public function heartbeat(string $agentUuid, array $payload, ?int $credentialId = null, ?int $clientApiKeyId = null): array
     {
         if (! SocialAutomationSchema::agentsReady()) {
             return ['ok' => false, 'errors' => ['schema_unavailable']];
         }
 
-        $agent = SaAgent::query()->where('agent_uuid', $agentUuid)->first();
+        $agent = SaAgent::query()->where('agent_uuid', $agentUuid)->orWhere('device_id', $agentUuid)->first();
         if (! $agent instanceof SaAgent) {
             return ['ok' => false, 'errors' => ['agent_not_found']];
         }
         if ($credentialId !== null && $agent->credential_id !== null
             && (int) $agent->credential_id !== $credentialId) {
             return ['ok' => false, 'errors' => ['credential_mismatch']];
+        }
+        if ($clientApiKeyId !== null && $agent->client_api_key_id !== null
+            && (int) $agent->client_api_key_id !== $clientApiKeyId) {
+            return ['ok' => false, 'errors' => ['client_api_key_mismatch']];
         }
 
         $availability = trim((string) ($payload['availability'] ?? $agent->availability));
@@ -188,12 +195,15 @@ final class AgentRegistryService
             'availability' => $agent->availability,
             'max_concurrency' => (int) $agent->max_concurrency,
             'active_jobs' => (int) $agent->active_jobs,
-            // Admin sessions never report as Runner online for dispatch.
-            'online_state' => $this->agentKinds->countsAsOnlineForDispatch($kind, $heartbeatOnline)
-                ? 'online'
-                : 'offline',
+            'device_online' => $heartbeatOnline,
+            'online_state' => ($kind === AgentKindPolicy::KIND_CLIENT)
+                ? ($heartbeatOnline ? 'online' : 'offline')
+                : ($this->agentKinds->countsAsOnlineForDispatch($kind, $heartbeatOnline) ? 'online' : 'offline'),
+            'dispatch_eligible' => $this->agentKinds->countsAsOnlineForDispatch($kind, $heartbeatOnline),
             'last_heartbeat_at' => $hb?->toIso8601String(),
             'last_error_code' => $agent->last_error_code,
+            'last_error_message' => $agent->last_error_message,
+            'client_api_key_id' => $agent->client_api_key_id,
         ];
     }
 }

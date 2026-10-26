@@ -122,10 +122,14 @@ Route::middleware([
         ->name('api.v1.services.social-automation.runner.jobs.artifacts');
 });
 
-// RPA Client Key Validation
+// RPA Client Key Endpoints
 Route::middleware([
     EnsureRpaClientApiKey::class,
 ])->group(function (): void {
     Route::get('{service}/social-automation/client/validate', [RpaClientApiController::class, 'validateKey'])
         ->name('api.v1.services.social-automation.client.validate');
+    Route::post('{service}/social-automation/client/register', [RpaClientApiController::class, 'registerDevice'])
+        ->name('api.v1.services.social-automation.client.register');
+    Route::post('{service}/social-automation/client/heartbeat', [RpaClientApiController::class, 'heartbeat'])
+        ->name('api.v1.services.social-automation.client.heartbeat');
 });

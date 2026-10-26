@@ -18,7 +18,7 @@ final class SaAgent extends Model
     protected $fillable = [
         'agent_uuid', 'device_id', 'agent_kind', 'display_name', 'app_version', 'runtime_version',
         'capabilities', 'availability', 'max_concurrency', 'active_jobs',
-        'last_heartbeat_at', 'last_error_code', 'last_error_message', 'credential_id',
+        'last_heartbeat_at', 'last_error_code', 'last_error_message', 'credential_id', 'client_api_key_id',
     ];
 
     protected function casts(): array
@@ -29,6 +29,7 @@ final class SaAgent extends Model
             'active_jobs' => 'integer',
             'last_heartbeat_at' => 'datetime',
             'credential_id' => 'integer',
+            'client_api_key_id' => 'integer',
         ];
     }
 

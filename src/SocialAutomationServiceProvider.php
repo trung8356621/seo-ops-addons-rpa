@@ -279,12 +279,19 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                 });
             });
 
-        // RPA Client Key Validation Endpoint (Bearer <client_api_key>)
+        // RPA Client Key Endpoints (Bearer <client_api_key>)
         Route::prefix('api/v1/social-automation/client')
             ->middleware([EnsureRpaClientApiKey::class])
             ->group(function (): void {
                 Route::get('/validate', [RpaClientApiController::class, 'validateKey'])
                     ->name('social-automation.client.validate');
+                Route::post('/register', [RpaClientApiController::class, 'registerDevice'])
+                    ->name('social-automation.client.register');
+                Route::post('/heartbeat', [RpaClientApiController::class, 'heartbeat'])
+                    ->name('social-automation.client.heartbeat');
+                Route::post('/agents/{agentUuid}/heartbeat', [RpaClientApiController::class, 'heartbeatWithParam'])
+                    ->where('agentUuid', '[A-Za-z0-9-]+')
+                    ->name('social-automation.client.agent-heartbeat');
             });
 
         // RPA Admin user auth + Script sync (not Runner service_api_credentials).
