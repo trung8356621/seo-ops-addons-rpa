@@ -38,6 +38,8 @@ final class SocialAutomationDashboardPage extends Page
 
     public bool $justActivatedAndCopied = false;
 
+    public bool $isStaff = false;
+
     /**
      * @param  array<string, mixed>  $parameters
      */
@@ -55,6 +57,12 @@ final class SocialAutomationDashboardPage extends Page
         return app(SocialAutomationAccess::class)->canAccess();
     }
 
+    public static function shouldRegisterNavigation(): bool
+    {
+        // Hide dashboard navigation link for staff since staff view has no sidebar
+        return ! app(SocialAutomationAccess::class)->isStaff();
+    }
+
     public static function getNavigationLabel(): string
     {
         return __('social-automation::filament.dashboard.nav');
@@ -69,6 +77,7 @@ final class SocialAutomationDashboardPage extends Page
     {
         app(SocialAutomationAccess::class)->assertCanAccess();
 
+        $this->isStaff = app(SocialAutomationAccess::class)->isStaff();
         $this->clientEndpoint = url('/');
         $this->loadKeyData();
     }

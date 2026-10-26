@@ -22,6 +22,11 @@ final class SocialAutomationPackagesPage extends Page
 
     protected static bool $shouldRegisterNavigation = false;
 
+    public static function shouldRegisterNavigation(): bool
+    {
+        return false;
+    }
+
     protected static string $view = 'social-automation::filament.pages.packages';
 
     /**
@@ -38,7 +43,7 @@ final class SocialAutomationPackagesPage extends Page
 
     public static function canAccess(array $parameters = []): bool
     {
-        return app(SocialAutomationAccess::class)->canAccess();
+        return app(SocialAutomationAccess::class)->canAccessAdminPages();
     }
 
     public static function getNavigationLabel(): string
@@ -53,7 +58,7 @@ final class SocialAutomationPackagesPage extends Page
 
     public function mount(): void
     {
-        app(SocialAutomationAccess::class)->assertCanAccess();
+        app(SocialAutomationAccess::class)->assertCanAccessAdminPages();
     }
 
     /**
@@ -61,6 +66,6 @@ final class SocialAutomationPackagesPage extends Page
      */
     public function packages(): array
     {
-        return app(PackageRegistryService::class)->listPackages();
+        return app(PackageRegistryService::class)->list();
     }
 }

@@ -22,11 +22,16 @@ trait SocialAutomationPage
 
     public static function canAccess(array $parameters = []): bool
     {
-        return app(SocialAutomationAccess::class)->canAccess();
+        return app(SocialAutomationAccess::class)->canAccessAdminPages();
+    }
+
+    public static function shouldRegisterNavigation(): bool
+    {
+        return app(SocialAutomationAccess::class)->canAccessAdminPages();
     }
 
     public function mount(): void
     {
-        app(SocialAutomationAccess::class)->assertCanAccess();
+        app(SocialAutomationAccess::class)->assertCanAccessAdminPages();
     }
 }

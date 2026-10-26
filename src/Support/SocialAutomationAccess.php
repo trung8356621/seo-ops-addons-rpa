@@ -71,6 +71,31 @@ class SocialAutomationAccess
         return false;
     }
 
+    public function isStaff(?User $user = null): bool
+    {
+        $user ??= Auth::user();
+        if (! $user instanceof User) {
+            return false;
+        }
+
+        return (string) $user->role === User::ROLE_STAFF;
+    }
+
+    public function canAccessAdminPages(?User $user = null): bool
+    {
+        $user ??= Auth::user();
+        if (! $this->canAccess($user)) {
+            return false;
+        }
+
+        // Only Owners and Admins can access admin-only pages & operations
+        if ($this->rpaAdminGate?->allows($user) || in_array((string) $user->role, [User::ROLE_OWNER, User::ROLE_ADMIN], true)) {
+            return true;
+        }
+
+        return false;
+    }
+
     public function canManageClientKeys(?User $user = null): bool
     {
         $user ??= Auth::user();
@@ -109,6 +134,11 @@ class SocialAutomationAccess
     public function assertCanAccess(?User $user = null): void
     {
         abort_unless($this->canAccess($user), 403);
+    }
+
+    public function assertCanAccessAdminPages(?User $user = null): void
+    {
+        abort_unless($this->canAccessAdminPages($user), 403);
     }
 
     public function assertCanMutate(?User $user = null): void

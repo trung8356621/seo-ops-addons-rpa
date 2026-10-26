@@ -23,6 +23,11 @@ final class SocialAutomationServiceStatusPage extends Page
 
     protected static bool $shouldRegisterNavigation = false;
 
+    public static function shouldRegisterNavigation(): bool
+    {
+        return false;
+    }
+
     protected static string $view = 'social-automation::filament.pages.service-status';
 
     /**
@@ -39,7 +44,7 @@ final class SocialAutomationServiceStatusPage extends Page
 
     public static function canAccess(array $parameters = []): bool
     {
-        return app(SocialAutomationAccess::class)->canAccess();
+        return app(SocialAutomationAccess::class)->canAccessAdminPages();
     }
 
     public static function getNavigationLabel(): string
@@ -54,19 +59,19 @@ final class SocialAutomationServiceStatusPage extends Page
 
     public function mount(): void
     {
-        app(SocialAutomationAccess::class)->assertCanAccess();
+        app(SocialAutomationAccess::class)->assertCanAccessAdminPages();
     }
 
     /**
      * @return array<string, mixed>
      */
-    public function statusPayload(): array
+    public function status(): array
     {
         return app(SocialAutomationServiceHealth::class)->report();
     }
 
-    public function persistenceMode(): string
+    public function isServiceActive(): bool
     {
-        return (string) (app(SocialAutomationServiceResolver::class)->resolve()->persistence);
+        return app(SocialAutomationServiceResolver::class)->isActive();
     }
 }

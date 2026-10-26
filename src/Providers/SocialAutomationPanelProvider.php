@@ -49,7 +49,6 @@ final class SocialAutomationPanelProvider extends PanelProvider
                 'primary' => Color::Teal,
             ])
             ->maxContentWidth(MaxWidth::Full)
-            ->navigation(true)
             ->sidebarCollapsibleOnDesktop()
             ->pages([
                 SocialAutomationDashboardPage::class,
