@@ -12,7 +12,7 @@ final class SocialAutomationSchema
     public static function has(string $table): bool
     {
         try {
-            return Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable($table);
+            return (bool) @Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable($table);
         } catch (Throwable) {
             return false;
         }

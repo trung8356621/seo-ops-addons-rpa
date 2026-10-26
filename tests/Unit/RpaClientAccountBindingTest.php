@@ -63,4 +63,39 @@ final class RpaClientAccountBindingTest extends TestCase
         self::assertFalse($res['ok']);
         self::assertContains('session_forbidden_field:account_binding.c_user', $res['errors'] ?? []);
     }
+
+    public function test_generic_site_cookie_presence_method_allowed(): void
+    {
+        $agent = new \Omnichannel\Addons\SocialAutomation\Models\SaAgent();
+        $agent->id = 1;
+        $agent->agent_uuid = 'test-agent-uuid';
+
+        $payload = [
+            [
+                'browser_id' => 'b_generic_1',
+                'name' => 'General Website Profile',
+                'platform' => 'general',
+                'session_signal' => [
+                    'status' => 'present',
+                    'checked_at' => '2026-10-26T12:00:00Z',
+                    'method' => 'site_cookie_presence',
+                ],
+            ],
+            [
+                'browser_id' => 'b_fb_1',
+                'name' => 'Facebook Profile',
+                'platform' => 'facebook',
+                'session_signal' => [
+                    'status' => 'present',
+                    'checked_at' => '2026-10-26T12:00:00Z',
+                    'method' => 'facebook_c_user_cookie',
+                ],
+            ],
+        ];
+
+        $res = $this->service->syncClientBrowsers($agent, $payload, 'ins_123');
+        $errors = $res['errors'] ?? [];
+        self::assertContains('schema_unavailable', $errors);
+        self::assertFalse(in_array('session_forbidden_field:session_signal.method', $errors, true));
+    }
 }
