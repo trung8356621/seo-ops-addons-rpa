@@ -209,14 +209,30 @@
 
                     <div>
                         <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                            {{ __('social-automation::filament.accounts.field_email') }}
+                            {{ __('social-automation::filament.accounts.field_email') }} <span class="text-danger-600 dark:text-danger-400">*</span>
                         </label>
                         <input
                             wire:model="email"
                             type="email"
-                            placeholder="Email tài khoản (không bắt buộc)"
+                            required
+                            placeholder="Email tài khoản (bắt buộc)"
                             class="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:border-teal-500 focus:ring-teal-500"
                         />
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
+                            Site URL (WordPress / Tùy chỉnh)
+                        </label>
+                        <input
+                            wire:model="site_url"
+                            type="url"
+                            placeholder="https://example.com hoặc https://example.com/blog"
+                            class="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:border-teal-500 focus:ring-teal-500"
+                        />
+                        <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                            Cấu hình URL cho WordPress hoặc nền tảng tùy chỉnh. Hỗ trợ đường dẫn con (subdirectory).
+                        </p>
                     </div>
 
                     <div>
@@ -318,14 +334,30 @@
 
                     <div>
                         <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                            {{ __('social-automation::filament.accounts.field_email') }}
+                            {{ __('social-automation::filament.accounts.field_email') }} <span class="text-danger-600 dark:text-danger-400">*</span>
                         </label>
                         <input
                             wire:model="email"
                             type="email"
-                            placeholder="Email tài khoản (không bắt buộc)"
+                            required
+                            placeholder="Email tài khoản (bắt buộc)"
                             class="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:border-teal-500 focus:ring-teal-500"
                         />
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
+                            Site URL (WordPress / Tùy chỉnh)
+                        </label>
+                        <input
+                            wire:model="site_url"
+                            type="url"
+                            placeholder="https://example.com hoặc https://example.com/blog"
+                            class="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:border-teal-500 focus:ring-teal-500"
+                        />
+                        <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                            Cấu hình URL cho WordPress hoặc nền tảng tùy chỉnh. Hỗ trợ đường dẫn con (subdirectory).
+                        </p>
                     </div>
 
                     <div>

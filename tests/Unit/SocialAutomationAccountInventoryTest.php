@@ -92,6 +92,7 @@ final class SocialAutomationAccountInventoryTest extends TestCase
             'platform' => 'X',
             'account_name' => 'Twitter Main',
             'username' => 'twitter_main',
+            'email' => 'twitter@example.com',
             'password' => $rawPassword,
         ], 10);
 
@@ -116,6 +117,7 @@ final class SocialAutomationAccountInventoryTest extends TestCase
             'platform' => 'Threads',
             'account_name' => 'Threads Channel',
             'username' => 'channel_threads',
+            'email' => 'threads@channel.com',
             'password' => 'ConfidentialPassword999',
         ], 10);
 
@@ -156,6 +158,7 @@ final class SocialAutomationAccountInventoryTest extends TestCase
             'platform' => 'Facebook',
             'account_name' => 'Old Fanpage',
             'username' => 'old_page',
+            'email' => 'old_fanpage@facebook.com',
             'password' => $rawPassword,
         ], 10);
 
@@ -195,6 +198,7 @@ final class SocialAutomationAccountInventoryTest extends TestCase
         $account = $this->accountService->create([
             'platform' => 'Instagram',
             'account_name' => 'To Be Deleted',
+            'email' => 'tobe_deleted@instagram.com',
         ], 10);
 
         self::assertCount(1, $this->accountService->list());
@@ -213,6 +217,7 @@ final class SocialAutomationAccountInventoryTest extends TestCase
         $accAlpha = $this->accountService->create([
             'platform' => 'Facebook',
             'account_name' => 'Alpha Account',
+            'email' => 'alpha@facebook.com',
         ]);
 
         // Switch to ins_beta
@@ -331,5 +336,102 @@ final class SocialAutomationAccountInventoryTest extends TestCase
         self::assertStringNotContainsString('col_username', $bladeSrc);
         self::assertStringContainsString('col_last_interaction', $bladeSrc);
         self::assertStringContainsString('interaction_none', $bladeSrc);
+    }
+
+    public function test_email_is_strictly_required_on_create(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Email is required.');
+
+        $this->accountService->create([
+            'platform' => 'Facebook',
+            'name' => 'No Email Account',
+            'email' => '', // Empty email rejected
+        ]);
+    }
+
+    public function test_wordpress_account_supports_custom_site_url_with_subdirectory(): void
+    {
+        $account = $this->accountService->create([
+            'platform' => 'WordPress',
+            'name' => 'Tech Blog Vietnam',
+            'email' => 'author@techblog.vn',
+            'site_url' => 'https://example.com/tech-blog',
+            'password' => 'WpSecretPass#2026',
+        ]);
+
+        self::assertSame('https://example.com/tech-blog', $account->getSiteUrl());
+        self::assertSame('author@techblog.vn', $account->getDisplayEmail());
+        self::assertTrue($account->hasPassword());
+    }
+
+    public function test_list_bindable_accounts_includes_email_site_url_has_password_and_omits_password(): void
+    {
+        $this->accountService->create([
+            'platform' => 'facebook',
+            'name' => 'FB Seeding Account',
+            'email' => 'seeder@fb.com',
+            'password' => 'ConfidentialPassword',
+        ]);
+
+        $this->accountService->create([
+            'platform' => 'wordpress',
+            'name' => 'WP Subdir Site',
+            'email' => 'admin@subdir.com',
+            'site_url' => 'https://portal.domain.com/cms',
+            'password' => '', // Empty password
+        ]);
+
+        // Manually inject a legacy account missing email (must NOT be deleted or mutated)
+        $legacy = $this->repository->create([
+            'account_uuid' => (string) \Illuminate\Support\Str::uuid(),
+            'installation_id' => 'ins_alpha',
+            'platform' => 'facebook',
+            'name' => 'Legacy Account No Email',
+            'label' => 'Legacy Account No Email',
+            'email' => null,
+            'declared_email' => null,
+            'identity_source' => 'legacy',
+            'verified' => false,
+        ]);
+
+        $key = new \Omnichannel\Addons\SocialAutomation\Models\SaClientApiKey();
+        $key->id = 1;
+        $key->setAttribute('installation_id', 'ins_alpha');
+        $key->setAttribute('name', 'Test Key');
+
+        $controller = new \Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaClientApiController(
+            new \Omnichannel\Addons\SocialAutomation\Registry\AgentRegistryService(),
+            new \Omnichannel\Addons\SocialAutomation\Registry\SessionSyncService(new \Omnichannel\Addons\SocialAutomation\Domain\OnlineStateCalculator()),
+            $this->repository
+        );
+
+        $request = \Illuminate\Http\Request::create('/api/v1/social-automation/client/accounts', 'GET');
+        $request->attributes->set(\Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureRpaClientApiKey::REQUEST_CLIENT_KEY, $key);
+
+        $response = $controller->listBindableAccounts($request);
+        $data = $response->getData(true);
+
+        self::assertTrue($data['ok']);
+        self::assertCount(3, $data['accounts']);
+
+        $accountsMap = collect($data['accounts'])->keyBy('display_name');
+
+        // Check FB account
+        $fb = $accountsMap['FB Seeding Account'];
+        self::assertSame('seeder@fb.com', $fb['email']);
+        self::assertTrue($fb['has_password']);
+        self::assertArrayNotHasKey('password', $fb);
+        self::assertArrayNotHasKey('encrypted_password', $fb);
+
+        // Check WP account
+        $wp = $accountsMap['WP Subdir Site'];
+        self::assertSame('admin@subdir.com', $wp['email']);
+        self::assertSame('https://portal.domain.com/cms', $wp['site_url']);
+        self::assertFalse($wp['has_password']);
+
+        // Check Legacy account
+        $leg = $accountsMap['Legacy Account No Email'];
+        self::assertNull($leg['email'], 'Legacy account email is null');
     }
 }

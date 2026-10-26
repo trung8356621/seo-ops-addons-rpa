@@ -64,6 +64,13 @@ final class SaAccountService
             : (isset($data['declared_email']) && trim((string) $data['declared_email']) !== ''
                 ? trim((string) $data['declared_email'])
                 : null);
+        if ($email === null) {
+            throw new InvalidArgumentException('Email is required.');
+        }
+
+        $siteUrl = isset($data['site_url']) && trim((string) $data['site_url']) !== ''
+            ? trim((string) $data['site_url'])
+            : null;
 
         $rawPassword = isset($data['password']) && is_string($data['password']) && trim($data['password']) !== ''
             ? trim($data['password'])
@@ -85,6 +92,7 @@ final class SaAccountService
             'declared_username' => $username,
             'email' => $email,
             'declared_email' => $email,
+            'site_url' => $siteUrl,
             'encrypted_password' => $encryptedPassword,
             'note' => $note,
             'created_by' => $userId,
@@ -134,8 +142,17 @@ final class SaAccountService
         if (array_key_exists('email', $data) || array_key_exists('declared_email', $data)) {
             $e = $data['email'] ?? $data['declared_email'] ?? null;
             $email = $e !== null && trim((string) $e) !== '' ? trim((string) $e) : null;
+            if ($email === null) {
+                throw new InvalidArgumentException('Email is required.');
+            }
             $attributes['email'] = $email;
             $attributes['declared_email'] = $email;
+        }
+
+        if (array_key_exists('site_url', $data)) {
+            $s = $data['site_url'];
+            $siteUrl = $s !== null && trim((string) $s) !== '' ? trim((string) $s) : null;
+            $attributes['site_url'] = $siteUrl;
         }
 
         if (array_key_exists('note', $data)) {

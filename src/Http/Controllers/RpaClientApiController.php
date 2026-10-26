@@ -7,6 +7,7 @@ namespace Omnichannel\Addons\SocialAutomation\Http\Controllers;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Omnichannel\Addons\SocialAutomation\Contracts\SaAccountRepositoryContract;
 use Omnichannel\Addons\SocialAutomation\Domain\AgentKindPolicy;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureRpaClientApiKey;
 use Omnichannel\Addons\SocialAutomation\Models\SaAccount;
@@ -21,6 +22,7 @@ final class RpaClientApiController extends Controller
     public function __construct(
         private readonly AgentRegistryService $agents,
         private readonly SessionSyncService $sessionSync,
+        private readonly ?SaAccountRepositoryContract $accountsRepo = null,
     ) {}
 
     /**
@@ -161,6 +163,45 @@ final class RpaClientApiController extends Controller
 
         $installationId = trim((string) $clientKey->getAttribute('installation_id'));
 
+        $accountsRepo = $this->accountsRepo
+            ?? (function_exists('app') && app()->bound(SaAccountRepositoryContract::class)
+                ? app(SaAccountRepositoryContract::class)
+                : null);
+
+        if ($accountsRepo instanceof SaAccountRepositoryContract) {
+            $accountCollection = $accountsRepo->list($installationId);
+            if ($request->has('platform')) {
+                $platform = strtolower(trim((string) $request->input('platform')));
+                if ($platform !== '') {
+                    $accountCollection = $accountCollection->filter(
+                        fn (SaAccount $a) => strtolower((string) $a->platform) === $platform
+                    );
+                }
+            }
+
+            $accounts = $accountCollection->map(static function (SaAccount $a): array {
+                $email = $a->email ?? $a->declared_email;
+                $emailStr = is_string($email) && trim($email) !== '' ? trim($email) : null;
+
+                return [
+                    'account_id' => (string) ($a->account_uuid ?? $a->id),
+                    'platform' => strtolower((string) $a->platform),
+                    'display_name' => (string) ($a->name ?? $a->label ?? $a->username ?? 'Account'),
+                    'username' => $a->username ?? $a->declared_username,
+                    'email' => $emailStr,
+                    'site_url' => $a->getSiteUrl(),
+                    'has_password' => $a->hasPassword(),
+                    'identity_label' => $a->label,
+                    'verified' => (bool) $a->verified,
+                ];
+            })->values()->all();
+
+            return new JsonResponse([
+                'ok' => true,
+                'accounts' => $accounts,
+            ]);
+        }
+
         $query = SaAccount::query();
         if ($installationId !== '') {
             $query->where('installation_id', $installationId);
@@ -174,11 +215,17 @@ final class RpaClientApiController extends Controller
         }
 
         $accounts = $query->orderByDesc('updated_at')->get()->map(static function (SaAccount $a): array {
+            $email = $a->email ?? $a->declared_email;
+            $emailStr = is_string($email) && trim($email) !== '' ? trim($email) : null;
+
             return [
                 'account_id' => (string) ($a->account_uuid ?? $a->id),
                 'platform' => strtolower((string) $a->platform),
                 'display_name' => (string) ($a->name ?? $a->label ?? $a->username ?? 'Account'),
                 'username' => $a->username ?? $a->declared_username,
+                'email' => $emailStr,
+                'site_url' => $a->site_url ?? $a->domain,
+                'has_password' => $a->hasPassword(),
                 'identity_label' => $a->label,
                 'verified' => (bool) $a->verified,
             ];

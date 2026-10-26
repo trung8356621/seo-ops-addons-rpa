@@ -40,6 +40,8 @@ final class SocialAutomationAccountsPage extends Page
 
     public string $email = '';
 
+    public string $site_url = '';
+
     public string $password = '';
 
     public string $note = '';
@@ -109,12 +111,23 @@ final class SocialAutomationAccountsPage extends Page
             return;
         }
 
+        $email = trim($this->email);
+        if ($email === '') {
+            Notification::make()
+                ->title('Email là bắt buộc.')
+                ->danger()
+                ->send();
+
+            return;
+        }
+
         $userId = Auth::id() ? (int) Auth::id() : null;
 
         app(SaAccountService::class)->create([
             'platform' => $this->platform,
             'name' => $name,
-            'email' => $this->email,
+            'email' => $email,
+            'site_url' => trim($this->site_url) !== '' ? trim($this->site_url) : null,
             'password' => $this->password,
             'note' => $this->note,
         ], $userId);
@@ -143,6 +156,7 @@ final class SocialAutomationAccountsPage extends Page
         $this->platform = (string) $account->getAttribute('platform');
         $this->name = $account->getAccountName();
         $this->email = (string) ($account->getDisplayEmail() ?? '');
+        $this->site_url = (string) ($account->getSiteUrl() ?? '');
         $this->password = ''; // Always empty by default
         $this->note = (string) ($account->getAttribute('note') ?? '');
 
@@ -173,10 +187,21 @@ final class SocialAutomationAccountsPage extends Page
             return;
         }
 
+        $email = trim($this->email);
+        if ($email === '') {
+            Notification::make()
+                ->title('Email là bắt buộc.')
+                ->danger()
+                ->send();
+
+            return;
+        }
+
         $payload = [
             'platform' => $this->platform,
             'name' => $name,
-            'email' => $this->email,
+            'email' => $email,
+            'site_url' => trim($this->site_url) !== '' ? trim($this->site_url) : null,
             'note' => $this->note,
         ];
 
@@ -224,6 +249,7 @@ final class SocialAutomationAccountsPage extends Page
         $this->platform = 'Facebook';
         $this->name = '';
         $this->email = '';
+        $this->site_url = '';
         $this->password = '';
         $this->note = '';
     }

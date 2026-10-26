@@ -22,6 +22,7 @@ use Omnichannel\Addons\SocialAutomation\Models\Concerns\UsesSocialAutomationConn
  * @property string|null $declared_username
  * @property string|null $email
  * @property string|null $declared_email
+ * @property string|null $site_url
  * @property string|null $encrypted_password
  * @property string|null $note
  * @property int|null $created_by
@@ -52,6 +53,7 @@ final class SaAccount extends Model
         'declared_username',
         'email',
         'declared_email',
+        'site_url',
         'encrypted_password',
         'note',
         'created_by',
@@ -119,6 +121,21 @@ final class SaAccount extends Model
     public function getDisplayEmail(): ?string
     {
         return $this->getAttribute('email') ?? $this->getAttribute('declared_email');
+    }
+
+    public function getSiteUrl(): ?string
+    {
+        $siteUrl = $this->getAttribute('site_url');
+        if (is_string($siteUrl) && trim($siteUrl) !== '') {
+            return trim($siteUrl);
+        }
+
+        $domain = $this->getAttribute('domain');
+        if (is_string($domain) && trim($domain) !== '') {
+            return trim($domain);
+        }
+
+        return null;
     }
 
     public function getDecryptedPassword(): ?string
