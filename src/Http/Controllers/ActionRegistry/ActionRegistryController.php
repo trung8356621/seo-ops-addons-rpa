@@ -33,7 +33,9 @@ final class ActionRegistryController
                 'id' => (int) $s->id,
                 'key' => $s->key,
                 'name' => $s->name,
-                'base_url' => $s->base_url,
+                'base_url' => $s->base_url ?? '',
+                'base_url_mode' => $s->base_url_mode ?? SaSite::MODE_FIXED,
+                'test_base_url' => $s->test_base_url,
                 'description' => $s->description,
                 'paths_count' => $s->paths->count(),
             ];
@@ -136,14 +138,25 @@ final class ActionRegistryController
 
         $name = trim((string) $request->input('name', ''));
         $rawKey = strtolower(trim((string) $request->input('key', '')));
-        $baseUrl = SaSite::normalizeBaseUrl((string) $request->input('base_url', ''));
-        $description = trim((string) $request->input('description', ''));
-
-        if ($name === '' || $baseUrl === '') {
-            return response()->json(['ok' => false, 'error' => 'name_and_base_url_required'], 422);
+        $mode = strtolower(trim((string) $request->input('base_url_mode', SaSite::MODE_FIXED)));
+        if ($mode !== SaSite::MODE_DYNAMIC) {
+            $mode = SaSite::MODE_FIXED;
         }
 
-        $key = $rawKey !== '' ? preg_replace('/[^a-z0-9_-]/', '', $rawKey) : preg_replace('/[^a-z0-9_-]/', '', strtolower($name));
+        $rawBaseUrl = (string) $request->input('base_url', '');
+        $baseUrl = SaSite::normalizeBaseUrl($rawBaseUrl);
+        $testBaseUrl = SaSite::normalizeBaseUrl((string) $request->input('test_base_url', ''));
+        $description = trim((string) $request->input('description', ''));
+
+        if ($name === '') {
+            return response()->json(['ok' => false, 'error' => 'Tên Site không được để trống.'], 422);
+        }
+
+        if ($mode === SaSite::MODE_FIXED && $baseUrl === '') {
+            return response()->json(['ok' => false, 'error' => 'Base URL là bắt buộc với chế độ Fixed.'], 422);
+        }
+
+        $key = $rawKey !== '' ? preg_replace('/[^a-z0-9_-]/', '', $rawKey) : preg_replace('/[^a-z0-9_-]/', '', strtolower(str_replace(' ', '_', $name)));
         if ($key === '') {
             $key = 'site_'.bin2hex(random_bytes(3));
         }
@@ -155,7 +168,9 @@ final class ActionRegistryController
         $site = SaSite::query()->create([
             'key' => $key,
             'name' => $name,
-            'base_url' => $baseUrl,
+            'base_url_mode' => $mode,
+            'base_url' => $mode === SaSite::MODE_FIXED ? $baseUrl : ($baseUrl !== '' ? $baseUrl : null),
+            'test_base_url' => $testBaseUrl !== '' ? $testBaseUrl : null,
             'description' => $description !== '' ? $description : null,
         ]);
 
@@ -172,15 +187,31 @@ final class ActionRegistryController
         }
 
         $name = trim((string) $request->input('name', ''));
-        $baseUrl = trim((string) $request->input('base_url', ''));
+        $rawBaseUrl = (string) $request->input('base_url', '');
         $description = trim((string) $request->input('description', ''));
 
         if ($name !== '') {
             $site->name = $name;
         }
-        if ($baseUrl !== '') {
-            $site->base_url = SaSite::normalizeBaseUrl($baseUrl);
+
+        if ($request->has('base_url_mode')) {
+            $mode = strtolower(trim((string) $request->input('base_url_mode', SaSite::MODE_FIXED)));
+            $site->base_url_mode = $mode === SaSite::MODE_DYNAMIC ? SaSite::MODE_DYNAMIC : SaSite::MODE_FIXED;
         }
+
+        if ($request->has('base_url')) {
+            $site->base_url = $rawBaseUrl !== '' ? SaSite::normalizeBaseUrl($rawBaseUrl) : null;
+        }
+
+        if ($request->has('test_base_url')) {
+            $rawTest = (string) $request->input('test_base_url', '');
+            $site->test_base_url = $rawTest !== '' ? SaSite::normalizeBaseUrl($rawTest) : null;
+        }
+
+        if ($site->isFixed() && empty($site->base_url)) {
+            return response()->json(['ok' => false, 'error' => 'Base URL là bắt buộc với chế độ Fixed.'], 422);
+        }
+
         if ($request->has('description')) {
             $site->description = $description !== '' ? $description : null;
         }
@@ -347,7 +378,7 @@ final class ActionRegistryController
                     'action_tag_id' => $tag->id,
                     'action_tag_key' => $tag->tag_key,
                     'site_key' => $site->key,
-                    'site_base_url' => $site->base_url,
+                    'site_base_url' => $site->isDynamic() ? null : $site->base_url,
                     'path_key' => $path->key,
                     'url_pattern' => $path->url_pattern,
                     'path_inputs' => $path->path_inputs,
@@ -442,7 +473,7 @@ final class ActionRegistryController
                         'action_tag_id' => $tag->id,
                         'action_tag_key' => $tag->tag_key,
                         'site_key' => $site?->key ?? $tag->platform,
-                        'site_base_url' => $site?->base_url ?? 'https://www.facebook.com',
+                        'site_base_url' => $site?->isDynamic() ? null : ($site?->base_url ?? 'https://www.facebook.com'),
                         'path_key' => $path?->key ?? $tag->target,
                         'url_pattern' => $path?->url_pattern ?? '/',
                         'path_inputs' => $path?->path_inputs ?? [],
@@ -491,7 +522,7 @@ final class ActionRegistryController
             'action_tag_id' => $tag->id,
             'action_tag_key' => $tag->tag_key,
             'site_key' => $tag->site_key ?: $tag->platform,
-            'site_base_url' => $site?->base_url,
+            'site_base_url' => $site?->isDynamic() ? null : $site?->base_url,
             'path_key' => $tag->path_key ?: $tag->target,
             'url_pattern' => $path?->url_pattern,
             'path_inputs' => $path?->path_inputs,

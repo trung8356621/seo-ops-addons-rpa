@@ -102,7 +102,9 @@ export const App: React.FC<AppProps> = ({ initialData, apiBase, csrfToken }) => 
   const handleSaveSite = async (siteData: {
     id?: number;
     name: string;
-    base_url: string;
+    base_url?: string;
+    base_url_mode?: 'fixed' | 'dynamic';
+    test_base_url?: string;
     description?: string;
   }) => {
     const isEdit = typeof siteData.id === 'number';

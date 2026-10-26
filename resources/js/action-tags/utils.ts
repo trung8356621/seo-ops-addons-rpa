@@ -15,6 +15,7 @@ export function resolveUrl(baseUrl: string, pattern: string, inputValues: Record
   url: string;
   missing: string[];
   valid: boolean;
+  error?: string | null;
 } {
   const normBase = (baseUrl || '').trim().replace(/\/+$/, '');
   let normPattern = (pattern || '').trim();
@@ -25,6 +26,10 @@ export function resolveUrl(baseUrl: string, pattern: string, inputValues: Record
   const missing: string[] = [];
   let resolved = normPattern;
 
+  if (!normBase) {
+    missing.push('base_url');
+  }
+
   for (const input of inputs) {
     const val = inputValues[input.key]?.trim() ?? '';
     if (!val) {
@@ -34,10 +39,22 @@ export function resolveUrl(baseUrl: string, pattern: string, inputValues: Record
     }
   }
 
-  const fullUrl = normBase + (resolved === '/' ? '' : resolved);
+  const fullUrl = normBase ? normBase + (resolved === '/' ? '' : resolved) : '';
+  const isValid = missing.length === 0;
+
+  let error: string | null = null;
+  if (!isValid) {
+    if (missing.includes('base_url')) {
+      error = 'Base URL không được để trống.';
+    } else {
+      error = 'Chưa điền đủ tham số: ' + missing.join(', ');
+    }
+  }
+
   return {
-    url: fullUrl || normBase || '/',
+    url: fullUrl,
     missing,
-    valid: missing.length === 0,
+    valid: isValid,
+    error,
   };
 }

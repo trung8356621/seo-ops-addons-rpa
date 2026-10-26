@@ -73,7 +73,9 @@ final class SocialAutomationActionTagsPage extends Page
                 'id' => (int) $s->id,
                 'key' => $s->key,
                 'name' => $s->name,
-                'base_url' => $s->base_url,
+                'base_url' => $s->base_url ?? '',
+                'base_url_mode' => $s->base_url_mode ?? SaSite::MODE_FIXED,
+                'test_base_url' => $s->test_base_url,
                 'description' => $s->description,
                 'paths_count' => $s->paths->count(),
             ];

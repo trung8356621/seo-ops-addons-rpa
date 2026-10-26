@@ -13,11 +13,28 @@ use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
  */
 class SaSite extends Model
 {
+    public const MODE_FIXED = 'fixed';
+    public const MODE_DYNAMIC = 'dynamic';
+
     protected $connection = SocialAutomationServiceConfig::CONNECTION;
 
     protected $table = 'sa_sites';
 
     protected $guarded = [];
+
+    protected $attributes = [
+        'base_url_mode' => self::MODE_FIXED,
+    ];
+
+    public function isDynamic(): bool
+    {
+        return ($this->base_url_mode ?? self::MODE_FIXED) === self::MODE_DYNAMIC;
+    }
+
+    public function isFixed(): bool
+    {
+        return ! $this->isDynamic();
+    }
 
     /**
      * @return HasMany<SaPath>

@@ -4,11 +4,15 @@ export type PathInput = {
   required: boolean;
 };
 
+export type BaseUrlMode = 'fixed' | 'dynamic';
+
 export type Site = {
   id: number;
   key: string;
   name: string;
   base_url: string;
+  base_url_mode?: BaseUrlMode;
+  test_base_url?: string | null;
   description?: string | null;
   paths_count?: number;
 };

@@ -155,4 +155,114 @@ final class SitePathActionRegistryTest extends TestCase
         self::assertNotContains('comment_text', $inputKeys);
         self::assertNotContains('images', $inputKeys);
     }
+
+    public function test_dynamic_site_url_resolution_with_subdirectory(): void
+    {
+        $site = [
+            'name' => 'WordPress',
+            'base_url_mode' => SaSite::MODE_DYNAMIC,
+            'base_url' => null,
+            'test_base_url' => 'https://example.test/blog/',
+        ];
+
+        // 1. Preview / Test mode resolves using test_base_url
+        $previewRes = PathPatternResolver::resolveSiteUrl(
+            $site,
+            '/wp-admin/post-new.php',
+            [],
+            null,
+            true // isTestExecution
+        );
+
+        self::assertTrue($previewRes['valid']);
+        self::assertSame('https://example.test/blog/wp-admin/post-new.php', $previewRes['url']);
+        self::assertSame([], $previewRes['missing']);
+
+        // 2. Deep subdirectory test
+        $deepRes = PathPatternResolver::resolveSiteUrl(
+            $site,
+            '/wp-admin/edit.php',
+            [],
+            'https://my-cms.local:8080/sites/demo-client/',
+            true
+        );
+        self::assertTrue($deepRes['valid']);
+        self::assertSame('https://my-cms.local:8080/sites/demo-client/wp-admin/edit.php', $deepRes['url']);
+
+        // 3. Root domain dynamic site
+        $rootRes = PathPatternResolver::resolveSiteUrl(
+            $site,
+            '/wp-admin/post-new.php',
+            [],
+            'https://standalone.org',
+            false // runtime
+        );
+        self::assertTrue($rootRes['valid']);
+        self::assertSame('https://standalone.org/wp-admin/post-new.php', $rootRes['url']);
+    }
+
+    public function test_dynamic_site_runtime_fails_when_base_url_missing_without_fallback(): void
+    {
+        $site = [
+            'name' => 'WordPress',
+            'base_url_mode' => SaSite::MODE_DYNAMIC,
+            'base_url' => null,
+            'test_base_url' => 'https://example.test/blog/',
+        ];
+
+        // In production runtime (isTestExecution = false), missing runtime base URL must NOT fallback to test_base_url!
+        $runtimeRes = PathPatternResolver::resolveSiteUrl(
+            $site,
+            '/wp-admin/post-new.php',
+            [],
+            null, // runtime base URL missing
+            false // runtime mode
+        );
+
+        self::assertFalse($runtimeRes['valid']);
+        self::assertContains('dynamic_base_url', $runtimeRes['missing']);
+        self::assertStringContainsString('Không được dùng Test Base URL trong production', $runtimeRes['error'] ?? '');
+        self::assertSame('', $runtimeRes['url']);
+    }
+
+    public function test_fixed_site_url_resolution(): void
+    {
+        $site = [
+            'name' => 'Reddit',
+            'base_url_mode' => SaSite::MODE_FIXED,
+            'base_url' => 'https://www.reddit.com',
+            'test_base_url' => null,
+        ];
+
+        $res = PathPatternResolver::resolveSiteUrl(
+            $site,
+            '/r/{subreddit}',
+            ['subreddit' => 'technology']
+        );
+
+        self::assertTrue($res['valid']);
+        self::assertSame('https://www.reddit.com/r/technology', $res['url']);
+    }
+
+    public function test_sa_site_dynamic_mode_helpers(): void
+    {
+        $fixedSite = new SaSite([
+            'key' => 'reddit',
+            'name' => 'Reddit',
+            'base_url' => 'https://www.reddit.com',
+            'base_url_mode' => SaSite::MODE_FIXED,
+        ]);
+        self::assertTrue($fixedSite->isFixed());
+        self::assertFalse($fixedSite->isDynamic());
+
+        $dynamicSite = new SaSite([
+            'key' => 'wordpress',
+            'name' => 'WordPress',
+            'base_url' => null,
+            'base_url_mode' => SaSite::MODE_DYNAMIC,
+            'test_base_url' => 'https://example.test/blog/',
+        ]);
+        self::assertTrue($dynamicSite->isDynamic());
+        self::assertFalse($dynamicSite->isFixed());
+    }
 }
