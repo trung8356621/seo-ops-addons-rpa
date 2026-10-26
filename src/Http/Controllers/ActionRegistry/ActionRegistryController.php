@@ -276,7 +276,6 @@ final class ActionRegistryController
         $siteId = (int) $request->input('site_id');
         $pathId = (int) $request->input('path_id');
         $actionKey = strtolower(trim((string) $request->input('action_key', '')));
-        $createRequest = (bool) $request->input('create_request', true);
 
         // Security check: like/share not permitted in V1
         if (in_array($actionKey, ['like', 'share'], true)) {
@@ -302,46 +301,167 @@ final class ActionRegistryController
         }
 
         $displayName = "{$site->name} {$path->name} {$action->name}";
+        $conn = SocialAutomationServiceConfig::CONNECTION;
 
-        $tag = SaActionTag::query()->create([
-            'tag_key' => $tagKey,
-            'site_id' => $site->id,
-            'site_key' => $site->key,
-            'path_id' => $path->id,
-            'path_key' => $path->key,
-            'action_id' => $action->id,
-            'action_key' => $action->key,
-            'platform' => $site->key,
-            'target' => $path->key,
-            'action' => $action->key,
-            'name' => $displayName,
-            'description' => "Thao tác {$action->name} tại {$site->name} {$path->name}",
-        ]);
+        try {
+            $result = DB::connection($conn)->transaction(function () use (
+                $tagKey,
+                $site,
+                $path,
+                $action,
+                $displayName
+            ) {
+                // Double check uniqueness inside transaction to prevent race conditions
+                if (SaActionTag::query()->where('tag_key', $tagKey)->exists()) {
+                    throw new \RuntimeException("Action Tag [{$tagKey}] đã tồn tại.");
+                }
 
-        $createdRequest = null;
-        if ($createRequest) {
-            $userId = Auth::id();
-            $createdRequest = SaScriptRequest::query()->create([
-                'request_id' => 'req_'.bin2hex(random_bytes(6)),
-                'action_tag_id' => $tag->id,
-                'action_tag_key' => $tag->tag_key,
-                'site_key' => $site->key,
-                'site_base_url' => $site->base_url,
-                'path_key' => $path->key,
-                'url_pattern' => $path->url_pattern,
-                'path_inputs' => $path->path_inputs,
-                'action_key' => $action->key,
-                'request_type' => SaScriptRequest::TYPE_CREATE,
-                'status' => SaScriptRequest::STATUS_PENDING,
-                'created_by_user_id' => is_numeric($userId) ? (int) $userId : null,
+                $tag = SaActionTag::query()->create([
+                    'tag_key' => $tagKey,
+                    'site_id' => $site->id,
+                    'site_key' => $site->key,
+                    'path_id' => $path->id,
+                    'path_key' => $path->key,
+                    'action_id' => $action->id,
+                    'action_key' => $action->key,
+                    'platform' => $site->key,
+                    'target' => $path->key,
+                    'action' => $action->key,
+                    'name' => $displayName,
+                    'description' => "Thao tác {$action->name} tại {$site->name} {$path->name}",
+                ]);
+
+                // Atomically create Script Request: check if active/pending request exists for idempotency
+                $existingRequest = SaScriptRequest::query()
+                    ->where('action_tag_key', $tag->tag_key)
+                    ->whereIn('status', [
+                        SaScriptRequest::STATUS_PENDING,
+                        SaScriptRequest::STATUS_IN_PROGRESS,
+                        SaScriptRequest::STATUS_COMPLETED,
+                    ])
+                    ->first();
+
+                $userId = Auth::id();
+                $createdRequest = $existingRequest ?: SaScriptRequest::query()->create([
+                    'request_id' => 'req_'.bin2hex(random_bytes(6)),
+                    'action_tag_id' => $tag->id,
+                    'action_tag_key' => $tag->tag_key,
+                    'site_key' => $site->key,
+                    'site_base_url' => $site->base_url,
+                    'path_key' => $path->key,
+                    'url_pattern' => $path->url_pattern,
+                    'path_inputs' => $path->path_inputs,
+                    'action_key' => $action->key,
+                    'request_type' => SaScriptRequest::TYPE_CREATE,
+                    'status' => SaScriptRequest::STATUS_PENDING,
+                    'created_by_user_id' => is_numeric($userId) ? (int) $userId : null,
+                ]);
+
+                return ['tag' => $tag, 'request' => $createdRequest];
+            });
+
+            return response()->json([
+                'ok' => true,
+                'tag' => $result['tag'],
+                'request' => $result['request'],
             ]);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'ok' => false,
+                'error' => $e->getMessage() ?: 'Không thể tạo Action Tag và Script Request.',
+            ], 422);
+        }
+    }
+
+    public function destroyTag(int $id): JsonResponse
+    {
+        app(SocialAutomationAccess::class)->assertCanMutate();
+
+        $tag = SaActionTag::query()->find($id);
+        if (! $tag) {
+            return response()->json(['ok' => false, 'error' => 'tag_not_found'], 404);
         }
 
-        return response()->json([
-            'ok' => true,
-            'tag' => $tag,
-            'request' => $createdRequest,
-        ]);
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+        if (Schema::connection($conn)->hasTable('sa_action_tag_scripts')) {
+            $linkedCount = SaActionTagScript::query()->where('action_tag_id', $tag->id)->count();
+            if ($linkedCount > 0) {
+                return response()->json(['ok' => false, 'error' => 'Không thể xóa Action Tag đã có Script liên kết.'], 422);
+            }
+        }
+
+        DB::connection($conn)->transaction(function () use ($tag) {
+            SaScriptRequest::query()->where('action_tag_id', $tag->id)->delete();
+            $tag->delete();
+        });
+
+        return response()->json(['ok' => true]);
+    }
+
+    /**
+     * Proposes/executes an idempotent backfill for existing Action Tags that lack any Script Request.
+     * Safe for inspection; never executed automatically on production.
+     *
+     * @return array{scanned: int, eligible: int, created: int, dry_run: bool, tags: list<string>}
+     */
+    public static function backfillMissingRequests(bool $dryRun = true): array
+    {
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+        if (! Schema::connection($conn)->hasTable('sa_action_tags') || ! Schema::connection($conn)->hasTable('sa_script_requests')) {
+            return ['scanned' => 0, 'eligible' => 0, 'created' => 0, 'dry_run' => $dryRun, 'tags' => []];
+        }
+
+        $allTags = SaActionTag::query()->with(['site', 'path'])->get();
+        $scanned = 0;
+        $eligible = 0;
+        $created = 0;
+        $tagKeys = [];
+
+        foreach ($allTags as $tag) {
+            $scanned++;
+            $hasRequest = SaScriptRequest::query()
+                ->where('action_tag_id', $tag->id)
+                ->orWhere('action_tag_key', $tag->tag_key)
+                ->exists();
+
+            if ($hasRequest) {
+                continue;
+            }
+
+            $eligible++;
+            $tagKeys[] = $tag->tag_key;
+
+            if (! $dryRun) {
+                DB::connection($conn)->transaction(function () use ($tag, &$created) {
+                    $site = $tag->site;
+                    $path = $tag->path;
+                    $actionKey = $tag->action_key ?: $tag->action;
+
+                    SaScriptRequest::query()->create([
+                        'request_id' => 'req_'.bin2hex(random_bytes(6)),
+                        'action_tag_id' => $tag->id,
+                        'action_tag_key' => $tag->tag_key,
+                        'site_key' => $site?->key ?? $tag->platform,
+                        'site_base_url' => $site?->base_url ?? 'https://www.facebook.com',
+                        'path_key' => $path?->key ?? $tag->target,
+                        'url_pattern' => $path?->url_pattern ?? '/',
+                        'path_inputs' => $path?->path_inputs ?? [],
+                        'action_key' => $actionKey,
+                        'request_type' => SaScriptRequest::TYPE_CREATE,
+                        'status' => SaScriptRequest::STATUS_PENDING,
+                    ]);
+                    $created++;
+                });
+            }
+        }
+
+        return [
+            'scanned' => $scanned,
+            'eligible' => $eligible,
+            'created' => $created,
+            'dry_run' => $dryRun,
+            'tags' => $tagKeys,
+        ];
     }
 
     public function createRequest(Request $request, int $tagId): JsonResponse

@@ -1,15 +1,14 @@
 import React, { useState, useMemo } from 'react';
-import { Site, PathItem, ActionItem, ActionTagItem, ScriptRequestItem } from './types';
+import { Site, PathItem, ActionItem, ActionTagItem } from './types';
 
 interface ActionTagsScreenProps {
   sites: Site[];
   paths: PathItem[];
   actions: ActionItem[];
   tags: ActionTagItem[];
-  requests: ScriptRequestItem[];
   onOpenSitesPaths: () => void;
-  onCreateTag: (data: { site_id: number; path_id: number; action_key: string; create_request: boolean }) => Promise<void>;
-  onCreateRequest: (tagId: number, type: 'create' | 'fix', reason?: string) => Promise<void>;
+  onCreateTag: (data: { site_id: number; path_id: number; action_key: string }) => Promise<void>;
+  onDeleteTag: (tagId: number, tagKey: string) => Promise<void>;
 }
 
 export const ActionTagsScreen: React.FC<ActionTagsScreenProps> = ({
@@ -17,24 +16,22 @@ export const ActionTagsScreen: React.FC<ActionTagsScreenProps> = ({
   paths,
   actions,
   tags,
-  requests,
   onOpenSitesPaths,
   onCreateTag,
-  onCreateRequest,
+  onDeleteTag,
 }) => {
   const [search, setSearch] = useState('');
   const [siteFilter, setSiteFilter] = useState('all');
   const [pathFilter, setPathFilter] = useState('all');
   const [actionFilter, setActionFilter] = useState('all');
-  const [statusFilter, setStatusFilter] = useState('all');
 
   // Default standard actions fallback if table empty
   const displayActions = useMemo(() => {
     if (actions.length > 0) return actions;
     return [
-      { key: 'post', name: 'Post' },
-      { key: 'comment', name: 'Comment' },
-      { key: 'collect', name: 'Collect' },
+      { id: 1, key: 'post', name: 'Post' },
+      { id: 2, key: 'comment', name: 'Comment' },
+      { id: 3, key: 'collect', name: 'Collect' },
     ];
   }, [actions]);
 
@@ -43,14 +40,11 @@ export const ActionTagsScreen: React.FC<ActionTagsScreenProps> = ({
   const [selectedSiteId, setSelectedSiteId] = useState<number | ''>(sites[0]?.id ?? '');
   const [selectedPathId, setSelectedPathId] = useState<number | ''>('');
   const [selectedActionKey, setSelectedActionKey] = useState<string>('post');
-  const [createScriptRequest, setCreateScriptRequest] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [drawerError, setDrawerError] = useState('');
 
-  // Request modal state
-  const [activeTagForRequest, setActiveTagForRequest] = useState<ActionTagItem | null>(null);
-  const [requestType, setRequestType] = useState<'create' | 'fix'>('create');
-  const [fixReason, setFixReason] = useState('');
+  // Copy feedback state
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   // Available paths for selected site in drawer
   const drawerSitePaths = useMemo(() => {
@@ -86,14 +80,13 @@ export const ActionTagsScreen: React.FC<ActionTagsScreenProps> = ({
   }, [paths, sites, siteFilter]);
 
   // Check if any filter is active
-  const hasActiveFilters = search !== '' || siteFilter !== 'all' || pathFilter !== 'all' || actionFilter !== 'all' || statusFilter !== 'all';
+  const hasActiveFilters = search !== '' || siteFilter !== 'all' || pathFilter !== 'all' || actionFilter !== 'all';
 
   const clearAllFilters = () => {
     setSearch('');
     setSiteFilter('all');
     setPathFilter('all');
     setActionFilter('all');
-    setStatusFilter('all');
   };
 
   // Filtered tags list
@@ -111,14 +104,9 @@ export const ActionTagsScreen: React.FC<ActionTagsScreenProps> = ({
       if (siteFilter !== 'all' && t.site_key !== siteFilter) return false;
       if (pathFilter !== 'all' && t.path_key !== pathFilter) return false;
       if (actionFilter !== 'all' && t.action_key !== actionFilter) return false;
-      if (statusFilter !== 'all') {
-        const isReady = t.scripts_count > 0;
-        if (statusFilter === 'ready' && !isReady) return false;
-        if (statusFilter === 'pending' && isReady) return false;
-      }
       return true;
     });
-  }, [tags, search, siteFilter, pathFilter, actionFilter, statusFilter]);
+  }, [tags, search, siteFilter, pathFilter, actionFilter]);
 
   const handleOpenDrawer = () => {
     if (!selectedSiteId && sites.length > 0) {
@@ -140,7 +128,6 @@ export const ActionTagsScreen: React.FC<ActionTagsScreenProps> = ({
         site_id: Number(selectedSiteId),
         path_id: Number(selectedPathId),
         action_key: selectedActionKey,
-        create_request: createScriptRequest,
       });
       setIsDrawerOpen(false);
     } catch (err: any) {
@@ -150,13 +137,21 @@ export const ActionTagsScreen: React.FC<ActionTagsScreenProps> = ({
     }
   };
 
+  const handleCopyTagKey = (key: string) => {
+    navigator.clipboard.writeText(key);
+    setCopiedKey(key);
+    setTimeout(() => {
+      setCopiedKey(null);
+    }, 2000);
+  };
+
   return (
     <div className="w-full flex flex-col gap-5 text-gray-900 font-sans">
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-1">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-gray-900">Action Tags</h1>
-          <p className="text-sm text-gray-500 mt-0.5">Danh sách Action Tags và Script Requests</p>
+          <p className="text-sm text-gray-500 mt-0.5">Danh sách Action Tags (liên kết Site, Path và Action)</p>
         </div>
         <div className="flex items-center gap-2.5">
           <button
@@ -178,7 +173,7 @@ export const ActionTagsScreen: React.FC<ActionTagsScreenProps> = ({
 
       {/* Filter Toolbar */}
       <div className="flex flex-wrap items-center gap-2.5 p-2.5 bg-white rounded-xl border border-gray-200/90 shadow-xs">
-        {/* Search input (flexible width) */}
+        {/* Search input */}
         <div className="relative flex-1 min-w-[200px]">
           <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -233,22 +228,9 @@ export const ActionTagsScreen: React.FC<ActionTagsScreenProps> = ({
             className="w-full h-9 px-3 text-sm border border-gray-200 rounded-lg bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 cursor-pointer"
           >
             <option value="all">Action: All</option>
-            {actions.map((a) => (
+            {displayActions.map((a) => (
               <option key={a.id} value={a.key}>{a.name}</option>
             ))}
-          </select>
-        </div>
-
-        {/* Status dropdown */}
-        <div className="w-auto min-w-[120px]">
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="w-full h-9 px-3 text-sm border border-gray-200 rounded-lg bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 cursor-pointer"
-          >
-            <option value="all">Status: All</option>
-            <option value="ready">Ready (has script)</option>
-            <option value="pending">Pending (no script)</option>
           </select>
         </div>
 
@@ -274,8 +256,6 @@ export const ActionTagsScreen: React.FC<ActionTagsScreenProps> = ({
                 <th className="py-2.5 px-4 font-semibold">Path</th>
                 <th className="py-2.5 px-4 font-semibold">Action</th>
                 <th className="py-2.5 px-4 font-semibold">Tag Key</th>
-                <th className="py-2.5 px-4 font-semibold text-center">Scripts</th>
-                <th className="py-2.5 px-4 font-semibold text-center">Status</th>
                 <th className="py-2.5 px-4 font-semibold text-right">Actions</th>
               </tr>
             </thead>
@@ -283,7 +263,7 @@ export const ActionTagsScreen: React.FC<ActionTagsScreenProps> = ({
               {/* Scenario 1: No Sites exist in system */}
               {sites.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-12 px-4 text-center">
+                  <td colSpan={5} className="py-12 px-4 text-center">
                     <div className="max-w-md mx-auto flex flex-col items-center gap-3">
                       <div className="w-10 h-10 rounded-full bg-emerald-50 flex items-center justify-center text-emerald-600">
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -307,7 +287,7 @@ export const ActionTagsScreen: React.FC<ActionTagsScreenProps> = ({
               ) : tags.length === 0 ? (
                 /* Scenario 2: Sites exist, but no Action Tags created yet */
                 <tr>
-                  <td colSpan={7} className="py-12 px-4 text-center">
+                  <td colSpan={5} className="py-12 px-4 text-center">
                     <div className="max-w-md mx-auto flex flex-col items-center gap-3">
                       <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center text-gray-500">
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -316,7 +296,7 @@ export const ActionTagsScreen: React.FC<ActionTagsScreenProps> = ({
                       </div>
                       <div className="font-semibold text-gray-900">Chưa có Action Tag nào</div>
                       <p className="text-xs text-gray-500 leading-relaxed">
-                        Tạo Action Tag đầu tiên để định nghĩa các thao tác tự động hóa cần thực hiện bởi RPA Admin.
+                        Tạo Action Tag đầu tiên. Hệ thống sẽ tự động tạo Script Request để kỹ thuật viên RPA nhận việc.
                       </p>
                       <button
                         type="button"
@@ -331,7 +311,7 @@ export const ActionTagsScreen: React.FC<ActionTagsScreenProps> = ({
               ) : filteredTags.length === 0 ? (
                 /* Scenario 3: Filters active, no matching rows */
                 <tr>
-                  <td colSpan={7} className="py-10 px-4 text-center">
+                  <td colSpan={5} className="py-10 px-4 text-center">
                     <div className="max-w-md mx-auto flex flex-col items-center gap-2.5">
                       <p className="text-sm font-medium text-gray-700">Không tìm thấy Action Tag nào phù hợp</p>
                       <p className="text-xs text-gray-500">Thử thay đổi từ khóa tìm kiếm hoặc các dropdown bộ lọc.</p>
@@ -348,34 +328,38 @@ export const ActionTagsScreen: React.FC<ActionTagsScreenProps> = ({
               ) : (
                 /* Populated rows */
                 filteredTags.map((tag) => {
-                  const isReady = tag.scripts_count > 0;
+                  const isCopied = copiedKey === tag.tag_key;
                   return (
                     <tr key={tag.id} className="hover:bg-gray-50/60 transition-colors">
                       <td className="py-2.5 px-4 font-semibold text-gray-900">{tag.site_name}</td>
                       <td className="py-2.5 px-4 text-gray-700">{tag.path_name}</td>
                       <td className="py-2.5 px-4 text-gray-700">{tag.action_name}</td>
-                      <td className="py-2.5 px-4 font-mono text-xs text-gray-600">{tag.tag_key}</td>
-                      <td className="py-2.5 px-4 text-center font-medium text-gray-700">{tag.scripts_count}</td>
-                      <td className="py-2.5 px-4 text-center">
-                        {isReady ? (
-                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200/60">
-                            Ready
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200/60">
-                            Pending
-                          </span>
-                        )}
+                      <td className="py-2.5 px-4 font-mono text-xs text-gray-700">
+                        <span className="bg-gray-100 px-2 py-1 rounded text-gray-800">
+                          {tag.tag_key}
+                        </span>
                       </td>
                       <td className="py-2.5 px-4 text-right">
-                        <button
-                          type="button"
-                          onClick={() => setActiveTagForRequest(tag)}
-                          title="Tạo Script Request"
-                          className="h-7 px-2.5 text-xs font-medium text-emerald-700 hover:text-emerald-800 hover:bg-emerald-50 border border-emerald-200/50 rounded-lg transition inline-flex items-center gap-1"
-                        >
-                          <span>+</span> Request
-                        </button>
+                        <div className="inline-flex items-center gap-1.5 justify-end">
+                          <button
+                            type="button"
+                            onClick={() => handleCopyTagKey(tag.tag_key)}
+                            title="Copy Tag Key"
+                            className="h-7 px-2.5 text-xs font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 border border-gray-200 rounded-lg transition inline-flex items-center gap-1"
+                          >
+                            <span>{isCopied ? '✓ Copied' : 'Copy Key'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onDeleteTag(tag.id, tag.tag_key)}
+                            title="Xóa Action Tag"
+                            className="h-7 px-2 text-xs font-medium text-red-600 hover:text-red-700 hover:bg-red-50 border border-red-200 rounded-lg transition inline-flex items-center"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -398,7 +382,7 @@ export const ActionTagsScreen: React.FC<ActionTagsScreenProps> = ({
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
               <div>
                 <h2 className="text-lg font-bold text-gray-900">Add Action Tag</h2>
-                <p className="text-xs text-gray-400 mt-0.5">Liên kết Site, Path và Action</p>
+                <p className="text-xs text-gray-400 mt-0.5">Liên kết Site, Path và Action (tự động tạo Script Request)</p>
               </div>
               <button
                 type="button"
@@ -523,20 +507,14 @@ export const ActionTagsScreen: React.FC<ActionTagsScreenProps> = ({
                 />
               </div>
 
-              {/* Create Script Request Checkbox */}
-              <div className="pt-1">
-                <label className="flex items-center gap-2.5 cursor-pointer text-gray-700 select-none">
-                  <input
-                    type="checkbox"
-                    checked={createScriptRequest}
-                    onChange={(e) => setCreateScriptRequest(e.target.checked)}
-                    className="w-4 h-4 text-emerald-600 rounded border-gray-300 focus:ring-emerald-500 cursor-pointer"
-                  />
-                  <span className="text-sm">Create Script Request</span>
-                </label>
-                <p className="text-[11px] text-gray-400 mt-1 pl-6.5">
-                  Tự động sinh một Script Request ở trạng thái pending để RPA Admin nhận việc.
-                </p>
+              {/* Notice: Auto Script Request */}
+              <div className="p-3 bg-emerald-50/60 border border-emerald-200/80 rounded-xl text-xs text-emerald-800 leading-relaxed flex items-start gap-2.5">
+                <svg className="w-4 h-4 text-emerald-600 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span>
+                  <strong>Tự động tạo Script Request:</strong> Sau khi tạo Tag, hệ thống sẽ tự động kích hoạt Script Request (loại create) để kỹ thuật viên RPA nhận việc và xây dựng Script tương ứng.
+                </span>
               </div>
             </div>
 
@@ -556,66 +534,6 @@ export const ActionTagsScreen: React.FC<ActionTagsScreenProps> = ({
                 className="btn-primary h-9 px-4 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg shadow-xs transition"
               >
                 {isSubmitting ? 'Creating...' : 'Create Tag'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Create Script Request Modal */}
-      {activeTagForRequest && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs">
-          <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-gray-100 p-6 flex flex-col gap-4 animate-in fade-in zoom-in-95 duration-150">
-            <div>
-              <h3 className="text-lg font-bold text-gray-900">Tạo Script Request</h3>
-              <p className="text-xs font-mono text-emerald-700 mt-1 bg-emerald-50 px-2.5 py-1 rounded-md inline-block">
-                {activeTagForRequest.tag_key}
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-gray-700 mb-1.5">Loại yêu cầu</label>
-              <select
-                value={requestType}
-                onChange={(e) => setRequestType(e.target.value as any)}
-                className="w-full h-9 px-3 text-sm border border-gray-200 rounded-lg bg-white"
-              >
-                <option value="create">Tạo Script mới (create)</option>
-                <option value="fix">Yêu cầu sửa lỗi (fix)</option>
-              </select>
-            </div>
-
-            {requestType === 'fix' && (
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1.5">Lý do / Mô tả lỗi</label>
-                <textarea
-                  rows={3}
-                  value={fixReason}
-                  onChange={(e) => setFixReason(e.target.value)}
-                  placeholder="Mô tả lỗi UI, selector thay đổi hoặc step bị gián đoạn..."
-                  className="w-full p-2.5 text-sm border border-gray-200 rounded-lg focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500"
-                />
-              </div>
-            )}
-
-            <div className="flex justify-end gap-2.5 pt-2">
-              <button
-                type="button"
-                onClick={() => setActiveTagForRequest(null)}
-                className="h-9 px-3.5 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-lg transition"
-              >
-                Hủy
-              </button>
-              <button
-                type="button"
-                onClick={async () => {
-                  await onCreateRequest(activeTagForRequest.id, requestType, fixReason);
-                  setActiveTagForRequest(null);
-                  setFixReason('');
-                }}
-                className="h-9 px-4 text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg shadow-xs transition"
-              >
-                Gửi Request
               </button>
             </div>
           </div>

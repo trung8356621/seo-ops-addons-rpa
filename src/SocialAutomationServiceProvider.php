@@ -111,7 +111,10 @@ final class SocialAutomationServiceProvider extends ServiceProvider
         }
 
         if ($this->app->runningInConsole()) {
-            $this->commands([SocialAutomationScheduleTickCommand::class]);
+            $this->commands([
+                SocialAutomationScheduleTickCommand::class,
+                \Omnichannel\Addons\SocialAutomation\Console\BackfillScriptRequestsCommand::class,
+            ]);
         }
 
         try {
@@ -226,6 +229,9 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     Route::post('/tags/{id}/requests', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'createRequest'])
                         ->whereNumber('id')
                         ->name('social-automation.action-registry.tags.requests.create');
+                    Route::delete('/tags/{id}', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'destroyTag'])
+                        ->whereNumber('id')
+                        ->name('social-automation.action-registry.tags.destroy');
                 });
             });
 

@@ -6,6 +6,7 @@ namespace Omnichannel\Addons\SocialAutomation\PackageRegistry;
 
 use App\Models\User;
 use Illuminate\Support\Facades\Schema;
+use Omnichannel\Addons\SocialAutomation\Models\SaActionTagScript;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackage;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageDependency;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
@@ -33,6 +34,18 @@ final class ScriptRegistryUiService
         $media = $this->media ?? app(ScriptReleaseMediaService::class);
         $userLabels = [];
         $out = [];
+        $hasTagScripts = Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable('sa_action_tag_scripts');
+        $tagScripts = [];
+        if ($hasTagScripts) {
+            foreach (SaActionTagScript::query()->get() as $ts) {
+                if ($ts->package_id) {
+                    $tagScripts['pkg_'.$ts->package_id] = (string) $ts->action_tag_key;
+                }
+                if ($ts->script_id) {
+                    $tagScripts['sid_'.$ts->script_id] = (string) $ts->action_tag_key;
+                }
+            }
+        }
         foreach (SaPackage::query()->where('kind', 'script')->orderBy('package_key')->get() as $package) {
             $latest = $this->latestRelease((int) $package->id);
             if ($latest === null) {
@@ -42,10 +55,15 @@ final class ScriptRegistryUiService
             $updatedById = $package->updated_by_user_id ?? $latest->created_by_user_id;
             $mediaStatus = $media->statusForRelease((int) $latest->id);
             $widgetDeps = $this->widgetsDependingOn((string) $package->package_key);
+            $scriptId = (string) ($manifest['script_id'] ?? $package->package_key);
+            $actionTagKey = isset($manifest['action_tag_key']) && trim((string) $manifest['action_tag_key']) !== ''
+                ? (string) $manifest['action_tag_key']
+                : ($tagScripts['pkg_'.$package->id] ?? $tagScripts['sid_'.$scriptId] ?? null);
             $out[] = [
                 'package_key' => (string) $package->package_key,
-                'script_id' => (string) ($manifest['script_id'] ?? $package->package_key),
+                'script_id' => $scriptId,
                 'name' => (string) $package->name,
+                'action_tag_key' => $actionTagKey,
                 'version' => (string) $latest->version,
                 'release_id' => (int) $latest->id,
                 'source' => (string) ($latest->sync_source ?? $package->sync_source ?? 'unknown'),
@@ -87,6 +105,21 @@ final class ScriptRegistryUiService
         if (! $package instanceof SaPackage) {
             return null;
         }
+        $latest = $this->latestRelease((int) $package->id);
+        $latestManifest = $latest && is_array($latest->manifest) ? $latest->manifest : [];
+        $actionTagKey = isset($latestManifest['action_tag_key']) && trim((string) $latestManifest['action_tag_key']) !== ''
+            ? (string) $latestManifest['action_tag_key']
+            : null;
+        if ($actionTagKey === null && Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable('sa_action_tag_scripts')) {
+            $link = SaActionTagScript::query()
+                ->where('package_id', $package->id)
+                ->orWhere('script_id', (string) ($latestManifest['script_id'] ?? $package->package_key))
+                ->first();
+            if ($link instanceof SaActionTagScript) {
+                $actionTagKey = (string) $link->action_tag_key;
+            }
+        }
+
         $media = $this->media ?? app(ScriptReleaseMediaService::class);
         $userLabels = [];
         $releases = SaPackageRelease::query()
@@ -122,6 +155,7 @@ final class ScriptRegistryUiService
         return [
             'package_key' => (string) $package->package_key,
             'name' => (string) $package->name,
+            'action_tag_key' => $actionTagKey,
             'description' => $package->description,
             'sync_source' => $package->sync_source,
             'created_by_user_id' => $package->created_by_user_id,

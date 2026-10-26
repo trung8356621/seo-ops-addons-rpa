@@ -9,6 +9,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaPackage;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
 use Omnichannel\Addons\SocialAutomation\Models\SaScriptReleaseMedia;
 use Omnichannel\Addons\SocialAutomation\Models\SaScriptReleaseAsset;
+use Omnichannel\Addons\SocialAutomation\Models\SaActionTagScript;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
 use Throwable;
 
@@ -66,6 +67,17 @@ final class ScriptCatalogService
             $demoReady = in_array(SaScriptReleaseMedia::KIND_VIDEO_DEMO, $mediaKinds, true)
                 && in_array(SaScriptReleaseMedia::KIND_THUMBNAIL, $mediaKinds, true);
 
+            $actionTagKey = isset($manifest['action_tag_key']) ? (string) $manifest['action_tag_key'] : null;
+            if ($actionTagKey === null && Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable('sa_action_tag_scripts')) {
+                $link = SaActionTagScript::query()
+                    ->where('package_id', $package->id)
+                    ->orWhere('script_id', (string) ($manifest['script_id'] ?? $package->package_key))
+                    ->first();
+                if ($link instanceof SaActionTagScript) {
+                    $actionTagKey = $link->action_tag_key;
+                }
+            }
+
             $out[] = [
                 'script_id' => (string) ($manifest['script_id'] ?? $package->package_key),
                 'package_key' => (string) $package->package_key,
@@ -79,7 +91,7 @@ final class ScriptCatalogService
                 'lineage' => $lineage,
                 'incomplete' => ! $assetsComplete,
                 'demo_status' => $demoReady ? 'ready' : 'missing',
-                'action_tag_key' => isset($manifest['action_tag_key']) ? (string) $manifest['action_tag_key'] : null,
+                'action_tag_key' => $actionTagKey,
                 'result_type' => isset($manifest['result_type']) ? (string) $manifest['result_type'] : 'status',
                 'collection_type' => isset($manifest['collection_type']) ? (string) $manifest['collection_type'] : null,
             ];

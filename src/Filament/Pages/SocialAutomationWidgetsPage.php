@@ -21,6 +21,13 @@ final class SocialAutomationWidgetsPage extends Page
 
     protected static ?string $slug = 'widgets';
 
+    protected static bool $shouldRegisterNavigation = false;
+
+    public static function shouldRegisterNavigation(): bool
+    {
+        return false;
+    }
+
     protected static ?int $navigationSort = 11;
 
     protected static string $view = 'social-automation::filament.pages.widgets';

@@ -252,9 +252,9 @@ export const SitesPathsScreen: React.FC<SitesPathsScreenProps> = ({
       </div>
 
       {/* Main 2-Column Layout */}
-      <div className="flex flex-col lg:flex-row items-start gap-5">
+      <div className="sites-paths-grid">
         {/* Left Column: Sites (~300px) */}
-        <div className="w-full lg:w-[300px] flex-shrink-0 bg-white rounded-xl border border-gray-200/90 shadow-xs p-4 flex flex-col gap-3.5">
+        <div className="sites-paths-sidebar bg-white rounded-xl border border-gray-200/90 shadow-xs p-4 flex flex-col gap-3.5">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-bold text-gray-900 uppercase tracking-wide">Sites</h2>
             <span className="text-xs text-gray-400 font-medium">{sites.length} site(s)</span>
@@ -333,8 +333,8 @@ export const SitesPathsScreen: React.FC<SitesPathsScreenProps> = ({
           </div>
         </div>
 
-        {/* Right Column: Paths List & Path Editor (flex-1) */}
-        <div className="flex-1 w-full flex flex-col gap-5 min-w-0">
+        {/* Right Column: Paths List & Path Editor */}
+        <div className="sites-paths-main flex flex-col gap-5">
           {/* Paths Table Card */}
           <div className="bg-white rounded-xl border border-gray-200/90 shadow-xs overflow-hidden">
             <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between bg-gray-50/50">

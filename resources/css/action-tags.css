@@ -120,3 +120,34 @@
 .animate-slide-right {
   animation: slideInRight 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
+
+/* Sites & Paths 2-Column Responsive Layout */
+.sites-paths-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  width: 100%;
+}
+
+@media (min-width: 1024px) {
+  .sites-paths-grid {
+    display: grid !important;
+    grid-template-columns: 300px minmax(0, 1fr) !important;
+    align-items: start;
+  }
+}
+
+.sites-paths-sidebar {
+  width: 100%;
+}
+
+@media (min-width: 1024px) {
+  .sites-paths-sidebar {
+    width: 300px;
+  }
+}
+
+.sites-paths-main {
+  width: 100%;
+  min-width: 0;
+}

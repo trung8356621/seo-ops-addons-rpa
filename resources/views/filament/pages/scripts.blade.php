@@ -80,8 +80,8 @@
                         {{-- B. Main content --}}
                         <div class="flex flex-1 flex-col px-4 pt-4 pb-0">
                             <div class="flex items-start gap-2">
-                                <h2 class="min-w-0 flex-1 text-[15px] font-semibold leading-snug text-gray-900 line-clamp-2 dark:text-gray-100">
-                                    {{ $row['name'] }}
+                                <h2 class="min-w-0 flex-1 text-[15px] font-semibold leading-snug text-gray-900 line-clamp-2 dark:text-gray-100" title="{{ !empty($row['action_tag_key']) ? $row['action_tag_key'].' ('.$row['name'].')' : $row['name'] }}">
+                                    {{ $row['action_tag_key'] ?: $row['name'] }}
                                 </h2>
                                 <span class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium {{ $badge['class'] }}">
                                     {{ $badge['label'] }}
@@ -97,10 +97,7 @@
                                     <svg class="h-3.5 w-3.5 shrink-0 opacity-70" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clip-rule="evenodd"/></svg>
                                     <span class="truncate">{{ $updatedShort }}</span>
                                 </span>
-                                <span class="inline-flex items-center gap-1.5 shrink-0">
-                                    <svg class="h-3.5 w-3.5 opacity-70" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M4 4h4v4H4V4zm8 0h4v4h-4V4zM4 12h4v4H4v-4zm8 0h4v4h-4v-4z"/></svg>
-                                    {{ $widgetCount }} {{ $widgetCount === 1 ? 'Widget' : 'Widgets' }}
-                                </span>
+
                             </div>
 
                             {{-- C. Footer --}}
@@ -132,24 +129,20 @@
         @if ($detail)
             <div class="rounded-xl border border-gray-200 p-4 space-y-3 dark:border-gray-700">
                 <div class="flex items-center justify-between gap-3">
-                    <h2 class="text-base font-semibold">{{ $detail['name'] }} <span class="font-mono text-xs text-gray-500">{{ $detail['package_key'] }}</span></h2>
+                    <div>
+                        <h2 class="text-base font-semibold">
+                            {{ $detail['action_tag_key'] ?: $detail['name'] }}
+                            <span class="font-mono text-xs text-gray-500">{{ $detail['package_key'] }}</span>
+                        </h2>
+                        @if (! empty($detail['action_tag_key']) && $detail['name'] !== $detail['action_tag_key'])
+                            <p class="text-xs text-gray-500 dark:text-gray-400">Script: {{ $detail['name'] }}</p>
+                        @endif
+                    </div>
                     <button type="button" wire:click="clearSelection" class="text-sm text-gray-500">Đóng</button>
                 </div>
                 <p class="text-sm text-gray-600 dark:text-gray-300">{{ $detail['description'] ?: '—' }}</p>
 
-                <div>
-                    <h3 class="font-medium text-sm mb-1">Widget dependencies</h3>
-                    @forelse ($detail['widget_dependencies'] as $w)
-                        <div class="text-sm">
-                            {{ $w['name'] }} ({{ $w['package_key'] }})
-                            @unless ($w['is_enabled'])
-                                <span class="text-amber-600">disabled: {{ $w['disabled_reason'] }}</span>
-                            @endunless
-                        </div>
-                    @empty
-                        <p class="text-sm text-gray-500">Chưa có Widget phụ thuộc.</p>
-                    @endforelse
-                </div>
+
 
                 @foreach ($detail['releases'] as $i => $release)
                     <div class="rounded border border-gray-100 p-3 dark:border-gray-800 space-y-2">

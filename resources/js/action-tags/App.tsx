@@ -52,7 +52,6 @@ export const App: React.FC<AppProps> = ({ initialData, apiBase, csrfToken }) => 
     site_id: number;
     path_id: number;
     action_key: string;
-    create_request: boolean;
   }) => {
     const res = await fetch(`${apiBase}/tags`, {
       method: 'POST',
@@ -70,32 +69,34 @@ export const App: React.FC<AppProps> = ({ initialData, apiBase, csrfToken }) => 
       throw new Error(json.error || 'Không thể tạo Action Tag');
     }
 
-    showToast(`Đã tạo Action Tag [${json.tag.tag_key}] thành công!`);
+    showToast(`Đã tạo Action Tag [${json.tag.tag_key}] và tự động tạo Script Request!`);
     await reloadData();
   };
 
-  const handleCreateRequest = async (tagId: number, type: 'create' | 'fix', reason?: string) => {
-    const res = await fetch(`${apiBase}/tags/${tagId}/requests`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        'X-CSRF-TOKEN': csrfToken,
-        'X-Requested-With': 'XMLHttpRequest',
-      },
-      body: JSON.stringify({
-        request_type: type,
-        error_reason: reason,
-      }),
-    });
-
-    const json = await res.json();
-    if (!res.ok || !json.ok) {
-      throw new Error(json.error || 'Không thể tạo Script Request');
+  const handleDeleteTag = async (tagId: number, tagKey: string) => {
+    if (!window.confirm(`Bạn có chắc muốn xóa Action Tag [${tagKey}] không?`)) {
+      return;
     }
+    try {
+      const res = await fetch(`${apiBase}/tags/${tagId}`, {
+        method: 'DELETE',
+        headers: {
+          Accept: 'application/json',
+          'X-CSRF-TOKEN': csrfToken,
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+      });
 
-    showToast(`Đã tạo Script Request [${json.request.request_id}] thành công!`);
-    await reloadData();
+      const json = await res.json();
+      if (!res.ok || !json.ok) {
+        throw new Error(json.error || 'Không thể xóa Action Tag');
+      }
+
+      showToast(`Đã xóa Action Tag [${tagKey}] thành công!`);
+      await reloadData();
+    } catch (e: any) {
+      showToast(e.message || 'Lỗi khi xóa Action Tag', 'error');
+    }
   };
 
   const handleSaveSite = async (siteData: {
@@ -183,10 +184,9 @@ export const App: React.FC<AppProps> = ({ initialData, apiBase, csrfToken }) => 
           paths={paths}
           actions={actions}
           tags={tags}
-          requests={requests}
           onOpenSitesPaths={() => setScreen('sites_paths')}
           onCreateTag={handleCreateTag}
-          onCreateRequest={handleCreateRequest}
+          onDeleteTag={handleDeleteTag}
         />
       ) : (
         <SitesPathsScreen

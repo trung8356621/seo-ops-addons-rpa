@@ -36,6 +36,10 @@ final class ScriptRegistryUiContractTest extends TestCase
         self::assertStringContainsString('setPackageEnabled', $ui);
         self::assertStringContainsString('video_demo_status', $ui);
         self::assertStringContainsString('updated_by_label', $ui);
+        self::assertStringContainsString('action_tag_key', $ui);
+        $blade = (string) file_get_contents($this->root.'/resources/views/filament/pages/scripts.blade.php');
+        self::assertStringContainsString('$row[\'action_tag_key\']', $blade);
+        self::assertStringContainsString('$detail[\'action_tag_key\']', $blade);
     }
 
     public function test_architecture_documents_bidirectional_script_sync(): void
