@@ -94,16 +94,23 @@ final class SessionSyncService
      * @param  list<array<string, mixed>>  $browsers
      * @return array{ok: bool, synced_count?: int, browsers?: list<array<string, mixed>>, errors?: list<string>}
      */
-    public function syncClientBrowsers(SaAgent $agent, array $browsers): array
+    public function syncClientBrowsers(SaAgent $agent, array $browsers, ?string $installationId = null): array
     {
-        // Validate forbidden fields first
+        // Validate forbidden fields first (recursively or in top-level items)
+        $forbiddenKeys = ['cookies', 'cookie', 'password', 'passwords', 'token', 'secret', 'profile_path', 'user_data_dir', 'cookie_value', 'c_user'];
         foreach ($browsers as $item) {
             if (! is_array($item)) {
                 continue;
             }
-            foreach (['cookies', 'cookie', 'password', 'passwords', 'token', 'secret', 'profile_path', 'user_data_dir'] as $forbidden) {
+            foreach ($forbiddenKeys as $forbidden) {
                 if (array_key_exists($forbidden, $item)) {
                     return ['ok' => false, 'errors' => ['session_forbidden_field:'.$forbidden]];
+                }
+                if (is_array($item['session_signal'] ?? null) && array_key_exists($forbidden, $item['session_signal'])) {
+                    return ['ok' => false, 'errors' => ['session_forbidden_field:session_signal.'.$forbidden]];
+                }
+                if (is_array($item['account_binding'] ?? null) && array_key_exists($forbidden, $item['account_binding'])) {
+                    return ['ok' => false, 'errors' => ['session_forbidden_field:account_binding.'.$forbidden]];
                 }
             }
         }
@@ -113,7 +120,7 @@ final class SessionSyncService
         }
 
         try {
-            $out = DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($agent, $browsers): array {
+            $out = DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($agent, $browsers, $installationId): array {
                 $result = [];
                 foreach ($browsers as $item) {
                     if (! is_array($item)) {
@@ -132,19 +139,99 @@ final class SessionSyncService
 
                     $platform = strtolower(trim((string) ($item['platform'] ?? 'facebook')));
                     $domain = trim((string) ($item['domain'] ?? ($platform !== '' ? $platform.'.com' : 'facebook.com')));
-                    $status = strtolower(trim((string) ($item['status'] ?? 'stopped')));
+                    
+                    $runtime = is_array($item['runtime'] ?? null) ? $item['runtime'] : [];
+                    $status = strtolower(trim((string) ($runtime['status'] ?? $item['status'] ?? 'stopped')));
                     if (! in_array($status, ['running', 'stopped', 'error', 'crashed'], true)) {
                         $status = 'stopped';
                     }
 
                     $session = SaBrowserSession::query()->firstOrNew(['session_uuid' => $browserId]);
-
                     $existingCaps = is_array($session->capabilities) ? $session->capabilities : [];
+
+                    // E5.1: Account Binding validation
+                    $rawBinding = is_array($item['account_binding'] ?? null) ? $item['account_binding'] : null;
+                    $targetAccountId = $rawBinding ? trim((string) ($rawBinding['account_id'] ?? '')) : null;
+                    if ($targetAccountId === '') {
+                        $targetAccountId = null;
+                    }
+
+                    $accountModel = null;
+                    if ($targetAccountId !== null) {
+                        $accountModel = SaAccount::query()
+                            ->where('account_uuid', $targetAccountId)
+                            ->orWhere('id', $targetAccountId)
+                            ->first();
+
+                        if (! $accountModel instanceof SaAccount) {
+                            throw new \DomainException('account_not_found:'.$targetAccountId);
+                        }
+
+                        // Enforce Installation isolation: Client Key Installation MUST match Account Installation!
+                        if ($installationId !== null && $installationId !== '' && $accountModel->installation_id !== null && $accountModel->installation_id !== '') {
+                            if ($accountModel->installation_id !== $installationId) {
+                                throw new \DomainException('account_installation_mismatch');
+                            }
+                        }
+
+                        // Enforce platform compatibility
+                        if (strtolower((string) $accountModel->platform) !== strtolower($platform)) {
+                            throw new \DomainException('account_platform_mismatch');
+                        }
+                    }
+
+                    $accountBinding = [
+                        'account_id' => $accountModel ? (string) $accountModel->account_uuid : null,
+                        'account_name' => $accountModel ? (string) ($accountModel->name ?? $accountModel->label ?? $accountModel->username ?? 'Account') : null,
+                        'platform' => $accountModel ? strtolower((string) $accountModel->platform) : null,
+                        'bound_at' => $accountModel ? ($rawBinding['bound_at'] ?? now()->toIso8601String()) : null,
+                    ];
+
+                    // E5.3: Execution Confirmation with account switch reset rule
+                    $prevAccountId = $existingCaps['account_binding']['account_id'] ?? null;
+                    $newAccountId = $accountBinding['account_id'];
+
+                    if ($prevAccountId !== $newAccountId) {
+                        // Reset execution confirmation when switching account
+                        $executionConfirmation = [
+                            'status' => 'not_run',
+                            'first_run_at' => null,
+                            'last_success_at' => null,
+                            'last_run_id' => null,
+                            'screenshot_ref' => null,
+                        ];
+                    } else {
+                        $rawConfirmation = is_array($item['execution_confirmation'] ?? null) ? $item['execution_confirmation'] : null;
+                        $executionConfirmation = $rawConfirmation ?: ($existingCaps['execution_confirmation'] ?? [
+                            'status' => 'not_run',
+                            'first_run_at' => null,
+                            'last_success_at' => null,
+                            'last_run_id' => null,
+                            'screenshot_ref' => null,
+                        ]);
+                    }
+
+                    // E5.2: Session Signal
+                    $rawSignal = is_array($item['session_signal'] ?? null) ? $item['session_signal'] : [];
+                    $signalStatus = strtolower(trim((string) ($rawSignal['status'] ?? 'unknown')));
+                    if (! in_array($signalStatus, ['present', 'absent', 'unknown'], true)) {
+                        $signalStatus = 'unknown';
+                    }
+                    $sessionSignal = [
+                        'status' => $signalStatus,
+                        'checked_at' => $rawSignal['checked_at'] ?? null,
+                        'method' => $rawSignal['method'] ?? ($platform === 'facebook' ? 'facebook_c_user_cookie' : null),
+                    ];
+
                     $mergedCaps = array_merge($existingCaps, [
                         'name' => $name,
                         'status' => $status,
                         'browser_id' => $browserId,
                         'platform' => $platform,
+                        'runtime' => ['status' => $status],
+                        'account_binding' => $accountBinding,
+                        'session_signal' => $sessionSignal,
+                        'execution_confirmation' => $executionConfirmation,
                         'last_reported_at' => now()->toIso8601String(),
                     ]);
 
@@ -159,11 +246,38 @@ final class SessionSyncService
                         'capabilities' => $mergedCaps,
                     ])->save();
 
+                    // Relational link to sa_session_accounts
+                    if ($accountModel instanceof SaAccount) {
+                        SaSessionAccount::query()
+                            ->where('browser_session_id', $session->id)
+                            ->update(['is_active' => false]);
+
+                        SaSessionAccount::query()->updateOrCreate(
+                            [
+                                'browser_session_id' => $session->id,
+                                'account_id' => $accountModel->id,
+                                'domain' => $domain,
+                            ],
+                            [
+                                'is_active' => true,
+                                'bound_at' => now(),
+                            ]
+                        );
+                    } elseif ($targetAccountId === null && $session->id) {
+                        SaSessionAccount::query()
+                            ->where('browser_session_id', $session->id)
+                            ->update(['is_active' => false]);
+                    }
+
                     $result[] = [
                         'browser_id' => $session->session_uuid,
                         'name' => $name,
                         'platform' => $platform,
                         'status' => $status,
+                        'runtime' => ['status' => $status],
+                        'account_binding' => $accountBinding,
+                        'session_signal' => $sessionSignal,
+                        'execution_confirmation' => $executionConfirmation,
                         'ready_status' => $readyStatus,
                         'last_reported_at' => $mergedCaps['last_reported_at'],
                     ];
@@ -171,6 +285,8 @@ final class SessionSyncService
 
                 return $result;
             });
+        } catch (\DomainException $de) {
+            return ['ok' => false, 'errors' => [$de->getMessage()]];
         } catch (Throwable $e) {
             return ['ok' => false, 'errors' => ['sync_failed: '.$e->getMessage()]];
         }
@@ -236,6 +352,10 @@ final class SessionSyncService
                     'ready_status' => $s->ready_status,
                     'busy' => $s->locked_job_id !== null
                         && ($s->lock_expires_at === null || $s->lock_expires_at->isFuture()),
+                    'account_binding' => $capabilities['account_binding'] ?? ['account_id' => null, 'bound_at' => null],
+                    'account_name' => $capabilities['account_binding']['account_name'] ?? null,
+                    'session_signal' => $capabilities['session_signal'] ?? ['status' => 'unknown', 'checked_at' => null, 'method' => null],
+                    'execution_confirmation' => $capabilities['execution_confirmation'] ?? ['status' => 'not_run'],
                     'last_confirmed_at' => $s->last_confirmed_at?->toIso8601String(),
                     'last_seen_at' => $capabilities['last_reported_at'] ?? $s->last_confirmed_at?->toIso8601String(),
                 ];

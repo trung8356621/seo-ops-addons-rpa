@@ -302,6 +302,9 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     ->name('social-automation.client.browser-delete-param');
                 Route::get('/browser-sessions', [RpaClientApiController::class, 'listBrowserSessions'])
                     ->name('social-automation.client.browser-sessions');
+                // E5: List bindable accounts for client
+                Route::get('/accounts', [RpaClientApiController::class, 'listBindableAccounts'])
+                    ->name('social-automation.client.accounts');
             });
 
         // RPA Admin user auth + Script sync (not Runner service_api_credentials).

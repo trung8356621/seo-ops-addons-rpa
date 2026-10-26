@@ -9,6 +9,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Omnichannel\Addons\SocialAutomation\Domain\AgentKindPolicy;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureRpaClientApiKey;
+use Omnichannel\Addons\SocialAutomation\Models\SaAccount;
 use Omnichannel\Addons\SocialAutomation\Models\SaAgent;
 use Omnichannel\Addons\SocialAutomation\Models\SaBrowserSession;
 use Omnichannel\Addons\SocialAutomation\Models\SaClientApiKey;
@@ -141,9 +142,52 @@ final class RpaClientApiController extends Controller
             }
         }
 
-        $result = $this->sessionSync->syncClientBrowsers($agent, $browsers);
+        $installationId = (string) $clientKey->getAttribute('installation_id');
+        $result = $this->sessionSync->syncClientBrowsers($agent, $browsers, $installationId);
 
         return new JsonResponse($result, ($result['ok'] ?? false) ? 200 : 422);
+    }
+
+    /**
+     * E5: List bindable accounts for the client's installation.
+     * Never returns passwords, encrypted passwords, tokens or secrets.
+     */
+    public function listBindableAccounts(Request $request): JsonResponse
+    {
+        $clientKey = $this->resolveClientKey($request);
+        if (! $clientKey instanceof SaClientApiKey) {
+            return new JsonResponse(['ok' => false, 'error' => 'unauthenticated'], 401);
+        }
+
+        $installationId = trim((string) $clientKey->getAttribute('installation_id'));
+
+        $query = SaAccount::query();
+        if ($installationId !== '') {
+            $query->where('installation_id', $installationId);
+        }
+
+        if ($request->has('platform')) {
+            $platform = strtolower(trim((string) $request->input('platform')));
+            if ($platform !== '') {
+                $query->whereRaw('LOWER(platform) = ?', [$platform]);
+            }
+        }
+
+        $accounts = $query->orderByDesc('updated_at')->get()->map(static function (SaAccount $a): array {
+            return [
+                'account_id' => (string) ($a->account_uuid ?? $a->id),
+                'platform' => strtolower((string) $a->platform),
+                'display_name' => (string) ($a->name ?? $a->label ?? $a->username ?? 'Account'),
+                'username' => $a->username ?? $a->declared_username,
+                'identity_label' => $a->label,
+                'verified' => (bool) $a->verified,
+            ];
+        })->all();
+
+        return new JsonResponse([
+            'ok' => true,
+            'accounts' => $accounts,
+        ]);
     }
 
     /**

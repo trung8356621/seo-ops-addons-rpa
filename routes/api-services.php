@@ -136,4 +136,6 @@ Route::middleware([
         ->name('api.v1.services.social-automation.client.browser-sync');
     Route::post('{service}/social-automation/client/browser-delete', [RpaClientApiController::class, 'deleteBrowserSession'])
         ->name('api.v1.services.social-automation.client.browser-delete');
+    Route::get('{service}/social-automation/client/accounts', [RpaClientApiController::class, 'listBindableAccounts'])
+        ->name('api.v1.services.social-automation.client.accounts');
 });

@@ -20,7 +20,6 @@ final class RpaClientBrowserSyncTest extends TestCase
 
     public function test_forbidden_fields_are_rejected(): void
     {
-        // When schema is not booted or tested standalone, sync validates forbidden fields first
         $agent = new \Omnichannel\Addons\SocialAutomation\Models\SaAgent();
         $agent->id = 1;
         $agent->agent_uuid = 'test-agent-uuid';
@@ -48,6 +47,22 @@ final class RpaClientBrowserSyncTest extends TestCase
         $res2 = $this->service->syncClientBrowsers($agent, $payloadWithPassword);
         self::assertFalse($res2['ok']);
         self::assertContains('session_forbidden_field:password', $res2['errors'] ?? []);
+
+        // Cookie value leaked inside session_signal must be rejected
+        $payloadWithSignalCookie = [
+            [
+                'browser_id' => 'b3',
+                'name' => 'Profile 3',
+                'session_signal' => [
+                    'status' => 'present',
+                    'c_user' => '100012345678',
+                ],
+            ],
+        ];
+
+        $res3 = $this->service->syncClientBrowsers($agent, $payloadWithSignalCookie);
+        self::assertFalse($res3['ok']);
+        self::assertContains('session_forbidden_field:session_signal.c_user', $res3['errors'] ?? []);
     }
 
     public function test_online_state_calculator_for_browser_stale(): void
