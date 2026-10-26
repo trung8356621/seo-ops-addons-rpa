@@ -41,6 +41,34 @@ final class RpaClientApiKeyManagementController extends Controller
         ]);
     }
 
+    public function activeOrCandidate(Request $request): JsonResponse
+    {
+        $this->access->assertCanAccess();
+
+        $data = $this->keyService->getActiveOrCandidateKey();
+
+        return new JsonResponse([
+            'ok' => true,
+            'endpoint' => url('/'),
+            'data' => $data,
+        ]);
+    }
+
+    public function activateCandidate(Request $request): JsonResponse
+    {
+        $this->access->assertCanMutate();
+
+        $token = (string) $request->input('candidate_token', '');
+        $userId = $request->user()?->id ? (int) $request->user()->id : null;
+
+        $result = $this->keyService->activateCandidateKey($token, $userId);
+        if (! ($result['ok'] ?? false)) {
+            return new JsonResponse($result, 422);
+        }
+
+        return new JsonResponse($result, 200);
+    }
+
     public function store(Request $request): JsonResponse
     {
         $this->access->assertCanMutate();

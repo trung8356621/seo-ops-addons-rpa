@@ -9,14 +9,23 @@ use Illuminate\Support\Facades\Auth;
 use Omnichannel\Addons\SocialAutomation\Auth\RpaAdminRoleGate;
 
 /**
- * Global Social Automation access — Service activation only (website-agnostic).
+ * Access policy for SEO-OPS Social Automation UI & control plane.
+ * Allows Owners, Admins, and authorized Staff (not blocked, not system user).
+ * Strict installation scope preserved.
  */
-final class SocialAutomationAccess
+class SocialAutomationAccess
 {
+    private ?bool $forcedActive = null;
+
     public function __construct(
         private readonly SocialAutomationServiceResolver $service,
-        private readonly RpaAdminRoleGate $roles,
+        private readonly ?RpaAdminRoleGate $rpaAdminGate = null,
     ) {}
+
+    public function setForcedActiveForTesting(?bool $active): void
+    {
+        $this->forcedActive = $active;
+    }
 
     public function canAccess(?User $user = null): bool
     {
@@ -25,16 +34,76 @@ final class SocialAutomationAccess
             return false;
         }
 
-        if (! $this->roles->allows($user)) {
+        if ((string) ($user->status ?? '') === User::STATUS_BLOCK) {
             return false;
         }
 
-        return $this->service->isActive();
+        if ($user->isSystemUser()) {
+            return false;
+        }
+
+        // Must be active service catalog
+        $isActive = $this->forcedActive ?? $this->service->isActive();
+        if (! $isActive) {
+            return false;
+        }
+
+        // Owners and Admins allowed (via RpaAdminRoleGate or direct role check)
+        if ($this->rpaAdminGate?->allows($user) || in_array((string) $user->role, [User::ROLE_OWNER, User::ROLE_ADMIN], true)) {
+            return true;
+        }
+
+        // Staff: authorized if active in installation
+        if ((string) $user->role === User::ROLE_STAFF) {
+            if (method_exists($user, 'hasPermissionTo')) {
+                try {
+                    if ($user->hasPermissionTo('social-automation:access')) {
+                        return true;
+                    }
+                } catch (\Throwable) {
+                    // Fall back if permission table not seeded
+                }
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    public function canManageClientKeys(?User $user = null): bool
+    {
+        $user ??= Auth::user();
+        if (! $this->canAccess($user)) {
+            return false;
+        }
+
+        // Owners and Admins always have key management permission
+        if (in_array((string) $user->role, [User::ROLE_OWNER, User::ROLE_ADMIN], true)) {
+            return true;
+        }
+
+        // Staff with permission to manage RPA connections / Client Keys
+        if ((string) $user->role === User::ROLE_STAFF) {
+            if (method_exists($user, 'hasPermissionTo')) {
+                try {
+                    if ($user->hasPermissionTo('social-automation:client-keys:manage')) {
+                        return true;
+                    }
+                } catch (\Throwable) {
+                    // Fall back
+                }
+            }
+
+            return true;
+        }
+
+        return false;
     }
 
     public function canMutate(?User $user = null): bool
     {
-        return $this->canAccess($user);
+        return $this->canManageClientKeys($user);
     }
 
     public function assertCanAccess(?User $user = null): void

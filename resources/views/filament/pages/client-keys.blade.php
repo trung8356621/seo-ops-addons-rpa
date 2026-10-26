@@ -3,7 +3,11 @@
         $rows = $this->rows();
     @endphp
 
-    <div class="space-y-6 max-w-6xl">
+    <div
+        x-data
+        x-on:copy-key-to-clipboard.window="navigator.clipboard.writeText($event.detail.text)"
+        class="space-y-6 max-w-6xl"
+    >
         <!-- Header & Action -->
         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
@@ -126,8 +130,17 @@
                                         </span>
                                     @endif
                                 </td>
-                                <td class="px-4 py-3 text-right">
+                                <td class="px-4 py-3 text-right space-x-3">
                                     @if ($row->isActive())
+                                        @if ($row->getDecryptedRawKey())
+                                            <button
+                                                wire:click="copyKey({{ $row->id }})"
+                                                type="button"
+                                                class="text-xs font-semibold text-teal-600 hover:text-teal-800 dark:text-teal-400 dark:hover:text-teal-300 hover:underline"
+                                            >
+                                                {{ __('social-automation::filament.client_keys.copy_btn') }}
+                                            </button>
+                                        @endif
                                         <button
                                             wire:click="revokeKey({{ $row->id }})"
                                             wire:confirm="{{ __('social-automation::filament.client_keys.revoke_confirm') }}"

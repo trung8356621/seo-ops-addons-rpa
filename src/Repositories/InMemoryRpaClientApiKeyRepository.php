@@ -26,6 +26,7 @@ final class InMemoryRpaClientApiKeyRepository implements RpaClientApiKeyReposito
             'name' => (string) ($attributes['name'] ?? ''),
             'key_prefix' => (string) ($attributes['key_prefix'] ?? ''),
             'key_hash' => (string) ($attributes['key_hash'] ?? ''),
+            'encrypted_key' => isset($attributes['encrypted_key']) ? (string) $attributes['encrypted_key'] : null,
             'created_by' => isset($attributes['created_by']) ? (int) $attributes['created_by'] : null,
             'last_used_at' => null,
             'revoked_at' => null,
@@ -55,6 +56,17 @@ final class InMemoryRpaClientApiKeyRepository implements RpaClientApiKeyReposito
         $item = $this->items[$id] ?? null;
         if ($item instanceof SaClientApiKey && (string) $item->getAttribute('installation_id') === $installationId) {
             return $item;
+        }
+
+        return null;
+    }
+
+    public function firstUsable(string $installationId): ?SaClientApiKey
+    {
+        foreach ($this->items as $item) {
+            if ((string) $item->getAttribute('installation_id') === $installationId && $item->isActive()) {
+                return $item;
+            }
         }
 
         return null;

@@ -21,6 +21,8 @@ interface RpaClientApiKeyRepositoryContract
 
     public function find(int $id, string $installationId): ?SaClientApiKey;
 
+    public function firstUsable(string $installationId): ?SaClientApiKey;
+
     /**
      * @return Collection<int, SaClientApiKey>
      */

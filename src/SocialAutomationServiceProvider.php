@@ -248,6 +248,10 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                 Route::prefix('api/client-keys')->group(function (): void {
                     Route::get('/', [RpaClientApiKeyManagementController::class, 'index'])
                         ->name('social-automation.client-keys.index');
+                    Route::get('/active-or-candidate', [RpaClientApiKeyManagementController::class, 'activeOrCandidate'])
+                        ->name('social-automation.client-keys.active-or-candidate');
+                    Route::post('/activate-candidate', [RpaClientApiKeyManagementController::class, 'activateCandidate'])
+                        ->name('social-automation.client-keys.activate-candidate');
                     Route::post('/', [RpaClientApiKeyManagementController::class, 'store'])
                         ->name('social-automation.client-keys.store');
                     Route::post('/{id}/revoke', [RpaClientApiKeyManagementController::class, 'revoke'])

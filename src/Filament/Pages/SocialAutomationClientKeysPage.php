@@ -87,6 +87,25 @@ final class SocialAutomationClientKeysPage extends Page
             ->send();
     }
 
+    public function copyKey(int $id): void
+    {
+        app(SocialAutomationAccess::class)->assertCanMutate();
+
+        $key = app(RpaClientApiKeyService::class)->find($id);
+        if (! $key instanceof SaClientApiKey) {
+            Notification::make()->title('Không tìm thấy Key')->danger()->send();
+            return;
+        }
+
+        $raw = $key->getDecryptedRawKey();
+        if ($raw) {
+            $this->dispatch('copy-key-to-clipboard', text: $raw);
+            Notification::make()->title('Đã sao chép Key vào clipboard')->success()->send();
+        } else {
+            Notification::make()->title('Key không hỗ trợ sao chép trực tiếp')->warning()->send();
+        }
+    }
+
     public function dismissRawKeyBanner(): void
     {
         $this->recentlyCreatedRawKey = null;

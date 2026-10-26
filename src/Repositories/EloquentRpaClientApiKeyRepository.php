@@ -35,6 +35,15 @@ final class EloquentRpaClientApiKeyRepository implements RpaClientApiKeyReposito
             ->first();
     }
 
+    public function firstUsable(string $installationId): ?SaClientApiKey
+    {
+        return SaClientApiKey::query()
+            ->where('installation_id', $installationId)
+            ->whereNull('revoked_at')
+            ->orderBy('id')
+            ->first();
+    }
+
     public function findByPrefix(string $prefix): Collection
     {
         return SaClientApiKey::query()
