@@ -160,7 +160,8 @@ final class SessionSyncService
                     }
 
                     $rawSignal = is_array($item['session_signal'] ?? null) ? $item['session_signal'] : [];
-                    if ($targetAccountId === null || strtolower((string) ($rawSignal['status'] ?? 'unknown')) !== 'present') {
+                    $incomingSignalStatus = strtolower((string) ($rawSignal['status'] ?? 'unknown'));
+                    if ($targetAccountId === null || (! $session->exists && $incomingSignalStatus !== 'present')) {
                         continue;
                     }
 
@@ -251,15 +252,9 @@ final class SessionSyncService
                     ]);
 
                     $readyStatus = SessionReadyStatus::Ready->value;
-                    $wasNeedsLogin = $session->exists && (string) $session->session_state === 'needs_login';
-                    $signalTimestamp = isset($sessionSignal['checked_at']) ? strtotime((string) $sessionSignal['checked_at']) : false;
-                    $signalCheckedAt = $signalTimestamp !== false
-                        ? \Illuminate\Support\Carbon::createFromTimestamp($signalTimestamp)
-                        : null;
-                    $freshLoginSignal = $wasNeedsLogin && $signalStatus === 'present' && $signalCheckedAt?->isAfter($session->updated_at);
                     $sessionState = $session->exists && (string) $session->session_state === 'verified'
                         ? 'verified'
-                        : ($wasNeedsLogin && ! $freshLoginSignal ? 'needs_login' : 'candidate');
+                        : ($session->exists && (string) $session->session_state === 'needs_login' ? 'needs_login' : 'candidate');
 
                     $session->fill([
                         'agent_id' => $agent->id,
@@ -268,8 +263,8 @@ final class SessionSyncService
                         'domain' => $domain,
                         'ready_status' => $readyStatus,
                         'session_state' => $sessionState,
-                        'dispatch_enabled' => $wasNeedsLogin ? false : ($session->dispatch_enabled ?? true),
-                        'dispatch_pause_reason' => $freshLoginSignal ? 'login_confirmed_pending_resume' : $session->dispatch_pause_reason,
+                        'dispatch_enabled' => $session->exists ? (bool) $session->dispatch_enabled : true,
+                        'dispatch_pause_reason' => $session->dispatch_pause_reason,
                         'last_confirmed_at' => now(),
                         'capabilities' => $mergedCaps,
                     ])->save();
@@ -407,6 +402,9 @@ final class SessionSyncService
                     'site_url'=>$account?->getSiteUrl(),'session_state'=>(string)($session->session_state ?? 'candidate'),
                     'dispatch_enabled'=>(bool)($session->dispatch_enabled ?? true),'pause_reason'=>$session->dispatch_pause_reason,
                     'dispatch_eligible'=>$session->account_id !== null && in_array((string)($session->session_state ?? 'candidate'),['candidate','verified'],true),
+                    'signal_status'=>(string) data_get($session->capabilities, 'session_signal.status', 'unknown'),
+                    'signal_checked_at'=>data_get($session->capabilities, 'session_signal.checked_at'),
+                    'signal_method'=>data_get($session->capabilities, 'session_signal.method'),
                     'last_task_at'=>$session->last_task_at?->toIso8601String()];
             })->all();
             return ['id'=>(int)$agent->id,'name'=>$agent->display_name ?: 'Client machine','device_id'=>$agent->device_id,

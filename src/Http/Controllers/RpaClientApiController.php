@@ -415,6 +415,27 @@ final class RpaClientApiController extends Controller
         return new JsonResponse(['ok'=>$acked, 'acked'=>$acked], $acked ? 200 : 404);
     }
 
+    public function confirmLogin(Request $request): JsonResponse
+    {
+        $auth = $this->authorizedDevice($request);
+        if ($auth instanceof JsonResponse) return $auth;
+        [$key, $agent] = $auth;
+        $data = $request->validate([
+            'browser_id'=>'required|uuid',
+            'account_id'=>'required|uuid',
+            'checked_at'=>'required|date',
+        ]);
+        $service = $this->notifications ?? app(ClientNotificationService::class);
+        $result = $service->confirmLogin(
+            $agent,
+            (string) $key->installation_id,
+            $data['browser_id'],
+            $data['account_id'],
+            $data['checked_at'],
+        );
+        return new JsonResponse($result, ($result['ok'] ?? false) ? 200 : 422);
+    }
+
     private function authorizedDevice(Request $request): array|JsonResponse
     {
         $key = $this->resolveClientKey($request);

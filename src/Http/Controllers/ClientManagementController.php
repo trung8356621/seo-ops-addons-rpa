@@ -11,7 +11,7 @@ final class ClientManagementController extends Controller
 {
     public function notify(Request $request, int $sessionId, ClientNotificationService $service, SocialAutomationInstallationResolver $installations): JsonResponse
     {
-        $data = $request->validate(['type'=>'required|in:manual_intervention,login_required','message'=>'required|string|max:2000','idempotency_key'=>'required|string|max:128','job_id'=>'nullable|integer']);
+        $data = $request->validate(['type'=>'required|in:manual_intervention,login_required,display_message','message'=>'required|string|max:2000','idempotency_key'=>'required|string|max:128','job_id'=>'nullable|integer']);
         $installationId = $installations->resolveInstallationId();
         $session = SaBrowserSession::query()->whereKey($sessionId)->whereHas('agent', fn($q)=>$q->where('installation_id',$installationId))->firstOrFail();
         if ($data['type'] === 'login_required') {

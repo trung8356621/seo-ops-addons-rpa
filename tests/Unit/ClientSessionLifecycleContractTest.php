@@ -21,10 +21,20 @@ final class ClientSessionLifecycleContractTest extends TestCase
     public function test_notification_types_are_predefined_and_ack_is_not_verification(): void
     {
         $service = file_get_contents(dirname(__DIR__,2).'/src/Services/ClientNotificationService.php');
-        self::assertStringContainsString("['manual_intervention', 'login_required']", $service);
+        self::assertStringContainsString("['manual_intervention', 'login_required', 'display_message']", $service);
         preg_match('/public function acknowledge\(.*?\n    }/s', $service, $acknowledge);
         self::assertNotEmpty($acknowledge);
         self::assertStringNotContainsString('session_state', $acknowledge[0]);
         self::assertStringNotContainsString('dispatch_enabled', $acknowledge[0]);
+    }
+
+    public function test_login_confirmation_requires_a_fresh_signal_and_only_returns_candidate(): void
+    {
+        $service = file_get_contents(dirname(__DIR__,2).'/src/Services/ClientNotificationService.php');
+        self::assertStringContainsString("'fresh_session_signal_required'", $service);
+        self::assertStringContainsString("'session_state'=>'candidate'", $service);
+        preg_match('/public function confirmLogin\(.*?\n    }/s', $service, $confirm);
+        self::assertNotEmpty($confirm);
+        self::assertStringNotContainsString("'session_state'=>'verified'", $confirm[0]);
     }
 }

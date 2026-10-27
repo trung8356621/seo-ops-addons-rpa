@@ -315,6 +315,8 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                 Route::get('/notifications', [RpaClientApiController::class, 'notifications']);
                 Route::post('/notifications/{notificationId}/ack', [RpaClientApiController::class, 'acknowledgeNotification'])
                     ->whereUuid('notificationId');
+                Route::post('/session-confirm-login', [RpaClientApiController::class, 'confirmLogin'])
+                    ->name('social-automation.client.session-confirm-login');
             });
 
         // RPA Admin user auth + Script sync (not Runner service_api_credentials).
