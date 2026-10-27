@@ -147,6 +147,9 @@ final class SessionSyncService
                     }
 
                     $session = SaBrowserSession::query()->firstOrNew(['session_uuid' => $browserId]);
+                    if ($session->exists && (int) $session->agent_id !== (int) $agent->id) {
+                        throw new \DomainException('browser_device_mismatch');
+                    }
                     $existingCaps = is_array($session->capabilities) ? $session->capabilities : [];
 
                     // E5.1: Account Binding validation
@@ -154,6 +157,11 @@ final class SessionSyncService
                     $targetAccountId = $rawBinding ? trim((string) ($rawBinding['account_id'] ?? '')) : null;
                     if ($targetAccountId === '') {
                         $targetAccountId = null;
+                    }
+
+                    $rawSignal = is_array($item['session_signal'] ?? null) ? $item['session_signal'] : [];
+                    if ($targetAccountId === null || strtolower((string) ($rawSignal['status'] ?? 'unknown')) !== 'present') {
+                        continue;
                     }
 
                     $accountModel = null;
@@ -178,6 +186,14 @@ final class SessionSyncService
                         if (strtolower((string) $accountModel->platform) !== strtolower($platform)) {
                             throw new \DomainException('account_platform_mismatch');
                         }
+                    }
+
+                    if ($session->exists && $session->account_id !== null && (int) $session->account_id !== (int) $accountModel->id) {
+                        throw new \DomainException('browser_account_binding_immutable');
+                    }
+                    if (SaBrowserSession::query()->where('agent_id', $agent->id)
+                        ->where('account_id', $accountModel->id)->where('session_uuid', '!=', $browserId)->exists()) {
+                        throw new \DomainException('account_browser_duplicate_on_device');
                     }
 
                     $accountBinding = [
@@ -212,9 +228,8 @@ final class SessionSyncService
                     }
 
                     // E5.2: Session Signal
-                    $rawSignal = is_array($item['session_signal'] ?? null) ? $item['session_signal'] : [];
                     $signalStatus = strtolower(trim((string) ($rawSignal['status'] ?? 'unknown')));
-                    if (! in_array($signalStatus, ['present', 'absent', 'unknown'], true)) {
+                    if (! in_array($signalStatus, ['present', 'absent', 'unsupported', 'error', 'unknown'], true)) {
                         $signalStatus = 'unknown';
                     }
                     $sessionSignal = [
@@ -235,13 +250,26 @@ final class SessionSyncService
                         'last_reported_at' => now()->toIso8601String(),
                     ]);
 
-                    $readyStatus = $status === 'running' ? SessionReadyStatus::Ready->value : SessionReadyStatus::Pending->value;
+                    $readyStatus = SessionReadyStatus::Ready->value;
+                    $wasNeedsLogin = $session->exists && (string) $session->session_state === 'needs_login';
+                    $signalTimestamp = isset($sessionSignal['checked_at']) ? strtotime((string) $sessionSignal['checked_at']) : false;
+                    $signalCheckedAt = $signalTimestamp !== false
+                        ? \Illuminate\Support\Carbon::createFromTimestamp($signalTimestamp)
+                        : null;
+                    $freshLoginSignal = $wasNeedsLogin && $signalStatus === 'present' && $signalCheckedAt?->isAfter($session->updated_at);
+                    $sessionState = $session->exists && (string) $session->session_state === 'verified'
+                        ? 'verified'
+                        : ($wasNeedsLogin && ! $freshLoginSignal ? 'needs_login' : 'candidate');
 
                     $session->fill([
                         'agent_id' => $agent->id,
+                        'account_id' => $accountModel->id,
                         'platform' => $platform,
                         'domain' => $domain,
                         'ready_status' => $readyStatus,
+                        'session_state' => $sessionState,
+                        'dispatch_enabled' => $wasNeedsLogin ? false : ($session->dispatch_enabled ?? true),
+                        'dispatch_pause_reason' => $freshLoginSignal ? 'login_confirmed_pending_resume' : $session->dispatch_pause_reason,
                         'last_confirmed_at' => now(),
                         'capabilities' => $mergedCaps,
                     ])->save();
@@ -279,6 +307,7 @@ final class SessionSyncService
                         'session_signal' => $sessionSignal,
                         'execution_confirmation' => $executionConfirmation,
                         'ready_status' => $readyStatus,
+                        'session_state' => $sessionState,
                         'last_reported_at' => $mergedCaps['last_reported_at'],
                     ];
                 }
@@ -288,7 +317,9 @@ final class SessionSyncService
         } catch (\DomainException $de) {
             return ['ok' => false, 'errors' => [$de->getMessage()]];
         } catch (Throwable $e) {
-            return ['ok' => false, 'errors' => ['sync_failed: '.$e->getMessage()]];
+            report($e);
+
+            return ['ok' => false, 'errors' => ['sync_failed']];
         }
 
         return [
@@ -360,6 +391,48 @@ final class SessionSyncService
                     'last_seen_at' => $capabilities['last_reported_at'] ?? $s->last_confirmed_at?->toIso8601String(),
                 ];
             })->all();
+    }
+
+    /** @return array{metrics: array<string,int>, devices:list<array<string,mixed>>} */
+    public function clientDashboard(): array
+    {
+        if (! SocialAutomationSchema::agentsReady()) return ['metrics'=>['users_online'=>0,'machines_online'=>0,'machines_total'=>0,'unlinked_accounts'=>0,'sessions_available'=>0],'devices'=>[]];
+        $agents = SaAgent::query()->where('agent_kind', 'client')->with('browserSessions')->orderByDesc('last_heartbeat_at')->get();
+        $devices = $agents->map(function (SaAgent $agent): array {
+            $online = $this->online->isOnline($agent->last_heartbeat_at);
+            $browsers = $agent->browserSessions->map(function (SaBrowserSession $session): array {
+                $account = $session->account_id ? SaAccount::query()->find($session->account_id) : null;
+                return ['id'=>(int)$session->id,'browser_id'=>(string)$session->session_uuid,
+                    'account_name'=>$account?->getAccountName() ?: 'Legacy / Unlinked','platform'=>(string)($account?->platform ?? $session->platform ?? 'unknown'),
+                    'site_url'=>$account?->getSiteUrl(),'session_state'=>(string)($session->session_state ?? 'candidate'),
+                    'dispatch_enabled'=>(bool)($session->dispatch_enabled ?? true),'pause_reason'=>$session->dispatch_pause_reason,
+                    'dispatch_eligible'=>$session->account_id !== null && in_array((string)($session->session_state ?? 'candidate'),['candidate','verified'],true),
+                    'last_task_at'=>$session->last_task_at?->toIso8601String()];
+            })->all();
+            return ['id'=>(int)$agent->id,'name'=>$agent->display_name ?: 'Client machine','device_id'=>$agent->device_id,
+                'online'=>$online,'last_seen'=>$agent->last_heartbeat_at?->toIso8601String(),'browsers'=>$browsers,
+                'available_count'=>count(array_filter($browsers, fn($b)=>$b['dispatch_eligible'] && $b['dispatch_enabled']))];
+        })->all();
+        $sessions = $agents->flatMap(fn(SaAgent $a)=>$a->browserSessions);
+        return ['metrics'=>['users_online'=>$agents->filter(fn(SaAgent $a)=>$this->online->isOnline($a->last_heartbeat_at))->pluck('device_id')->unique()->count(),
+            'machines_online'=>$agents->filter(fn(SaAgent $a)=>$this->online->isOnline($a->last_heartbeat_at))->count(),'machines_total'=>$agents->count(),
+            'unlinked_accounts'=>$sessions->whereNull('account_id')->count(),
+            'sessions_available'=>$sessions->filter(fn(SaBrowserSession $s)=>$s->account_id !== null && (bool)($s->dispatch_enabled ?? true) && in_array((string)($s->session_state ?? 'candidate'),['candidate','verified'],true))->count()],
+            'devices'=>$devices];
+    }
+
+    public function setDispatch(int $sessionId, bool $enabled): bool
+    {
+        $query = SaBrowserSession::query()->whereKey($sessionId);
+        if ($enabled) $query->whereNotNull('account_id')->whereIn('session_state',['candidate','verified']);
+        return $query->update(['dispatch_enabled'=>$enabled,
+            'dispatch_pause_reason'=>$enabled ? null : 'manual_disabled']) === 1;
+    }
+
+    public function requireLogin(int $sessionId): bool
+    {
+        return SaBrowserSession::query()->whereKey($sessionId)->whereNotNull('account_id')->update(['session_state'=>'needs_login',
+            'dispatch_enabled'=>false,'dispatch_pause_reason'=>'needs_login']) === 1;
     }
 
     /**

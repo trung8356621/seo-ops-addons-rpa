@@ -64,19 +64,13 @@ final class SaAccountService
             : (isset($data['declared_email']) && trim((string) $data['declared_email']) !== ''
                 ? trim((string) $data['declared_email'])
                 : null);
-        if ($email === null) {
+        if ($email === null || filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
             throw new InvalidArgumentException('Email is required.');
         }
 
         $siteUrl = isset($data['site_url']) && trim((string) $data['site_url']) !== ''
             ? trim((string) $data['site_url'])
             : null;
-
-        $rawPassword = isset($data['password']) && is_string($data['password']) && trim($data['password']) !== ''
-            ? trim($data['password'])
-            : null;
-
-        $encryptedPassword = $rawPassword !== null ? $this->encryptPassword($rawPassword) : null;
 
         $note = isset($data['note']) && trim((string) $data['note']) !== ''
             ? trim((string) $data['note'])
@@ -93,7 +87,7 @@ final class SaAccountService
             'email' => $email,
             'declared_email' => $email,
             'site_url' => $siteUrl,
-            'encrypted_password' => $encryptedPassword,
+            'encrypted_password' => null,
             'note' => $note,
             'created_by' => $userId,
             'identity_source' => 'inventory',
@@ -142,7 +136,7 @@ final class SaAccountService
         if (array_key_exists('email', $data) || array_key_exists('declared_email', $data)) {
             $e = $data['email'] ?? $data['declared_email'] ?? null;
             $email = $e !== null && trim((string) $e) !== '' ? trim((string) $e) : null;
-            if ($email === null) {
+            if ($email === null || filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
                 throw new InvalidArgumentException('Email is required.');
             }
             $attributes['email'] = $email;
@@ -160,19 +154,29 @@ final class SaAccountService
             $attributes['note'] = $note;
         }
 
-        // Rule D: If password is empty or not provided, preserve existing password!
-        if (array_key_exists('password', $data)) {
-            $rawPassword = $data['password'];
-            if (is_string($rawPassword) && trim($rawPassword) !== '') {
-                $attributes['encrypted_password'] = $this->encryptPassword(trim($rawPassword));
-            }
-        }
-
         if ($attributes === []) {
             return $account;
         }
 
         return $this->repository->update($id, $resolvedId, $attributes);
+    }
+
+    public function updatePassword(int $id, string $password, ?string $installationId = null): ?SaAccount
+    {
+        $resolvedId = $installationId ?: $this->installationResolver->resolveInstallationId();
+        $account = $this->repository->find($id, $resolvedId);
+        if (! $account instanceof SaAccount) {
+            return null;
+        }
+
+        $password = trim($password);
+        if ($password === '') {
+            throw new InvalidArgumentException('Password is required.');
+        }
+
+        return $this->repository->update($id, $resolvedId, [
+            'encrypted_password' => $this->encryptPassword($password),
+        ]);
     }
 
     public function delete(int $id, ?string $installationId = null): bool

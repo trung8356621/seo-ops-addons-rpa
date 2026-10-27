@@ -32,6 +32,8 @@ final class SocialAutomationAccountsPage extends Page
 
     public bool $showEditModal = false;
 
+    public bool $showPasswordModal = false;
+
     public ?int $editingAccountId = null;
 
     public string $platform = 'Facebook';
@@ -43,6 +45,12 @@ final class SocialAutomationAccountsPage extends Page
     public string $site_url = '';
 
     public string $password = '';
+
+    public string $password_confirmation = '';
+
+    public string $passwordAccountName = '';
+
+    public bool $passwordAccountHasPassword = false;
 
     public string $note = '';
 
@@ -128,7 +136,6 @@ final class SocialAutomationAccountsPage extends Page
             'name' => $name,
             'email' => $email,
             'site_url' => trim($this->site_url) !== '' ? trim($this->site_url) : null,
-            'password' => $this->password,
             'note' => $this->note,
         ], $userId);
 
@@ -157,7 +164,6 @@ final class SocialAutomationAccountsPage extends Page
         $this->name = $account->getAccountName();
         $this->email = (string) ($account->getDisplayEmail() ?? '');
         $this->site_url = (string) ($account->getSiteUrl() ?? '');
-        $this->password = ''; // Always empty by default
         $this->note = (string) ($account->getAttribute('note') ?? '');
 
         $this->showEditModal = true;
@@ -205,11 +211,6 @@ final class SocialAutomationAccountsPage extends Page
             'note' => $this->note,
         ];
 
-        // Rule D: If empty string, keep old password. If provided, update.
-        if (trim($this->password) !== '') {
-            $payload['password'] = trim($this->password);
-        }
-
         $result = app(SaAccountService::class)->update($this->editingAccountId, $payload);
         if (! $result instanceof SaAccount) {
             Notification::make()->title('Không tìm thấy tài khoản.')->danger()->send();
@@ -224,6 +225,52 @@ final class SocialAutomationAccountsPage extends Page
             ->title(__('social-automation::filament.accounts.update_success'))
             ->success()
             ->send();
+    }
+
+    public function openPasswordModal(int $id): void
+    {
+        app(SocialAutomationAccess::class)->assertCanManageAccounts();
+        $account = app(SaAccountService::class)->find($id);
+        if (! $account instanceof SaAccount) {
+            Notification::make()->title('Không tìm thấy tài khoản.')->danger()->send();
+            return;
+        }
+
+        $this->editingAccountId = $id;
+        $this->passwordAccountName = $account->getAccountName();
+        $this->passwordAccountHasPassword = $account->hasPassword();
+        $this->password = '';
+        $this->password_confirmation = '';
+        $this->showPasswordModal = true;
+    }
+
+    public function closePasswordModal(): void
+    {
+        $this->showPasswordModal = false;
+        $this->resetPasswordForm();
+    }
+
+    public function updatePassword(): void
+    {
+        app(SocialAutomationAccess::class)->assertCanManageAccounts();
+        if ($this->editingAccountId === null || trim($this->password) === '') {
+            Notification::make()->title('Mật khẩu mới là bắt buộc.')->danger()->send();
+            return;
+        }
+        if ($this->password !== $this->password_confirmation) {
+            Notification::make()->title('Xác nhận mật khẩu không khớp.')->danger()->send();
+            return;
+        }
+
+        $account = app(SaAccountService::class)->updatePassword($this->editingAccountId, $this->password);
+        if (! $account instanceof SaAccount) {
+            Notification::make()->title('Không tìm thấy tài khoản.')->danger()->send();
+            return;
+        }
+
+        $this->showPasswordModal = false;
+        $this->resetPasswordForm();
+        Notification::make()->title('Đã lưu mật khẩu.')->success()->send();
     }
 
     public function deleteAccount(int $id): void
@@ -251,6 +298,16 @@ final class SocialAutomationAccountsPage extends Page
         $this->email = '';
         $this->site_url = '';
         $this->password = '';
+        $this->password_confirmation = '';
         $this->note = '';
+    }
+
+    private function resetPasswordForm(): void
+    {
+        $this->editingAccountId = null;
+        $this->password = '';
+        $this->password_confirmation = '';
+        $this->passwordAccountName = '';
+        $this->passwordAccountHasPassword = false;
     }
 }

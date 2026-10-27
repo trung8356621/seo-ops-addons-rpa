@@ -1,134 +1,36 @@
 <x-filament-panels::page>
-    @php
-        $rows = $rows ?? (isset($this) && method_exists($this, 'rows') ? $this->rows() : app(\Omnichannel\Addons\SocialAutomation\Registry\SessionSyncService::class)->listForUi());
-    @endphp
-    <div class="space-y-4 max-w-7xl">
-        <p class="text-sm text-gray-600 dark:text-gray-300">{{ __('social-automation::filament.sessions.intro') }}</p>
-        @if ($rows === [])
-            <div class="rounded-lg border border-dashed border-gray-300 p-6 text-sm text-gray-500 dark:border-gray-600">
-                {{ __('social-automation::filament.sessions.empty') }}
-            </div>
-        @else
-            <div class="overflow-hidden rounded-lg border border-gray-200 shadow-sm dark:border-gray-700">
-                <table class="min-w-full divide-y divide-gray-200 text-sm dark:divide-gray-700">
-                    <thead class="bg-gray-50 dark:bg-gray-800">
-                        <tr>
-                            <th class="px-3 py-2.5 text-left font-semibold">Tên Browser</th>
-                            <th class="px-3 py-2.5 text-left font-semibold">Thiết bị</th>
-                            <th class="px-3 py-2.5 text-left font-semibold">Nền tảng</th>
-                            <th class="px-3 py-2.5 text-left font-semibold">Account Binding</th>
-                            <th class="px-3 py-2.5 text-left font-semibold">Session Signal</th>
-                            <th class="px-3 py-2.5 text-left font-semibold">Trạng thái Browser</th>
-                            <th class="px-3 py-2.5 text-left font-semibold">Xác nhận thực thi</th>
-                            <th class="px-3 py-2.5 text-left font-semibold">Last Seen</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-gray-200 dark:divide-gray-700 bg-white dark:bg-gray-900">
-                        @foreach ($rows as $row)
-                            @php
-                                $status = $row['effective_status'] ?? ($row['status'] ?? 'stopped');
-                                $browserId = $row['browser_id'] ?? ($row['session_uuid'] ?? '');
-                                $shortBrowserId = strlen($browserId) > 16 ? substr($browserId, 0, 8) . '...' . substr($browserId, -6) : $browserId;
-                                $isDeviceOnline = (bool) ($row['device_online'] ?? false);
-                                $accountName = $row['account_name'] ?? ($row['account_binding']['account_name'] ?? null);
-                                $accountId = $row['account_binding']['account_id'] ?? null;
-                                $signalStatus = $row['session_signal']['status'] ?? 'unknown';
-                                $execStatus = $row['execution_confirmation']['status'] ?? 'not_run';
-                            @endphp
-                            <tr class="hover:bg-gray-50/50 dark:hover:bg-gray-800/50">
-                                <td class="px-3 py-2.5 font-medium text-gray-900 dark:text-gray-100">
-                                    <div>{{ $row['name'] ?? ($row['session_uuid'] ?? 'Browser Profile') }}</div>
-                                    <div class="font-mono text-[11px] text-gray-400" title="{{ $browserId }}">{{ $shortBrowserId }}</div>
-                                </td>
-                                <td class="px-3 py-2.5 text-xs text-gray-600 dark:text-gray-400">
-                                    <div class="font-medium text-gray-800 dark:text-gray-200">{{ $row['device_name'] ?? '—' }}</div>
-                                    <div class="flex items-center gap-1.5 mt-0.5">
-                                        @if ($isDeviceOnline)
-                                            <span class="inline-flex items-center text-[11px] text-emerald-600 dark:text-emerald-400 font-medium">● Online</span>
-                                        @else
-                                            <span class="inline-flex items-center text-[11px] text-gray-400">○ Offline</span>
-                                        @endif
-                                        <span class="font-mono text-[11px] text-gray-400">({{ substr((string)($row['device_id'] ?? ''), 0, 10) }})</span>
-                                    </div>
-                                </td>
-                                <td class="px-3 py-2.5 text-xs">
-                                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-950/40 dark:text-blue-400 dark:border-blue-800">
-                                        {{ $row['platform'] ?? 'facebook' }}
-                                    </span>
-                                </td>
-                                <td class="px-3 py-2.5 text-xs">
-                                    @if ($accountId)
-                                        <div class="font-medium text-gray-900 dark:text-gray-100">{{ $accountName ?: 'Account' }}</div>
-                                        <div class="font-mono text-[11px] text-blue-500">{{ substr($accountId, 0, 8) }}...</div>
-                                    @else
-                                        <span class="text-gray-400 italic">Chưa liên kết</span>
-                                    @endif
-                                </td>
-                                <td class="px-3 py-2.5 text-xs">
-                                    @if ($signalStatus === 'present')
-                                        <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400 dark:border-emerald-800" title="Phát hiện cookie c_user trong session">
-                                            <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                                            Có tín hiệu
-                                        </span>
-                                    @elseif ($signalStatus === 'absent')
-                                        <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-950/40 dark:text-amber-400 dark:border-amber-800" title="Chưa phát hiện cookie c_user">
-                                            <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
-                                            Chưa phát hiện
-                                        </span>
-                                    @else
-                                        <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-500 border border-gray-200 dark:bg-gray-800 dark:text-gray-400 dark:border-gray-700">
-                                            Chưa kiểm tra
-                                        </span>
-                                    @endif
-                                </td>
-                                <td class="px-3 py-2.5">
-                                    @if ($status === 'running')
-                                        <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400 dark:border-emerald-800">
-                                            <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                                            Running
-                                        </span>
-                                    @elseif ($status === 'unknown_stale')
-                                        <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-950/40 dark:text-amber-400 dark:border-amber-800" title="Thiết bị đang Offline; trạng thái không thể xác thực">
-                                            <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
-                                            Unknown / Stale
-                                        </span>
-                                    @elseif ($status === 'error' || $status === 'crashed')
-                                        <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-rose-50 text-rose-700 border border-rose-200 dark:bg-rose-950/40 dark:text-rose-400 dark:border-rose-800">
-                                            <span class="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
-                                            Error
-                                        </span>
-                                    @else
-                                        <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600 border border-gray-200 dark:bg-gray-800 dark:text-gray-400 dark:border-gray-700">
-                                            <span class="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
-                                            Stopped
-                                        </span>
-                                    @endif
-                                </td>
-                                <td class="px-3 py-2.5 text-xs">
-                                    @if ($execStatus === 'confirmed')
-                                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400">
-                                            Confirmed
-                                        </span>
-                                    @elseif ($execStatus === 'pending_review')
-                                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-950/40 dark:text-blue-400">
-                                            Pending Review
-                                        </span>
-                                    @elseif ($execStatus === 'failed')
-                                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-rose-50 text-rose-700 border border-rose-200 dark:bg-rose-950/40 dark:text-rose-400">
-                                            Failed
-                                        </span>
-                                    @else
-                                        <span class="text-gray-400">Chưa chạy (not_run)</span>
-                                    @endif
-                                </td>
-                                <td class="px-3 py-2.5 text-xs text-gray-500 dark:text-gray-400 font-mono">
-                                    {{ $row['last_seen_at'] ?? ($row['last_confirmed_at'] ?? '—') }}
-                                </td>
-                            </tr>
-                        @endforeach
-                    </tbody>
-                </table>
-            </div>
-        @endif
+@php
+    $dashboard = $this->dashboard();
+    $onlineDevices = collect($dashboard['devices'])->where('online', true)->values();
+    $offlineDevices = collect($dashboard['devices'])->where('online', false)->values();
+@endphp
+<div class="w-full space-y-6">
+    <p class="text-sm text-gray-500 dark:text-gray-400">Theo dõi heartbeat của máy, trạng thái phiên đăng nhập và quyền nhận Task độc lập.</p>
+    <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        @foreach ([['Online device identities', $dashboard['metrics']['users_online']], ['Machines online', $dashboard['metrics']['machines_online'].' / '.$dashboard['metrics']['machines_total']], ['Legacy / unlinked sessions', $dashboard['metrics']['unlinked_accounts']], ['Dispatchable sessions', $dashboard['metrics']['sessions_available']]] as [$label, $value])
+            <div class="flex min-h-24 flex-col justify-between rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900"><div class="text-xs font-medium text-gray-500 dark:text-gray-400">{{ $label }}</div><div class="mt-2 text-2xl font-semibold text-gray-950 dark:text-white">{{ $value }}</div></div>
+        @endforeach
     </div>
+    <section class="space-y-3">
+        <div class="flex items-center justify-between"><h2 class="text-sm font-semibold text-gray-950 dark:text-white">Online Devices</h2><span class="text-xs text-gray-500">{{ $onlineDevices->count() }} online</span></div>
+        @forelse($onlineDevices as $device)
+            @include('social-automation::filament.pages.partials.device-group', ['device' => $device])
+        @empty
+            <div class="rounded-xl border border-dashed border-gray-300 p-6 text-sm text-gray-500 dark:border-gray-700">Không có máy online. Session đã lưu không bị xem là mất đăng nhập chỉ vì máy offline.</div>
+        @endforelse
+    </section>
+    <details class="group rounded-xl border border-gray-200 bg-gray-50/60 dark:border-gray-700 dark:bg-gray-900/40">
+        <summary class="flex cursor-pointer list-none items-center justify-between gap-3 p-4">
+            <div><h2 class="text-sm font-semibold text-gray-950 dark:text-white">Offline / Legacy Devices</h2><p class="mt-1 text-xs text-gray-500">Giữ nguyên {{ $offlineDevices->count() }} record lịch sử; không tự merge theo hostname.</p></div>
+            <span class="text-xs text-gray-500 group-open:hidden">Mở danh sách</span><span class="hidden text-xs text-gray-500 group-open:inline">Thu gọn</span>
+        </summary>
+        <div class="space-y-3 border-t border-gray-200 p-4 dark:border-gray-700">
+            @forelse($offlineDevices as $device)
+                @include('social-automation::filament.pages.partials.device-group', ['device' => $device])
+            @empty
+                <div class="text-sm text-gray-500">Không có máy offline hoặc legacy.</div>
+            @endforelse
+        </div>
+    </details>
+</div>
 </x-filament-panels::page>

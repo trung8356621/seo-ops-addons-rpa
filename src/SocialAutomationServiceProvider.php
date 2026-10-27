@@ -88,6 +88,7 @@ final class SocialAutomationServiceProvider extends ServiceProvider
         $this->app->singleton(JobStateMachine::class);
         $this->app->singleton(AgentRegistryService::class);
         $this->app->singleton(SessionSyncService::class);
+        $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\ClientNotificationService::class);
         $this->app->singleton(JobOrchestrator::class);
         $this->app->singleton(ScheduleDispatcher::class);
         $this->app->singleton(DashboardMetrics::class);
@@ -277,6 +278,8 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                         ->whereNumber('id')
                         ->name('social-automation.accounts.destroy');
                 });
+                Route::post('/api/clients/sessions/{sessionId}/notifications', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ClientManagementController::class, 'notify'])
+                    ->whereNumber('sessionId')->name('social-automation.clients.notifications.store');
             });
 
         // RPA Client Key Endpoints (Bearer <client_api_key>)
@@ -305,6 +308,13 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                 // E5: List bindable accounts for client
                 Route::get('/accounts', [RpaClientApiController::class, 'listBindableAccounts'])
                     ->name('social-automation.client.accounts');
+                Route::get('/accounts/{accountId}', [RpaClientApiController::class, 'getAccount'])
+                    ->name('social-automation.client.account');
+                Route::get('/accounts/{accountId}/password', [RpaClientApiController::class, 'getAccountPassword'])
+                    ->name('social-automation.client.account-password');
+                Route::get('/notifications', [RpaClientApiController::class, 'notifications']);
+                Route::post('/notifications/{notificationId}/ack', [RpaClientApiController::class, 'acknowledgeNotification'])
+                    ->whereUuid('notificationId');
             });
 
         // RPA Admin user auth + Script sync (not Runner service_api_credentials).

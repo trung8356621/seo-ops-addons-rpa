@@ -16,6 +16,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaBrowserSession;
 use Omnichannel\Addons\SocialAutomation\Models\SaClientApiKey;
 use Omnichannel\Addons\SocialAutomation\Registry\AgentRegistryService;
 use Omnichannel\Addons\SocialAutomation\Registry\SessionSyncService;
+use Omnichannel\Addons\SocialAutomation\Services\ClientNotificationService;
 
 final class RpaClientApiController extends Controller
 {
@@ -23,6 +24,7 @@ final class RpaClientApiController extends Controller
         private readonly AgentRegistryService $agents,
         private readonly SessionSyncService $sessionSync,
         private readonly ?SaAccountRepositoryContract $accountsRepo = null,
+        private readonly ?ClientNotificationService $notifications = null,
     ) {}
 
     /**
@@ -69,6 +71,7 @@ final class RpaClientApiController extends Controller
 
         $payload = $request->all();
         $payload['agent_kind'] = AgentKindPolicy::KIND_CLIENT;
+        $payload['installation_id'] = (string) $clientKey->getAttribute('installation_id');
 
         $result = $this->agents->register($payload, credentialId: null, clientApiKeyId: (int) $clientKey->id);
 
@@ -90,7 +93,14 @@ final class RpaClientApiController extends Controller
             return new JsonResponse(['ok' => false, 'error' => 'device_identifier_required'], 422);
         }
 
-        $result = $this->agents->heartbeat($agentUuid, $request->all(), credentialId: null, clientApiKeyId: (int) $clientKey->id);
+        $agent = SaAgent::query()->where(function ($query) use ($agentUuid): void {
+            $query->where('agent_uuid', $agentUuid)->orWhere('device_id', $agentUuid);
+        })->where('installation_id', (string) $clientKey->installation_id)->first();
+        if (! $agent instanceof SaAgent) {
+            return new JsonResponse(['ok' => false, 'error' => 'device_not_registered'], 404);
+        }
+
+        $result = $this->agents->heartbeat((string) $agent->agent_uuid, $request->all(), credentialId: null, clientApiKeyId: (int) $clientKey->id);
 
         return new JsonResponse($result, ($result['ok'] ?? false) ? 200 : 422);
     }
@@ -105,7 +115,12 @@ final class RpaClientApiController extends Controller
             return new JsonResponse(['ok' => false, 'error' => 'unauthenticated'], 401);
         }
 
-        $result = $this->agents->heartbeat($agentUuid, $request->all(), credentialId: null, clientApiKeyId: (int) $clientKey->id);
+        $agent = SaAgent::query()->where('agent_uuid', $agentUuid)
+            ->where('installation_id', (string) $clientKey->installation_id)->first();
+        if (! $agent instanceof SaAgent) {
+            return new JsonResponse(['ok' => false, 'error' => 'device_not_registered'], 404);
+        }
+        $result = $this->agents->heartbeat((string) $agent->agent_uuid, $request->all(), credentialId: null, clientApiKeyId: (int) $clientKey->id);
 
         return new JsonResponse($result, ($result['ok'] ?? false) ? 200 : 422);
     }
@@ -126,7 +141,8 @@ final class RpaClientApiController extends Controller
             return new JsonResponse(['ok' => false, 'error' => 'device_id_required'], 422);
         }
 
-        $agent = SaAgent::query()->where('device_id', $deviceId)->first();
+        $agent = SaAgent::query()->where('device_id', $deviceId)
+            ->where('installation_id', (string) $clientKey->installation_id)->first();
         if (! $agent instanceof SaAgent) {
             return new JsonResponse(['ok' => false, 'error' => 'device_not_registered'], 404);
         }
@@ -237,6 +253,83 @@ final class RpaClientApiController extends Controller
         ]);
     }
 
+    public function getAccount(Request $request, string $accountId): JsonResponse
+    {
+        $auth = $this->authorizeAccount($request, $accountId);
+        if ($auth instanceof JsonResponse) {
+            return $auth;
+        }
+        $account = $auth;
+
+        return new JsonResponse([
+            'ok' => true,
+            'account' => [
+                'account_id' => (string) ($account->account_uuid ?? $account->id),
+                'platform' => strtolower((string) $account->platform),
+                'display_name' => $account->getAccountName(),
+                'email' => $account->getDisplayEmail(),
+                'site_url' => $account->getSiteUrl(),
+                'password_status' => $account->hasPassword() ? 'available' : 'not_set',
+            ],
+        ]);
+    }
+
+    public function getAccountPassword(Request $request, string $accountId): JsonResponse
+    {
+        if (! $request->isSecure() && ! $this->allowsInsecureLocalPasswordAccess($request)) {
+            return new JsonResponse(['ok' => false, 'error' => 'https_required'], 400);
+        }
+        $auth = $this->authorizeAccount($request, $accountId);
+        if ($auth instanceof JsonResponse) {
+            return $auth;
+        }
+        $account = $auth;
+        if (! $account->hasPassword()) {
+            return new JsonResponse(['ok' => false, 'error' => 'password_not_set'], 404);
+        }
+
+        $password = $account->getDecryptedPassword();
+        if ($password === null) {
+            return new JsonResponse(['ok' => false, 'error' => 'password_decryption_failed'], 500);
+        }
+
+        $response = new JsonResponse(['ok' => true, 'password' => $password]);
+        $response->headers->set('Cache-Control', 'no-store, private');
+        $response->headers->set('Pragma', 'no-cache');
+        return $response;
+    }
+
+    private function authorizeAccount(Request $request, string $accountId): SaAccount|JsonResponse
+    {
+        $clientKey = $this->resolveClientKey($request);
+        if (! $clientKey instanceof SaClientApiKey) {
+            return new JsonResponse(['ok' => false, 'error' => 'unauthenticated'], 401);
+        }
+        $installationId = (string) $clientKey->installation_id;
+        $account = SaAccount::query()->where(function ($query) use ($accountId): void {
+            $query->where('account_uuid', $accountId);
+            if (ctype_digit($accountId)) {
+                $query->orWhere('id', (int) $accountId);
+            }
+        })->first();
+        if (! $account instanceof SaAccount) {
+            return new JsonResponse(['ok' => false, 'error' => 'account_not_found'], 404);
+        }
+        if ((string) $account->installation_id !== $installationId) {
+            return new JsonResponse(['ok' => false, 'error' => 'installation_forbidden'], 403);
+        }
+        return $account;
+    }
+
+    private function allowsInsecureLocalPasswordAccess(Request $request): bool
+    {
+        if (! function_exists('app') || ! app()->environment('local')) {
+            return false;
+        }
+        $host = strtolower($request->getHost());
+        return in_array($host, ['localhost', '127.0.0.1', '::1'], true) || str_ends_with($host, '.test');
+    }
+
     /**
      * E4: Delete Browser Profile metadata from SEO-OPS.
      */
@@ -252,7 +345,8 @@ final class RpaClientApiController extends Controller
             return new JsonResponse(['ok' => false, 'error' => 'device_id_required'], 422);
         }
 
-        $agent = SaAgent::query()->where('device_id', $deviceId)->first();
+        $agent = SaAgent::query()->where('device_id', $deviceId)
+            ->where('installation_id', (string) $clientKey->installation_id)->first();
         if (! $agent instanceof SaAgent) {
             return new JsonResponse(['ok' => false, 'error' => 'device_not_registered'], 404);
         }
@@ -284,7 +378,8 @@ final class RpaClientApiController extends Controller
         $deviceId = trim((string) ($request->input('device_id') ?? ''));
         $query = SaBrowserSession::query();
         if ($deviceId !== '') {
-            $agent = SaAgent::query()->where('device_id', $deviceId)->first();
+            $agent = SaAgent::query()->where('device_id', $deviceId)
+                ->where('installation_id', (string) $clientKey->installation_id)->first();
             if ($agent instanceof SaAgent) {
                 $query->where('agent_id', $agent->id);
             }
@@ -299,6 +394,37 @@ final class RpaClientApiController extends Controller
         ]);
 
         return new JsonResponse(['ok' => true, 'browsers' => $sessions]);
+    }
+
+    public function notifications(Request $request): JsonResponse
+    {
+        $auth = $this->authorizedDevice($request);
+        if ($auth instanceof JsonResponse) return $auth;
+        [$key, $agent] = $auth;
+        $service = $this->notifications ?? app(ClientNotificationService::class);
+        return new JsonResponse(['ok'=>true, 'notifications'=>$service->pending($agent, (string) $key->installation_id)]);
+    }
+
+    public function acknowledgeNotification(Request $request, string $notificationId): JsonResponse
+    {
+        $auth = $this->authorizedDevice($request);
+        if ($auth instanceof JsonResponse) return $auth;
+        [$key, $agent] = $auth;
+        $service = $this->notifications ?? app(ClientNotificationService::class);
+        $acked = $service->acknowledge($agent, (string) $key->installation_id, $notificationId);
+        return new JsonResponse(['ok'=>$acked, 'acked'=>$acked], $acked ? 200 : 404);
+    }
+
+    private function authorizedDevice(Request $request): array|JsonResponse
+    {
+        $key = $this->resolveClientKey($request);
+        if (! $key instanceof SaClientApiKey) return new JsonResponse(['ok'=>false,'error'=>'unauthenticated'],401);
+        $deviceId = trim((string) ($request->header('X-Device-Id') ?: $request->input('device_id')));
+        $agent = SaAgent::query()->where('device_id',$deviceId)->where('installation_id',(string)$key->installation_id)->first();
+        if (! $agent instanceof SaAgent || ($agent->client_api_key_id !== null && (int)$agent->client_api_key_id !== (int)$key->id)) {
+            return new JsonResponse(['ok'=>false,'error'=>'device_forbidden'],403);
+        }
+        return [$key,$agent];
     }
 
     private function resolveClientKey(Request $request): ?SaClientApiKey

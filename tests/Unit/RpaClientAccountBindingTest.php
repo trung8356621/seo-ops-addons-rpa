@@ -98,4 +98,10 @@ final class RpaClientAccountBindingTest extends TestCase
         self::assertContains('schema_unavailable', $errors);
         self::assertFalse(in_array('session_forbidden_field:session_signal.method', $errors, true));
     }
+
+    public function test_wordpress_and_explicit_non_success_session_states_are_allowed(): void
+    {
+        $source = (string) file_get_contents(dirname(__DIR__, 2).'/src/Registry/SessionSyncService.php');
+        self::assertStringContainsString("['present', 'absent', 'unsupported', 'error', 'unknown']", $source);
+    }
 }

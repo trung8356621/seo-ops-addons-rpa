@@ -20,6 +20,8 @@ use Omnichannel\Addons\SocialAutomation\PackageRegistry\PackageRegistryService;
 use Omnichannel\Addons\SocialAutomation\Enums\AgentAvailability;
 use Omnichannel\Addons\SocialAutomation\Enums\JobStatus;
 use Omnichannel\Addons\SocialAutomation\Models\SaAccount;
+use Omnichannel\Addons\SocialAutomation\Models\SaAccountDeviceAffinity;
+use Omnichannel\Addons\SocialAutomation\Models\SaAccountExecutionLease;
 use Omnichannel\Addons\SocialAutomation\Models\SaAgent;
 use Omnichannel\Addons\SocialAutomation\Models\SaBrowserSession;
 use Omnichannel\Addons\SocialAutomation\Models\SaJob;
@@ -226,6 +228,9 @@ final class JobOrchestrator
 
                 $job->lease_expires_at = now()->addSeconds(self::DEFAULT_LEASE_SECONDS);
                 $job->save();
+                SaAccountExecutionLease::query()->where('job_id', $job->id)->where('status', 'active')->update([
+                    'heartbeat_at'=>now(), 'expires_at'=>now()->addSeconds(self::DEFAULT_LEASE_SECONDS),
+                ]);
 
                 return ['ok' => true, 'job' => $this->jobArray($job)];
             });
@@ -416,6 +421,10 @@ final class JobOrchestrator
 
         $sessions = [];
         foreach (SaBrowserSession::query()->get() as $session) {
+            if (! (bool) ($session->dispatch_enabled ?? true)
+                || ! in_array((string) ($session->session_state ?? 'candidate'), ['candidate', 'verified'], true)) {
+                continue;
+            }
             $activeBind = SaSessionAccount::query()
                 ->where('browser_session_id', $session->id)
                 ->where('is_active', true)
@@ -433,6 +442,12 @@ final class JobOrchestrator
                         'identity_source' => $account->identity_source,
                     ];
                 }
+            }
+
+            $affinity = $accountId ? SaAccountDeviceAffinity::query()->where('account_id', $accountId)->first() : null;
+            if ($affinity instanceof SaAccountDeviceAffinity && $affinity->affinity_until?->isFuture()
+                && (int) $affinity->agent_id !== (int) $session->agent_id) {
+                continue;
             }
 
             $busy = $session->locked_job_id !== null
@@ -472,6 +487,10 @@ final class JobOrchestrator
     ): ?SaJob {
         $session = SaBrowserSession::query()->lockForUpdate()->find($sessionRow['session_id'] ?? null);
         if (! $session instanceof SaBrowserSession) {
+            return null;
+        }
+        if (! (bool) ($session->dispatch_enabled ?? true)
+            || ! in_array((string) ($session->session_state ?? 'candidate'), ['candidate', 'verified'], true)) {
             return null;
         }
 
@@ -526,6 +545,11 @@ final class JobOrchestrator
         if (! $this->accountLocks->canAssign($accountId, $accountJobs)) {
             return null;
         }
+        $affinity = SaAccountDeviceAffinity::query()->where('account_id', $accountId)->lockForUpdate()->first();
+        if ($affinity instanceof SaAccountDeviceAffinity && $affinity->affinity_until?->isFuture()
+            && (int) $affinity->agent_id !== (int) $agent->id) {
+            return null;
+        }
 
         $idem = JobIdempotencyKey::forDispatch(
             (string) $task->task_uuid,
@@ -578,6 +602,16 @@ final class JobOrchestrator
             'reserved_at' => now(),
             'lease_expires_at' => now()->addSeconds(self::DEFAULT_LEASE_SECONDS),
             'dispatch_source' => $source,
+        ]);
+
+        SaAccountExecutionLease::query()->create([
+            'account_id'=>$accountId, 'agent_id'=>$agent->id, 'browser_session_id'=>$session->id,
+            'job_id'=>$job->id, 'status'=>'active', 'acquired_at'=>now(), 'heartbeat_at'=>now(),
+            'expires_at'=>now()->addSeconds(self::DEFAULT_LEASE_SECONDS),
+        ]);
+        SaAccountDeviceAffinity::query()->updateOrCreate(['account_id'=>$accountId], [
+            'agent_id'=>$agent->id, 'last_used_at'=>now(),
+            'affinity_until'=>now()->addMinutes((int) config('social-automation.account_device_affinity_minutes', 60)),
         ]);
 
         $session->fill([
@@ -692,15 +726,30 @@ final class JobOrchestrator
 
     private function releaseSession(SaJob $job): void
     {
+        SaAccountExecutionLease::query()->where('job_id', $job->id)->where('status', 'active')->update([
+            'status'=>'released', 'released_at'=>now(), 'heartbeat_at'=>now(),
+        ]);
         if ($job->browser_session_id) {
             $session = SaBrowserSession::query()->lockForUpdate()->find($job->browser_session_id);
             if ($session instanceof SaBrowserSession && (int) $session->locked_job_id === (int) $job->id) {
-                $session->fill([
+                $updates = [
                     'locked_job_id' => null,
                     'locked_at' => null,
                     'lock_expires_at' => null,
-                ])->save();
+                    'last_task_at' => now(),
+                ];
+                if ((string) $job->status === JobStatus::Completed->value
+                    && (int) $session->account_id === (int) $job->account_id) {
+                    $updates['session_state'] = 'verified';
+                }
+                $session->fill($updates)->save();
             }
+        }
+        if ($job->account_id && $job->agent_id) {
+            SaAccountDeviceAffinity::query()->updateOrCreate(['account_id'=>$job->account_id], [
+                'agent_id'=>$job->agent_id, 'last_used_at'=>now(),
+                'affinity_until'=>now()->addMinutes((int) config('social-automation.account_device_affinity_minutes', 60)),
+            ]);
         }
         if ($job->agent_id) {
             $agent = SaAgent::query()->lockForUpdate()->find($job->agent_id);

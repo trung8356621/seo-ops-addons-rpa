@@ -134,6 +134,13 @@
                                 @if ($canManage)
                                     <td class="px-4 py-3 text-right space-x-2">
                                         <button
+                                            wire:click="openPasswordModal({{ $row->id }})"
+                                            type="button"
+                                            class="text-xs font-semibold text-amber-600 hover:text-amber-800 dark:text-amber-400 dark:hover:text-amber-300 hover:underline"
+                                        >
+                                            {{ $row->hasPassword() ? 'Đổi mật khẩu' : 'Thiết lập mật khẩu' }}
+                                        </button>
+                                        <button
                                             wire:click="openEditModal({{ $row->id }})"
                                             type="button"
                                             class="text-xs font-semibold text-teal-600 hover:text-teal-800 dark:text-teal-400 dark:hover:text-teal-300 hover:underline"
@@ -232,21 +239,6 @@
                         />
                         <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
                             Cấu hình URL cho WordPress hoặc nền tảng tùy chỉnh. Hỗ trợ đường dẫn con (subdirectory).
-                        </p>
-                    </div>
-
-                    <div>
-                        <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                            {{ __('social-automation::filament.accounts.field_password') }}
-                        </label>
-                        <input
-                            wire:model="password"
-                            type="password"
-                            placeholder="Không bắt buộc"
-                            class="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:border-teal-500 focus:ring-teal-500"
-                        />
-                        <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                            {{ __('social-automation::filament.accounts.field_password_create_hint') }}
                         </p>
                     </div>
 
@@ -362,21 +354,6 @@
 
                     <div>
                         <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                            {{ __('social-automation::filament.accounts.field_password') }}
-                        </label>
-                        <input
-                            wire:model="password"
-                            type="password"
-                            placeholder="Nhập mật khẩu mới nếu muốn thay đổi"
-                            class="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:border-teal-500 focus:ring-teal-500"
-                        />
-                        <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                            {{ __('social-automation::filament.accounts.field_password_edit_hint') }}
-                        </p>
-                    </div>
-
-                    <div>
-                        <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
                             {{ __('social-automation::filament.accounts.field_note') }}
                         </label>
                         <textarea
@@ -404,6 +381,37 @@
                     >
                         {{ __('social-automation::filament.accounts.btn_save') }}
                     </x-filament::button>
+                </div>
+            </div>
+        </div>
+    @endif
+
+    @if ($showPasswordModal)
+        <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
+            <div x-data="{ showPassword: false }" class="w-full max-w-md bg-white dark:bg-gray-900 rounded-xl shadow-xl border border-gray-200 dark:border-gray-800 p-6 space-y-4" @click.outside="$wire.closePasswordModal()">
+                <div class="border-b border-gray-100 dark:border-gray-800 pb-3">
+                    <h3 class="text-base font-bold text-gray-900 dark:text-gray-100">{{ $passwordAccountHasPassword ? 'Đổi mật khẩu' : 'Thiết lập mật khẩu' }}</h3>
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">Account: {{ $passwordAccountName }} · {{ $passwordAccountHasPassword ? 'Đã lưu mật khẩu' : 'Chưa lưu mật khẩu' }}</p>
+                </div>
+                <div class="rounded-lg border border-warning-300 bg-warning-50 p-3 text-xs text-warning-800 dark:border-warning-700 dark:bg-warning-950/40 dark:text-warning-200">
+                    <strong>Cảnh báo bảo mật:</strong><br>
+                    Khi lưu mật khẩu, các thiết bị RPA Client có quyền truy cập Installation này có thể sử dụng chức năng Copy Password.<br><br>
+                    Chỉ lưu mật khẩu nếu bạn tin tưởng các thiết bị được kết nối.
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Mật khẩu mới</label>
+                    <div class="flex gap-2">
+                        <input wire:model="password" x-bind:type="showPassword ? 'text' : 'password'" autocomplete="new-password" class="flex-1 px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100" />
+                        <x-filament::button type="button" color="gray" size="sm" x-on:click="showPassword = !showPassword"><span x-text="showPassword ? 'Ẩn' : 'Hiện'"></span></x-filament::button>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Xác nhận mật khẩu</label>
+                    <input wire:model="password_confirmation" x-bind:type="showPassword ? 'text' : 'password'" autocomplete="new-password" class="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100" />
+                </div>
+                <div class="flex items-center justify-end gap-3 pt-3 border-t border-gray-100 dark:border-gray-800">
+                    <x-filament::button wire:click="closePasswordModal" color="gray" size="sm">Hủy</x-filament::button>
+                    <x-filament::button wire:click="updatePassword" wire:loading.attr="disabled" wire:target="updatePassword" color="primary" size="sm">Lưu mật khẩu</x-filament::button>
                 </div>
             </div>
         </div>

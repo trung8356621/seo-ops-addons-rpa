@@ -16,7 +16,8 @@ final class SaBrowserSession extends Model
     protected $table = 'sa_browser_sessions';
 
     protected $fillable = [
-        'session_uuid', 'agent_id', 'platform', 'domain', 'ready_status',
+        'session_uuid', 'agent_id', 'account_id', 'platform', 'domain', 'ready_status', 'session_state',
+        'dispatch_enabled', 'dispatch_pause_reason', 'last_task_at',
         'last_confirmed_at', 'capabilities', 'locked_job_id', 'locked_at', 'lock_expires_at',
     ];
 
@@ -28,6 +29,9 @@ final class SaBrowserSession extends Model
             'locked_at' => 'datetime',
             'lock_expires_at' => 'datetime',
             'locked_job_id' => 'integer',
+            'account_id' => 'integer',
+            'dispatch_enabled' => 'boolean',
+            'last_task_at' => 'datetime',
         ];
     }
 

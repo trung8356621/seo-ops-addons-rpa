@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Omnichannel\Addons\SocialAutomation\Tests\Unit;
 
 use Omnichannel\Addons\SocialAutomation\Domain\AccountLockPolicy;
+use Omnichannel\Addons\SocialAutomation\Domain\AccountExecutionPolicy;
 use Omnichannel\Addons\SocialAutomation\Domain\AttemptFencePolicy;
 use Omnichannel\Addons\SocialAutomation\Domain\EligibilitySelector;
 use Omnichannel\Addons\SocialAutomation\Domain\JobIdempotencyKey;
@@ -32,6 +33,25 @@ final class ConcurrencySafetyTest extends TestCase
             ['job_id' => 1, 'account_id' => 10, 'status' => 'running'],
         ], exceptJobId: 1));
         self::assertFalse($p->canAssign(null, []));
+    }
+
+    public function test_active_lease_and_affinity_prevent_cross_device_execution(): void
+    {
+        $policy = new AccountExecutionPolicy;
+        self::assertFalse($policy->canUseDevice(10, null, false, 20));
+        self::assertTrue($policy->canUseDevice(10, null, false, 10));
+        self::assertFalse($policy->canUseDevice(null, 10, true, 20));
+        self::assertTrue($policy->canUseDevice(null, 10, false, 20));
+    }
+
+    public function test_coordination_migration_keeps_states_and_identity_separate(): void
+    {
+        $source = file_get_contents(dirname(__DIR__, 2).'/database/migrations/2026_10_27_100000_add_client_session_coordination.php');
+        self::assertStringContainsString("'session_state'", $source);
+        self::assertStringContainsString("'dispatch_enabled'", $source);
+        self::assertStringContainsString("'installation_id', 'device_id'", $source);
+        self::assertStringContainsString('sa_account_execution_leases', $source);
+        self::assertStringContainsString('sa_client_notifications', $source);
     }
 
     public function test_two_sessions_same_account_only_one_eligible(): void

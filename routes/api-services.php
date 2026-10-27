@@ -138,4 +138,8 @@ Route::middleware([
         ->name('api.v1.services.social-automation.client.browser-delete');
     Route::get('{service}/social-automation/client/accounts', [RpaClientApiController::class, 'listBindableAccounts'])
         ->name('api.v1.services.social-automation.client.accounts');
+    Route::get('{service}/social-automation/client/accounts/{accountId}', [RpaClientApiController::class, 'getAccount'])
+        ->name('api.v1.services.social-automation.client.account');
+    Route::get('{service}/social-automation/client/accounts/{accountId}/password', [RpaClientApiController::class, 'getAccountPassword'])
+        ->name('api.v1.services.social-automation.client.account-password');
 });

@@ -85,7 +85,7 @@ final class SocialAutomationAccountInventoryTest extends TestCase
     /**
      * Requirement B: Tạo Account có password -> encrypted at rest, never plaintext.
      */
-    public function test_b_create_account_with_password_encrypts_at_rest(): void
+    public function test_b_password_has_separate_encrypted_lifecycle(): void
     {
         $rawPassword = 'SuperSecretPassword@123!';
         $account = $this->accountService->create([
@@ -97,6 +97,8 @@ final class SocialAutomationAccountInventoryTest extends TestCase
         ], 10);
 
         self::assertInstanceOf(SaAccount::class, $account);
+        self::assertFalse($account->hasPassword());
+        $account = $this->accountService->updatePassword($account->id, $rawPassword);
         self::assertTrue($account->hasPassword());
 
         $encrypted = (string) $account->getAttribute('encrypted_password');
@@ -113,13 +115,14 @@ final class SocialAutomationAccountInventoryTest extends TestCase
      */
     public function test_c_list_api_does_not_leak_password(): void
     {
-        $this->accountService->create([
+        $account = $this->accountService->create([
             'platform' => 'Threads',
             'account_name' => 'Threads Channel',
             'username' => 'channel_threads',
             'email' => 'threads@channel.com',
             'password' => 'ConfidentialPassword999',
         ], 10);
+        $this->accountService->updatePassword($account->id, 'ConfidentialPassword999');
 
         $admin = $this->makeUser(1, User::ROLE_ADMIN);
         \Illuminate\Support\Facades\Auth::shouldReceive('user')->andReturn($admin);
@@ -162,6 +165,7 @@ final class SocialAutomationAccountInventoryTest extends TestCase
             'password' => $rawPassword,
         ], 10);
 
+        $account = $this->accountService->updatePassword($account->id, $rawPassword);
         $originalEncrypted = $account->getAttribute('encrypted_password');
         self::assertNotEmpty($originalEncrypted);
 
@@ -169,7 +173,7 @@ final class SocialAutomationAccountInventoryTest extends TestCase
         $updated = $this->accountService->update($account->id, [
             'name' => 'Updated Fanpage Name',
             'username' => 'new_username',
-            'password' => '', // User leaves blank
+            'password' => 'must-be-ignored',
         ]);
 
         self::assertInstanceOf(SaAccount::class, $updated);
@@ -180,11 +184,9 @@ final class SocialAutomationAccountInventoryTest extends TestCase
         self::assertSame($originalEncrypted, $updated->getAttribute('encrypted_password'));
         self::assertSame($rawPassword, $updated->getDecryptedPassword());
 
-        // Now update WITH a new password
+        // Only the dedicated password method can replace it.
         $newRaw = 'BrandNewPassword456!';
-        $updatedAgain = $this->accountService->update($account->id, [
-            'password' => $newRaw,
-        ]);
+        $updatedAgain = $this->accountService->updatePassword($account->id, $newRaw);
 
         self::assertNotSame($originalEncrypted, $updatedAgain->getAttribute('encrypted_password'));
         self::assertSame($newRaw, $updatedAgain->getDecryptedPassword());
@@ -230,6 +232,9 @@ final class SocialAutomationAccountInventoryTest extends TestCase
         // Cannot update or delete across installation
         $updateResult = $this->accountService->update($accAlpha->id, ['name' => 'Hacked Name']);
         self::assertNull($updateResult);
+
+        $passwordUpdateResult = $this->accountService->updatePassword($accAlpha->id, 'cross-installation-secret');
+        self::assertNull($passwordUpdateResult);
 
         $deleteResult = $this->accountService->delete($accAlpha->id);
         self::assertFalse($deleteResult);
@@ -338,6 +343,18 @@ final class SocialAutomationAccountInventoryTest extends TestCase
         self::assertStringContainsString('interaction_none', $bladeSrc);
     }
 
+    public function test_password_api_contract_enforces_installation_https_and_no_store(): void
+    {
+        $source = (string) file_get_contents(
+            dirname(__DIR__, 2) . '/src/Http/Controllers/RpaClientApiController.php'
+        );
+
+        self::assertStringContainsString("'installation_forbidden'", $source);
+        self::assertStringContainsString("'https_required'", $source);
+        self::assertStringContainsString("'Cache-Control', 'no-store, private'", $source);
+        self::assertStringContainsString('getDecryptedPassword()', $source);
+    }
+
     public function test_email_is_strictly_required_on_create(): void
     {
         $this->expectException(\InvalidArgumentException::class);
@@ -362,17 +379,20 @@ final class SocialAutomationAccountInventoryTest extends TestCase
 
         self::assertSame('https://example.com/tech-blog', $account->getSiteUrl());
         self::assertSame('author@techblog.vn', $account->getDisplayEmail());
+        self::assertFalse($account->hasPassword());
+        $account = $this->accountService->updatePassword($account->id, 'WpSecretPass#2026');
         self::assertTrue($account->hasPassword());
     }
 
     public function test_list_bindable_accounts_includes_email_site_url_has_password_and_omits_password(): void
     {
-        $this->accountService->create([
+        $fbAccount = $this->accountService->create([
             'platform' => 'facebook',
             'name' => 'FB Seeding Account',
             'email' => 'seeder@fb.com',
             'password' => 'ConfidentialPassword',
         ]);
+        $this->accountService->updatePassword($fbAccount->id, 'ConfidentialPassword');
 
         $this->accountService->create([
             'platform' => 'wordpress',

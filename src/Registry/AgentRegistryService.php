@@ -43,7 +43,15 @@ final class AgentRegistryService
 
         try {
             $agent = DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($payload, $deviceId, $credentialId, $clientApiKeyId, $kind): SaAgent {
-                $existing = SaAgent::query()->where('device_id', $deviceId)->first();
+                $installationId = trim((string) ($payload['installation_id'] ?? ''));
+                $existing = SaAgent::query()->where('device_id', $deviceId)
+                    ->when($installationId !== '', fn ($q) => $q->where(function ($scope) use ($installationId, $clientApiKeyId): void {
+                        $scope->where('installation_id', $installationId);
+                        if ($clientApiKeyId !== null) {
+                            $scope->orWhere(fn ($legacy) => $legacy->whereNull('installation_id')->where('client_api_key_id', $clientApiKeyId));
+                        }
+                    }))
+                    ->first();
                 if ($existing instanceof SaAgent) {
                     if ($credentialId !== null && $existing->credential_id !== null
                         && (int) $existing->credential_id !== $credentialId) {
@@ -51,6 +59,7 @@ final class AgentRegistryService
                     }
                     $existing->fill([
                         'agent_kind' => $kind,
+                        'installation_id' => $installationId !== '' ? $installationId : $existing->installation_id,
                         'display_name' => $payload['display_name'] ?? $existing->display_name,
                         'app_version' => $payload['app_version'] ?? $existing->app_version,
                         'runtime_version' => $payload['runtime_version'] ?? $existing->runtime_version,
@@ -67,6 +76,7 @@ final class AgentRegistryService
                 return SaAgent::query()->create([
                     'agent_uuid' => (string) Str::uuid(),
                     'device_id' => $deviceId,
+                    'installation_id' => $installationId !== '' ? $installationId : null,
                     'agent_kind' => $kind,
                     'display_name' => $payload['display_name'] ?? null,
                     'app_version' => $payload['app_version'] ?? null,
