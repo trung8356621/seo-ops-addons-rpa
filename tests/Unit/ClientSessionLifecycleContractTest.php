@@ -36,5 +36,20 @@ final class ClientSessionLifecycleContractTest extends TestCase
         preg_match('/public function confirmLogin\(.*?\n    }/s', $service, $confirm);
         self::assertNotEmpty($confirm);
         self::assertStringNotContainsString("'session_state'=>'verified'", $confirm[0]);
+        self::assertStringContainsString('$storedCheckedAt <= $requestedAt', $confirm[0]);
+    }
+
+    public function test_cookie_signal_sync_preserves_needs_login_and_request_login_sets_it(): void
+    {
+        $sync = file_get_contents(dirname(__DIR__,2).'/src/Registry/SessionSyncService.php');
+        self::assertStringContainsString("=== 'needs_login' ? 'needs_login' : 'candidate'", $sync);
+        $service = file_get_contents(dirname(__DIR__,2).'/src/Services/ClientNotificationService.php');
+        preg_match('/public function requestLogin\(.*?\n    }/s', $service, $request);
+        self::assertNotEmpty($request);
+        self::assertStringContainsString("'session_state'=>'needs_login'", $request[0]);
+        self::assertStringContainsString("'type'=>'login_required'", $request[0]);
+        preg_match('/public function acknowledge\(.*?\n    }/s', $service, $acknowledge);
+        self::assertNotEmpty($acknowledge);
+        self::assertStringNotContainsString('session_state', $acknowledge[0]);
     }
 }
