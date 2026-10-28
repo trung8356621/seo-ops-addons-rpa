@@ -101,6 +101,9 @@ final class RpaClientApiController extends Controller
         }
 
         $result = $this->agents->heartbeat((string) $agent->agent_uuid, $request->all(), credentialId: null, clientApiKeyId: (int) $clientKey->id);
+        if (($result['ok'] ?? false) === true) {
+            $result['session_signals'] = $this->sessionSync->listSignalsForAgent($agent);
+        }
 
         return new JsonResponse($result, ($result['ok'] ?? false) ? 200 : 422);
     }
@@ -121,6 +124,9 @@ final class RpaClientApiController extends Controller
             return new JsonResponse(['ok' => false, 'error' => 'device_not_registered'], 404);
         }
         $result = $this->agents->heartbeat((string) $agent->agent_uuid, $request->all(), credentialId: null, clientApiKeyId: (int) $clientKey->id);
+        if (($result['ok'] ?? false) === true) {
+            $result['session_signals'] = $this->sessionSync->listSignalsForAgent($agent);
+        }
 
         return new JsonResponse($result, ($result['ok'] ?? false) ? 200 : 422);
     }

@@ -35,12 +35,12 @@ final class SocialAutomationSessionsPage extends Page
 
     public static function getNavigationLabel(): string
     {
-        return 'Clients';
+        return 'Máy Client';
     }
 
     public function getTitle(): string|Htmlable
     {
-        return 'Clients';
+        return 'Máy Client';
     }
 
     public function getMaxContentWidth(): MaxWidth|string|null
@@ -56,6 +56,16 @@ final class SocialAutomationSessionsPage extends Page
 
     public function dashboard(): array { return app(SessionSyncService::class)->clientDashboard(); }
     public function toggleDispatch(int $sessionId, bool $enabled): void { app(SessionSyncService::class)->setDispatch($sessionId, $enabled); }
+
+    public function clearSessionSignal(int $sessionId): void
+    {
+        $installationId = app(SocialAutomationInstallationResolver::class)->resolveInstallationId();
+        SaBrowserSession::query()->whereKey($sessionId)
+            ->whereHas('agent', fn ($query) => $query->where('installation_id', $installationId))
+            ->firstOrFail();
+        app(SessionSyncService::class)->setSessionSignalPresent($sessionId, false);
+    }
+
     public function requireLogin(int $sessionId): void
     {
         $installationId = app(SocialAutomationInstallationResolver::class)->resolveInstallationId();

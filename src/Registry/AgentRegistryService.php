@@ -7,6 +7,7 @@ namespace Omnichannel\Addons\SocialAutomation\Registry;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Omnichannel\Addons\SocialAutomation\Domain\AgentKindPolicy;
+use Omnichannel\Addons\SocialAutomation\Domain\DeviceOsMetadata;
 use Omnichannel\Addons\SocialAutomation\Domain\OnlineStateCalculator;
 use Omnichannel\Addons\SocialAutomation\Enums\AgentAvailability;
 use Omnichannel\Addons\SocialAutomation\Models\SaAgent;
@@ -57,7 +58,7 @@ final class AgentRegistryService
                         && (int) $existing->credential_id !== $credentialId) {
                         throw new \RuntimeException('credential_conflict');
                     }
-                    $existing->fill([
+                    $update = DeviceOsMetadata::applyToFill([
                         'agent_kind' => $kind,
                         'installation_id' => $installationId !== '' ? $installationId : $existing->installation_id,
                         'display_name' => $payload['display_name'] ?? $existing->display_name,
@@ -68,12 +69,13 @@ final class AgentRegistryService
                         'credential_id' => $credentialId ?? $existing->credential_id,
                         'client_api_key_id' => $clientApiKeyId ?? $existing->client_api_key_id,
                         'last_heartbeat_at' => now(),
-                    ])->save();
+                    ], $payload, $existing->os_family, $existing->os_label);
+                    $existing->fill($update)->save();
 
                     return $existing->fresh() ?? $existing;
                 }
 
-                return SaAgent::query()->create([
+                $create = DeviceOsMetadata::applyToFill([
                     'agent_uuid' => (string) Str::uuid(),
                     'device_id' => $deviceId,
                     'installation_id' => $installationId !== '' ? $installationId : null,
@@ -88,7 +90,9 @@ final class AgentRegistryService
                     'last_heartbeat_at' => now(),
                     'credential_id' => $credentialId,
                     'client_api_key_id' => $clientApiKeyId,
-                ]);
+                ], $payload);
+
+                return SaAgent::query()->create($create);
             });
         } catch (Throwable $e) {
             $code = $e->getMessage() === 'credential_conflict' ? 'credential_conflict' : 'register_failed';
@@ -127,7 +131,7 @@ final class AgentRegistryService
             $availability = $agent->availability;
         }
 
-        $agent->fill([
+        $heartbeatFill = DeviceOsMetadata::applyToFill([
             'last_heartbeat_at' => now(),
             'availability' => $availability,
             'app_version' => $payload['app_version'] ?? $agent->app_version,
@@ -138,7 +142,8 @@ final class AgentRegistryService
                 ? substr((string) $payload['last_error_message'], 0, 2000)
                 : $agent->last_error_message,
             'active_jobs' => max(0, (int) ($payload['active_jobs'] ?? $agent->active_jobs)),
-        ])->save();
+        ], $payload, $agent->os_family, $agent->os_label);
+        $agent->fill($heartbeatFill)->save();
 
         return ['ok' => true, 'agent' => $this->toArray($agent->fresh() ?? $agent)];
     }
@@ -199,6 +204,8 @@ final class AgentRegistryService
             'device_id' => $agent->device_id,
             'agent_kind' => $kind,
             'display_name' => $agent->display_name,
+            'os_family' => $agent->os_family,
+            'os_label' => $agent->os_label,
             'app_version' => $agent->app_version,
             'runtime_version' => $agent->runtime_version,
             'capabilities' => $agent->capabilities ?? [],

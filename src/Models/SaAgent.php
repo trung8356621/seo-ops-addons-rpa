@@ -16,7 +16,8 @@ final class SaAgent extends Model
     protected $table = 'sa_agents';
 
     protected $fillable = [
-        'agent_uuid', 'device_id', 'installation_id', 'agent_kind', 'display_name', 'app_version', 'runtime_version',
+        'agent_uuid', 'device_id', 'installation_id', 'agent_kind', 'display_name', 'os_family', 'os_label',
+        'app_version', 'runtime_version',
         'capabilities', 'availability', 'max_concurrency', 'active_jobs',
         'last_heartbeat_at', 'last_error_code', 'last_error_message', 'credential_id', 'client_api_key_id',
     ];

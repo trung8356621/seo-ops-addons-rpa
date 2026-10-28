@@ -7,6 +7,7 @@ namespace Omnichannel\Addons\SocialAutomation\Registry;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Omnichannel\Addons\SocialAutomation\Domain\OnlineStateCalculator;
+use Omnichannel\Addons\SocialAutomation\Domain\SessionSignalState;
 use Omnichannel\Addons\SocialAutomation\Enums\AccountIdentitySource;
 use Omnichannel\Addons\SocialAutomation\Enums\SessionReadyStatus;
 use Omnichannel\Addons\SocialAutomation\Models\SaAccount;
@@ -228,16 +229,18 @@ final class SessionSyncService
                         ]);
                     }
 
-                    // E5.2: Session Signal
-                    $signalStatus = strtolower(trim((string) ($rawSignal['status'] ?? 'unknown')));
-                    if (! in_array($signalStatus, ['present', 'absent', 'unsupported', 'error', 'unknown'], true)) {
-                        $signalStatus = 'unknown';
+                    // Session Signal: two-way boolean, last-writer-wins by checked_at.
+                    // Independent of session_state / task verification / notification ACK.
+                    $existingSignal = is_array($existingCaps['session_signal'] ?? null) ? $existingCaps['session_signal'] : null;
+                    if (array_key_exists('present', $rawSignal) || array_key_exists('status', $rawSignal)) {
+                        $incomingSignal = $rawSignal;
+                        if (! array_key_exists('method', $incomingSignal) || $incomingSignal['method'] === null || $incomingSignal['method'] === '') {
+                            $incomingSignal['method'] = $platform === 'facebook' ? 'facebook_c_user_cookie' : ($existingSignal['method'] ?? null);
+                        }
+                        $sessionSignal = SessionSignalState::mergeLastWriteWins($existingSignal, $incomingSignal);
+                    } else {
+                        $sessionSignal = SessionSignalState::normalize($existingSignal);
                     }
-                    $sessionSignal = [
-                        'status' => $signalStatus,
-                        'checked_at' => $rawSignal['checked_at'] ?? null,
-                        'method' => $rawSignal['method'] ?? ($platform === 'facebook' ? 'facebook_c_user_cookie' : null),
-                    ];
 
                     $mergedCaps = array_merge($existingCaps, [
                         'name' => $name,
@@ -321,6 +324,8 @@ final class SessionSyncService
             'ok' => true,
             'synced_count' => count($out),
             'browsers' => $out,
+            // Authoritative per-browser signal snapshot for SEO-OPS → Client LWW apply.
+            'session_signals' => $this->listSignalsForAgent($agent),
         ];
     }
 
@@ -393,22 +398,32 @@ final class SessionSyncService
     {
         if (! SocialAutomationSchema::agentsReady()) return ['metrics'=>['users_online'=>0,'machines_online'=>0,'machines_total'=>0,'unlinked_accounts'=>0,'sessions_available'=>0],'devices'=>[]];
         $agents = SaAgent::query()->where('agent_kind', 'client')->with('browserSessions')->orderByDesc('last_heartbeat_at')->get();
-        $devices = $agents->map(function (SaAgent $agent): array {
+        $tz = (string) config('app.timezone', 'UTC');
+        $devices = $agents->map(function (SaAgent $agent) use ($tz): array {
             $online = $this->online->isOnline($agent->last_heartbeat_at);
-            $browsers = $agent->browserSessions->map(function (SaBrowserSession $session): array {
+            $browsers = $agent->browserSessions->map(function (SaBrowserSession $session) use ($tz): array {
                 $account = $session->account_id ? SaAccount::query()->find($session->account_id) : null;
+                $signalCheckedAt = data_get($session->capabilities, 'session_signal.checked_at');
                 return ['id'=>(int)$session->id,'browser_id'=>(string)$session->session_uuid,
-                    'account_name'=>$account?->getAccountName() ?: 'Legacy / Unlinked','platform'=>(string)($account?->platform ?? $session->platform ?? 'unknown'),
+                    'account_name'=>$account?->getAccountName() ?: 'Chưa liên kết Account','platform'=>(string)($account?->platform ?? $session->platform ?? 'unknown'),
                     'site_url'=>$account?->getSiteUrl(),'session_state'=>(string)($session->session_state ?? 'candidate'),
                     'dispatch_enabled'=>(bool)($session->dispatch_enabled ?? true),'pause_reason'=>$session->dispatch_pause_reason,
                     'dispatch_eligible'=>$session->account_id !== null && in_array((string)($session->session_state ?? 'candidate'),['candidate','verified'],true),
-                    'signal_status'=>(string) data_get($session->capabilities, 'session_signal.status', 'unknown'),
-                    'signal_checked_at'=>data_get($session->capabilities, 'session_signal.checked_at'),
+                    'signal_present'=>SessionSignalState::isPresent(is_array($session->capabilities) ? ($session->capabilities['session_signal'] ?? null) : null),
+                    'signal_status'=>SessionSignalState::normalize(is_array($session->capabilities) ? ($session->capabilities['session_signal'] ?? null) : null)['status'],
+                    'signal_checked_at'=>is_string($signalCheckedAt) && $signalCheckedAt !== ''
+                        ? \Illuminate\Support\Carbon::parse($signalCheckedAt)->timezone($tz)->format('d/m/Y H:i')
+                        : null,
                     'signal_method'=>data_get($session->capabilities, 'session_signal.method'),
-                    'last_task_at'=>$session->last_task_at?->toIso8601String()];
+                    'last_task_at'=>$session->last_task_at?->timezone($tz)->format('d/m/Y H:i')];
             })->all();
-            return ['id'=>(int)$agent->id,'name'=>$agent->display_name ?: 'Client machine','device_id'=>$agent->device_id,
-                'online'=>$online,'last_seen'=>$agent->last_heartbeat_at?->toIso8601String(),'browsers'=>$browsers,
+            $osLabel = trim((string) ($agent->os_label ?? ''));
+
+            return ['id'=>(int)$agent->id,'name'=>$agent->display_name ?: 'Máy Client','device_id'=>$agent->device_id,
+                'os_family'=>$agent->os_family,'os_label'=>$osLabel !== '' ? $osLabel : null,
+                'online'=>$online,
+                'last_seen'=>$agent->last_heartbeat_at?->timezone($tz)->format('d/m/Y H:i'),
+                'browsers'=>$browsers,
                 'available_count'=>count(array_filter($browsers, fn($b)=>$b['dispatch_eligible'] && $b['dispatch_enabled']))];
         })->all();
         $sessions = $agents->flatMap(fn(SaAgent $a)=>$a->browserSessions);
@@ -425,6 +440,53 @@ final class SessionSyncService
         if ($enabled) $query->whereNotNull('account_id')->whereIn('session_state',['candidate','verified']);
         return $query->update(['dispatch_enabled'=>$enabled,
             'dispatch_pause_reason'=>$enabled ? null : 'manual_disabled']) === 1;
+    }
+
+    /**
+     * Admin/client-facing write of the Session Signal boolean (last writer).
+     * Does not change session_state, dispatch, or task verification.
+     */
+    public function setSessionSignalPresent(int $sessionId, bool $present, ?string $checkedAt = null): bool
+    {
+        $session = SaBrowserSession::query()->whereKey($sessionId)->first();
+        if (! $session instanceof SaBrowserSession) {
+            return false;
+        }
+        $caps = is_array($session->capabilities) ? $session->capabilities : [];
+        $caps['session_signal'] = SessionSignalState::normalize([
+            'present' => $present,
+            'checked_at' => $checkedAt ?: now()->toIso8601String(),
+            'method' => data_get($caps, 'session_signal.method'),
+        ]);
+        $session->capabilities = $caps;
+        $session->save();
+
+        return true;
+    }
+
+    /**
+     * @return list<array{browser_id: string, present: bool, status: string, checked_at: ?string, method: ?string}>
+     */
+    public function listSignalsForAgent(SaAgent $agent): array
+    {
+        return SaBrowserSession::query()
+            ->where('agent_id', $agent->id)
+            ->orderBy('id')
+            ->get()
+            ->map(function (SaBrowserSession $session): array {
+                $signal = SessionSignalState::normalize(
+                    is_array($session->capabilities) ? ($session->capabilities['session_signal'] ?? null) : null
+                );
+
+                return [
+                    'browser_id' => (string) $session->session_uuid,
+                    'present' => $signal['present'],
+                    'status' => $signal['status'],
+                    'checked_at' => $signal['checked_at'],
+                    'method' => $signal['method'],
+                ];
+            })
+            ->all();
     }
 
     public function requireLogin(int $sessionId): bool

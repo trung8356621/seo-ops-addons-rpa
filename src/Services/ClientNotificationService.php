@@ -26,9 +26,21 @@ final class ClientNotificationService
 
     public function acknowledge(SaAgent $agent, string $installationId, string $uuid): bool
     {
-        return SaClientNotification::query()->where('notification_uuid', $uuid)
-            ->where('installation_id', $installationId)->where('agent_id', $agent->id)
-            ->whereIn('status', ['pending','delivered'])->update(['status'=>'acked','acked_at'=>now()]) === 1;
+        $row = SaClientNotification::query()->where('notification_uuid', $uuid)
+            ->where('installation_id', $installationId)->where('agent_id', $agent->id)->first();
+        if (! $row instanceof SaClientNotification) {
+            return false;
+        }
+        // Idempotent: already-acked retries succeed without mutating session/account state.
+        if ($row->status === 'acked') {
+            return true;
+        }
+        if (! in_array($row->status, ['pending', 'delivered'], true)) {
+            return false;
+        }
+        $row->update(['status' => 'acked', 'acked_at' => now()]);
+
+        return true;
     }
 
     public function create(array $data, int $actorId): SaClientNotification

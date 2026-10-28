@@ -26,6 +26,8 @@ final class ClientSessionLifecycleContractTest extends TestCase
         self::assertNotEmpty($acknowledge);
         self::assertStringNotContainsString('session_state', $acknowledge[0]);
         self::assertStringNotContainsString('dispatch_enabled', $acknowledge[0]);
+        self::assertStringContainsString("status === 'acked'", $acknowledge[0]);
+        self::assertStringContainsString('return true', $acknowledge[0]);
     }
 
     public function test_login_confirmation_requires_a_fresh_signal_and_only_returns_candidate(): void
