@@ -141,7 +141,7 @@ return [
     'client_keys' => [
         'nav' => 'Client API Keys',
         'title' => 'Quản lý Client API Keys',
-        'intro' => 'API Key thuộc phạm vi Installation dùng để xác thực các máy RPA Client (Runner). Một Installation có thể có nhiều Key, mỗi Key dùng được trên nhiều máy.',
+        'intro' => 'API Key thuộc phạm vi Installation để xác thực RPA Client. Mỗi Key định danh đúng một Client và chỉ cho phép một kết nối đang hoạt động.',
         'create_btn' => 'Tạo API Key mới',
         'created_title' => 'Đã tạo API Key mới',
         'dismiss' => 'Đóng thông báo',

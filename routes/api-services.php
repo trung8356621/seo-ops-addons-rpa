@@ -130,6 +130,8 @@ Route::middleware([
         ->name('api.v1.services.social-automation.client.validate');
     Route::post('{service}/social-automation/client/register', [RpaClientApiController::class, 'registerDevice'])
         ->name('api.v1.services.social-automation.client.register');
+    Route::post('{service}/social-automation/client/disconnect', [RpaClientApiController::class, 'disconnect'])
+        ->name('api.v1.services.social-automation.client.disconnect');
     Route::post('{service}/social-automation/client/heartbeat', [RpaClientApiController::class, 'heartbeat'])
         ->name('api.v1.services.social-automation.client.heartbeat');
     Route::post('{service}/social-automation/client/browser-sync', [RpaClientApiController::class, 'syncBrowserSessions'])

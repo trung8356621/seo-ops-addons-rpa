@@ -20,6 +20,11 @@ final class SaAgent extends Model
         'app_version', 'runtime_version',
         'capabilities', 'availability', 'max_concurrency', 'active_jobs',
         'last_heartbeat_at', 'last_error_code', 'last_error_message', 'credential_id', 'client_api_key_id',
+        'connection_token', 'connection_lease_expires_at',
+    ];
+
+    protected $hidden = [
+        'connection_token',
     ];
 
     protected function casts(): array
@@ -31,6 +36,7 @@ final class SaAgent extends Model
             'last_heartbeat_at' => 'datetime',
             'credential_id' => 'integer',
             'client_api_key_id' => 'integer',
+            'connection_lease_expires_at' => 'datetime',
         ];
     }
 

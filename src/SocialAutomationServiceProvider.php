@@ -290,6 +290,8 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     ->name('social-automation.client.validate');
                 Route::post('/register', [RpaClientApiController::class, 'registerDevice'])
                     ->name('social-automation.client.register');
+                Route::post('/disconnect', [RpaClientApiController::class, 'disconnect'])
+                    ->name('social-automation.client.disconnect');
                 Route::post('/heartbeat', [RpaClientApiController::class, 'heartbeat'])
                     ->name('social-automation.client.heartbeat');
                 Route::post('/agents/{agentUuid}/heartbeat', [RpaClientApiController::class, 'heartbeatWithParam'])

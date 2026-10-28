@@ -50,6 +50,11 @@ final class SaBrowserSession extends Model
     public function getNameAttribute(): string
     {
         $caps = is_array($this->capabilities) ? $this->capabilities : [];
+        $accountName = $caps['account_binding']['account_name'] ?? null;
+        if (is_string($accountName) && trim($accountName) !== '') {
+            return trim($accountName);
+        }
+
         return (string) ($caps['name'] ?? $this->session_uuid);
     }
 

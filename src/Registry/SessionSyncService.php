@@ -133,14 +133,9 @@ final class SessionSyncService
                         continue;
                     }
 
-                    $name = trim((string) ($item['name'] ?? ''));
-                    if ($name === '') {
-                        $name = 'Browser '.substr($browserId, 0, 8);
-                    }
-
                     $platform = strtolower(trim((string) ($item['platform'] ?? 'facebook')));
                     $domain = trim((string) ($item['domain'] ?? ($platform !== '' ? $platform.'.com' : 'facebook.com')));
-                    
+
                     $runtime = is_array($item['runtime'] ?? null) ? $item['runtime'] : [];
                     $status = strtolower(trim((string) ($runtime['status'] ?? $item['status'] ?? 'stopped')));
                     if (! in_array($status, ['running', 'stopped', 'error', 'crashed'], true)) {
@@ -153,41 +148,39 @@ final class SessionSyncService
                     }
                     $existingCaps = is_array($session->capabilities) ? $session->capabilities : [];
 
-                    // E5.1: Account Binding validation
+                    // Account ID is the business identity of a Browser. Name is not accepted as identity.
                     $rawBinding = is_array($item['account_binding'] ?? null) ? $item['account_binding'] : null;
-                    $targetAccountId = $rawBinding ? trim((string) ($rawBinding['account_id'] ?? '')) : null;
+                    $targetAccountId = $rawBinding ? trim((string) ($rawBinding['account_id'] ?? '')) : '';
                     if ($targetAccountId === '') {
-                        $targetAccountId = null;
+                        throw new \DomainException('account_id_required');
                     }
 
                     $rawSignal = is_array($item['session_signal'] ?? null) ? $item['session_signal'] : [];
                     $incomingSignalStatus = strtolower((string) ($rawSignal['status'] ?? 'unknown'));
-                    if ($targetAccountId === null || (! $session->exists && $incomingSignalStatus !== 'present')) {
+                    // New browsers still require a present session signal before first upload.
+                    if (! $session->exists && $incomingSignalStatus !== 'present') {
                         continue;
                     }
 
-                    $accountModel = null;
-                    if ($targetAccountId !== null) {
-                        $accountModel = SaAccount::query()
-                            ->where('account_uuid', $targetAccountId)
-                            ->orWhere('id', $targetAccountId)
-                            ->first();
+                    $accountModel = SaAccount::query()
+                        ->where('account_uuid', $targetAccountId)
+                        ->orWhere('id', $targetAccountId)
+                        ->first();
 
-                        if (! $accountModel instanceof SaAccount) {
-                            throw new \DomainException('account_not_found:'.$targetAccountId);
-                        }
+                    if (! $accountModel instanceof SaAccount) {
+                        throw new \DomainException('account_not_found:'.$targetAccountId);
+                    }
 
-                        // Enforce Installation isolation: Client Key Installation MUST match Account Installation!
-                        if ($installationId !== null && $installationId !== '' && $accountModel->installation_id !== null && $accountModel->installation_id !== '') {
-                            if ($accountModel->installation_id !== $installationId) {
-                                throw new \DomainException('account_installation_mismatch');
-                            }
+                    // Enforce Installation isolation: Client Key Installation MUST match Account Installation!
+                    if ($installationId !== null && $installationId !== '' && $accountModel->installation_id !== null && $accountModel->installation_id !== '') {
+                        if ($accountModel->installation_id !== $installationId) {
+                            throw new \DomainException('account_installation_mismatch');
                         }
+                    }
 
-                        // Enforce platform compatibility
-                        if (strtolower((string) $accountModel->platform) !== strtolower($platform)) {
-                            throw new \DomainException('account_platform_mismatch');
-                        }
+                    // Enforce platform compatibility
+                    if (strtolower((string) $accountModel->platform) !== strtolower($platform)) {
+                        throw new \DomainException('account_platform_mismatch');
                     }
 
                     if ($session->exists && $session->account_id !== null && (int) $session->account_id !== (int) $accountModel->id) {
@@ -198,11 +191,12 @@ final class SessionSyncService
                         throw new \DomainException('account_browser_duplicate_on_device');
                     }
 
+                    $accountDisplayName = (string) ($accountModel->name ?? $accountModel->label ?? $accountModel->username ?? 'Account');
                     $accountBinding = [
-                        'account_id' => $accountModel ? (string) $accountModel->account_uuid : null,
-                        'account_name' => $accountModel ? (string) ($accountModel->name ?? $accountModel->label ?? $accountModel->username ?? 'Account') : null,
-                        'platform' => $accountModel ? strtolower((string) $accountModel->platform) : null,
-                        'bound_at' => $accountModel ? ($rawBinding['bound_at'] ?? now()->toIso8601String()) : null,
+                        'account_id' => (string) $accountModel->account_uuid,
+                        'account_name' => $accountDisplayName,
+                        'platform' => strtolower((string) $accountModel->platform),
+                        'bound_at' => $rawBinding['bound_at'] ?? now()->toIso8601String(),
                     ];
 
                     // E5.3: Execution Confirmation with account switch reset rule
@@ -243,7 +237,8 @@ final class SessionSyncService
                     }
 
                     $mergedCaps = array_merge($existingCaps, [
-                        'name' => $name,
+                        // Display label is Account Name — browser name is not a business field.
+                        'name' => $accountDisplayName,
                         'status' => $status,
                         'browser_id' => $browserId,
                         'platform' => $platform,
@@ -272,32 +267,25 @@ final class SessionSyncService
                         'capabilities' => $mergedCaps,
                     ])->save();
 
-                    // Relational link to sa_session_accounts
-                    if ($accountModel instanceof SaAccount) {
-                        SaSessionAccount::query()
-                            ->where('browser_session_id', $session->id)
-                            ->update(['is_active' => false]);
+                    SaSessionAccount::query()
+                        ->where('browser_session_id', $session->id)
+                        ->update(['is_active' => false]);
 
-                        SaSessionAccount::query()->updateOrCreate(
-                            [
-                                'browser_session_id' => $session->id,
-                                'account_id' => $accountModel->id,
-                                'domain' => $domain,
-                            ],
-                            [
-                                'is_active' => true,
-                                'bound_at' => now(),
-                            ]
-                        );
-                    } elseif ($targetAccountId === null && $session->id) {
-                        SaSessionAccount::query()
-                            ->where('browser_session_id', $session->id)
-                            ->update(['is_active' => false]);
-                    }
+                    SaSessionAccount::query()->updateOrCreate(
+                        [
+                            'browser_session_id' => $session->id,
+                            'account_id' => $accountModel->id,
+                            'domain' => $domain,
+                        ],
+                        [
+                            'is_active' => true,
+                            'bound_at' => now(),
+                        ]
+                    );
 
                     $result[] = [
                         'browser_id' => $session->session_uuid,
-                        'name' => $name,
+                        'account_name' => $accountDisplayName,
                         'platform' => $platform,
                         'status' => $status,
                         'runtime' => ['status' => $status],
@@ -419,7 +407,9 @@ final class SessionSyncService
             })->all();
             $osLabel = trim((string) ($agent->os_label ?? ''));
 
-            return ['id'=>(int)$agent->id,'name'=>$agent->display_name ?: 'Máy Client','device_id'=>$agent->device_id,
+            return ['id'=>(int)$agent->id,'name'=>$agent->display_name ?: 'Máy Client',
+                'client_api_key_id'=>$agent->client_api_key_id,
+                'device_id'=>$agent->device_id,
                 'os_family'=>$agent->os_family,'os_label'=>$osLabel !== '' ? $osLabel : null,
                 'online'=>$online,
                 'last_seen'=>$agent->last_heartbeat_at?->timezone($tz)->format('d/m/Y H:i'),

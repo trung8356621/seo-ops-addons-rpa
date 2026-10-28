@@ -141,7 +141,7 @@ return [
     'client_keys' => [
         'nav' => 'Client API Keys',
         'title' => 'Client API Keys Management',
-        'intro' => 'Installation-scoped API Keys for authenticating RPA Client machines. An installation can hold multiple keys, and each key can be used across multiple clients.',
+        'intro' => 'Installation-scoped API Keys for authenticating RPA Client. Each key identifies exactly one Client and allows only one active connection at a time.',
         'create_btn' => 'Create API Key',
         'created_title' => 'New API Key Created',
         'dismiss' => 'Dismiss',

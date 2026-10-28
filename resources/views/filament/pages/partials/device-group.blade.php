@@ -95,9 +95,13 @@
         </div>
     @endif
     <details class="mt-3 text-xs text-gray-400">
-        <summary class="cursor-pointer">Thông tin kỹ thuật Device</summary>
+        <summary class="cursor-pointer">Thông tin kỹ thuật Client</summary>
         <div class="mt-1 space-y-1">
-            <div>Device ID</div>
+            @if (!empty($device['client_api_key_id']))
+                <div>Client API Key ID</div>
+                <code class="block break-all">{{ $device['client_api_key_id'] }}</code>
+            @endif
+            <div>Internal ref</div>
             <code class="block break-all">{{ $device['device_id'] }}</code>
         </div>
     </details>
