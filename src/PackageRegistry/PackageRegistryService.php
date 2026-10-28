@@ -110,7 +110,7 @@ final class PackageRegistryService
         }
 
         try {
-            $result = DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($data, $userId, $syncSource): PackagePublishResult {
+            $result = DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($data, $userId, $syncSource, $input): PackagePublishResult {
                 $package = SaPackage::query()->firstOrCreate(
                     ['package_key' => $data['package_key']],
                     [
@@ -267,7 +267,10 @@ final class PackageRegistryService
             });
 
             return $result;
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            // Preserve opaque API error; surface root cause in Laravel log for ops.
+            report($e);
+
             return new PackagePublishResult(
                 PackagePublishResult::OUTCOME_UNAVAILABLE,
                 errors: ['package_registry_write_failed'],

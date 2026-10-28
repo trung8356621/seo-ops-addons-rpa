@@ -65,4 +65,18 @@ final class PackageRegistryContractTest extends TestCase
         self::assertStringContainsString('PACKAGE_PUBLISH', $source);
         self::assertStringNotContainsString('service_key', $source);
     }
+
+    public function test_publish_transaction_closure_captures_input_for_action_tag_link(): void
+    {
+        $source = (string) file_get_contents($this->root.'/src/PackageRegistry/PackageRegistryService.php');
+
+        // Regression: missing $input in use() caused PHP Error → 503 package_registry_write_failed.
+        self::assertMatchesRegularExpression(
+            '/transaction\(function \(\) use \(\$data, \$userId, \$syncSource, \$input\): PackagePublishResult/',
+            $source,
+        );
+        self::assertStringContainsString('linkActionTagAndRequest($package, $existing, $data, $input)', $source);
+        self::assertStringContainsString('linkActionTagAndRequest($package, $release, $data, $input)', $source);
+        self::assertStringContainsString('report($e)', $source);
+    }
 }
