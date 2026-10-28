@@ -159,9 +159,9 @@ final class SocialAutomationServiceProvider extends ServiceProvider
         $registry->register(new WorkspaceDestination(
             key: 'social-automation',
             label: 'Social Automation API',
-            url: url('/social-automation/api-docs'),
+            url: url('/api/v1/social-automation/docs'),
             sort: 25,
-            description: 'RPA Social Automation API docs (Swagger)',
+            description: 'RPA Social Automation Swagger UI',
             icon: 'heroicon-o-code-bracket-square',
             panelId: 'social-automation',
             canAccess: static function (\App\Models\User $user): bool {
@@ -197,8 +197,7 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     ->sort(56)
                     ->isActiveWhen(static fn (): bool => request()->is('api/v1/social-automation/docs')
                         || request()->is('api/v1/social-automation/openapi*')
-                        || request()->is('social-automation/api-docs')
-                        || request()->is('social-automation/api-docs/*')),
+                        || request()->is('social-automation/api-docs')),
             ]);
         });
     }
@@ -371,7 +370,8 @@ final class SocialAutomationServiceProvider extends ServiceProvider
             });
 
         // OpenAPI 3.x + Swagger UI (SEO-OPS admin/owner session OR RPA Admin Bearer).
-        Route::middleware([
+        // /social-automation/api-docs = same OpenAPI JSON as openapi.json (AI/agent URL).
+        $docsMiddleware = [
             EncryptCookies::class,
             AddQueuedCookiesToResponse::class,
             StartSession::class,
@@ -379,7 +379,13 @@ final class SocialAutomationServiceProvider extends ServiceProvider
             ShareErrorsFromSession::class,
             SubstituteBindings::class,
             EnsureSocialAutomationDocsAccess::class,
-        ])
+        ];
+
+        Route::middleware($docsMiddleware)
+            ->get('/social-automation/api-docs', [OpenApiController::class, 'json'])
+            ->name('social-automation.api-docs');
+
+        Route::middleware($docsMiddleware)
             ->prefix('api/v1/social-automation')
             ->group(function (): void {
                 Route::get('/docs', [OpenApiController::class, 'ui'])

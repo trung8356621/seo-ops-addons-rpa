@@ -49,17 +49,19 @@ final class OpenApiAndApiFirstContractTest extends TestCase
         self::assertStringContainsString("'/docs'", $source);
         self::assertStringContainsString("'/openapi.yaml'", $source);
         self::assertStringContainsString("'/openapi.json'", $source);
+        self::assertStringContainsString("/social-automation/api-docs", $source);
         self::assertStringContainsString('OpenApiController::class', $source);
+        self::assertStringContainsString("[OpenApiController::class, 'json']", $source);
     }
 
-    public function test_panel_registers_api_docs_only(): void
+    public function test_panel_does_not_register_filament_api_docs_page(): void
     {
         $source = (string) file_get_contents($this->root.'/src/Providers/SocialAutomationPanelProvider.php');
-        self::assertStringContainsString('SocialAutomationApiDocsPage::class', $source);
+        self::assertStringNotContainsString('SocialAutomationApiDocsPage', $source);
+        self::assertStringContainsString("->path('social-automation-panel')", $source);
         self::assertStringNotContainsString('SocialAutomationDashboardPage::class', $source);
         self::assertStringNotContainsString('SocialAutomationScriptsPage::class', $source);
-        self::assertStringNotContainsString('SocialAutomationAgentsPage::class', $source);
-        self::assertStringNotContainsString('SocialAutomationClientKeysPage::class', $source);
+        self::assertFileDoesNotExist($this->root.'/src/Filament/Pages/SocialAutomationApiDocsPage.php');
     }
 
     public function test_docs_middleware_reuses_seo_ops_identity(): void

@@ -233,7 +233,8 @@ final class RpaAdminAuthAndSyncTest extends TestCase
     public function test_navigation_registers_api_docs_only_api_first(): void
     {
         $panel = (string) file_get_contents(dirname(__DIR__, 2).'/src/Providers/SocialAutomationPanelProvider.php');
-        self::assertStringContainsString('SocialAutomationApiDocsPage', $panel);
+        self::assertStringNotContainsString('SocialAutomationApiDocsPage', $panel);
+        self::assertStringContainsString("path('social-automation-panel')", $panel);
         self::assertStringNotContainsString('SocialAutomationScriptsPage', $panel);
         self::assertStringNotContainsString('SocialAutomationWidgetsPage', $panel);
         self::assertStringNotContainsString('SocialAutomationWorkflowsPage', $panel);

@@ -113,8 +113,8 @@ final class SocialAutomationFoundationContractTest extends TestCase
         $source = (string) file_get_contents($this->root.'/src/Providers/SocialAutomationPanelProvider.php');
 
         self::assertStringContainsString("->id('social-automation')", $source);
-        self::assertStringContainsString("->path('social-automation')", $source);
-        self::assertStringContainsString('SocialAutomationApiDocsPage::class', $source);
+        self::assertStringContainsString("->path('social-automation-panel')", $source);
+        self::assertStringNotContainsString('SocialAutomationApiDocsPage', $source);
     }
 
     public function test_db_connection_constant_and_migration_readme(): void

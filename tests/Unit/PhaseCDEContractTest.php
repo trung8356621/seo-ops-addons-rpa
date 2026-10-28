@@ -70,7 +70,8 @@ final class PhaseCDEContractTest extends TestCase
     public function test_panel_registers_api_docs_only(): void
     {
         $src = (string) file_get_contents($this->root.'/src/Providers/SocialAutomationPanelProvider.php');
-        self::assertStringContainsString('SocialAutomationApiDocsPage', $src);
+        self::assertStringNotContainsString('SocialAutomationApiDocsPage', $src);
+        self::assertStringContainsString("path('social-automation-panel')", $src);
         foreach ([
             'SocialAutomationScriptsPage',
             'SocialAutomationWidgetsPage',

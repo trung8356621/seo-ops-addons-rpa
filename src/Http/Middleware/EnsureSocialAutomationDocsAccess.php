@@ -45,7 +45,13 @@ final class EnsureSocialAutomationDocsAccess
             }
         }
 
-        if ($request->expectsJson() || $request->is('api/*') || str_ends_with($request->path(), '.json') || str_ends_with($request->path(), '.yaml')) {
+        if (
+            $request->expectsJson()
+            || $request->is('api/*')
+            || $request->is('social-automation/api-docs')
+            || str_ends_with($request->path(), '.json')
+            || str_ends_with($request->path(), '.yaml')
+        ) {
             return response()->json(
                 ['ok' => false, 'errors' => ['unauthorized']],
                 SocialAutomationApiStatus::fromResult(false, ['unauthorized'])

@@ -18,11 +18,11 @@ use Illuminate\Foundation\Http\Middleware\VerifyCsrfToken;
 use Illuminate\Routing\Middleware\SubstituteBindings;
 use Illuminate\Session\Middleware\StartSession;
 use Illuminate\View\Middleware\ShareErrorsFromSession;
-use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationApiDocsPage;
 
 /**
- * API-first panel: docs entry only. Legacy Filament admin pages remain in source
- * for reference but are not registered in the deployment path.
+ * Minimal Filament panel shell for addon readiness / canAccessPanel checks.
+ * OpenAPI JSON lives at GET /social-automation/api-docs (not a Filament page).
+ * Swagger UI: /api/v1/social-automation/docs.
  */
 final class SocialAutomationPanelProvider extends PanelProvider
 {
@@ -30,8 +30,9 @@ final class SocialAutomationPanelProvider extends PanelProvider
     {
         return $panel
             ->id('social-automation')
-            ->path('social-automation')
-            ->homeUrl(static fn (): string => url('/social-automation/api-docs'))
+            // Distinct path so Filament does not capture /social-automation/api-docs.
+            ->path('social-automation-panel')
+            ->homeUrl(static fn (): string => url('/api/v1/social-automation/docs'))
             ->brandName('Social Automation API')
             ->brandLogo(asset('images/logo.png'))
             ->brandLogoHeight('2.5rem')
@@ -41,9 +42,7 @@ final class SocialAutomationPanelProvider extends PanelProvider
             ])
             ->maxContentWidth(MaxWidth::Full)
             ->sidebarCollapsibleOnDesktop()
-            ->pages([
-                SocialAutomationApiDocsPage::class,
-            ])
+            ->pages([])
             ->middleware([
                 EncryptCookies::class,
                 AddQueuedCookiesToResponse::class,

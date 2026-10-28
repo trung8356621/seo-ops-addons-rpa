@@ -93,6 +93,7 @@ HTML;
             }
 
             return response()->json($parsed, 200, [
+                'Content-Type' => 'application/json; charset=utf-8',
                 'Cache-Control' => 'no-store',
                 'X-Robots-Tag' => 'noindex, nofollow',
             ]);
