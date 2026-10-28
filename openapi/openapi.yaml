@@ -173,6 +173,86 @@ components:
               type: string
               nullable: true
 
+    ClientAuthScriptRequest:
+      type: object
+      required: [connection_token, account_id]
+      properties:
+        connection_token:
+          type: string
+          description: Active Client connection lease token
+        account_id:
+          type: string
+          description: Account UUID or numeric id (installation-scoped)
+        action_tag_id:
+          type: integer
+        action_tag_key:
+          type: string
+          description: Explicit Tag context (required if action_tag_id omitted)
+
+    ClientAuthScriptRelease:
+      type: object
+      properties:
+        action_tag_id:
+          type: integer
+        action_tag_key:
+          type: string
+        package_key:
+          type: string
+        package_id:
+          type: integer
+        kind:
+          type: string
+          enum: [script]
+        is_authentication:
+          type: boolean
+          enum: [true]
+        version:
+          type: string
+        release_id:
+          type: integer
+        content_digest:
+          type: string
+        schema_version:
+          type: integer
+        status:
+          type: string
+          enum: [published]
+        runtime_compatibility:
+          type: object
+          additionalProperties: true
+          nullable: true
+        assets_complete:
+          type: boolean
+        ready_to_execute:
+          type: boolean
+        manifest:
+          type: object
+          additionalProperties: true
+          description: Present on pull only
+
+    ClientAuthScriptResolveSuccess:
+      allOf:
+        - $ref: '#/components/schemas/OkTrue'
+        - type: object
+          properties:
+            release:
+              $ref: '#/components/schemas/ClientAuthScriptRelease'
+
+    ClientAuthScriptPullSuccess:
+      allOf:
+        - $ref: '#/components/schemas/OkTrue'
+        - type: object
+          properties:
+            release:
+              allOf:
+                - $ref: '#/components/schemas/ClientAuthScriptRelease'
+                - type: object
+                  required: [manifest]
+                  properties:
+                    manifest:
+                      type: object
+                      additionalProperties: true
+
     ServiceApiCoreError:
       type: object
       required: [error]
@@ -1757,6 +1837,77 @@ paths:
         '422':
           $ref: '#/components/responses/ValidationError'
 
+  /api/v1/social-automation/client/auth/resolve:
+    post:
+      tags: [RPA Client]
+      summary: Resolve explicit Action Tag to pinned Auth Script release
+      description: |
+        Requires Client API Key + active connection lease (`connection_token`).
+        Verifies Account↔Tag entitlement and returns the Tag's pinned published Auth release metadata only.
+        Browser Open without Action Tag remains allowed elsewhere; missing Tag/auth pin → fail closed (manual login).
+        No credentials or secrets.
+      operationId: clientAuthResolve
+      security:
+        - RpaClientApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClientAuthScriptRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientAuthScriptResolveSuccess'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: CLIENT_KEY_IN_USE / lease invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientErrorEnvelope'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/social-automation/client/auth/pull:
+    post:
+      tags: [RPA Client]
+      summary: Pull authorized pinned published Auth Script release
+      description: |
+        Same gates as resolve; includes manifest. Does not expose unrelated packages/releases.
+      operationId: clientAuthPull
+      security:
+        - RpaClientApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClientAuthScriptRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientAuthScriptPullSuccess'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: CLIENT_KEY_IN_USE / lease invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientErrorEnvelope'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
   /api/v1/services/{service}/social-automation/packages:
     get:
       tags: [Service API Admin]
@@ -2628,7 +2779,10 @@ paths:
   /social-automation/api/action-registry/tags:
     post:
       tags: [Staff Session]
-      summary: Create action tag
+      summary: Create action tag (optional Auth Script pin)
+      description: |
+        Atomic Tag create + Script Request. Optional `auth_script_id` + `auth_release_id`
+        pin an Authentication Script published release (not via sa_action_tag_scripts).
       operationId: actionRegistryTagsStore
       security:
         - SeoOpsSessionCookie: []
@@ -2638,6 +2792,19 @@ paths:
             schema:
               type: object
               additionalProperties: true
+              properties:
+                site_id:
+                  type: integer
+                path_id:
+                  type: integer
+                action_key:
+                  type: string
+                auth_script_id:
+                  type: integer
+                  nullable: true
+                auth_release_id:
+                  type: integer
+                  nullable: true
       responses:
         '200':
           description: Created
@@ -2648,6 +2815,124 @@ paths:
                 additionalProperties: true
         '201':
           description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /social-automation/api/action-registry/tags/{id}/auth-pin:
+    put:
+      tags: [Staff Session]
+      summary: Update or clear Action Tag Auth Script pin
+      operationId: actionRegistryTagAuthPin
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/NumericId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                auth_script_id:
+                  type: integer
+                auth_release_id:
+                  type: integer
+                clear:
+                  type: boolean
+                  description: When true, clears auth_script_id and auth_release_id
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /social-automation/api/action-registry/authentication-scripts:
+    get:
+      tags: [Staff Session]
+      summary: Catalog of Authentication Script packages with published releases
+      description: Packages where `is_authentication=true` and `kind=script` (distinct from `is_enabled`).
+      operationId: actionRegistryAuthenticationScripts
+      security:
+        - SeoOpsSessionCookie: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkTrue'
+                  - type: object
+                    properties:
+                      packages:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+
+  /social-automation/api/action-registry/tags/{id}/accounts:
+    get:
+      tags: [Staff Session]
+      summary: List Account↔Tag authorization grants
+      operationId: actionRegistryTagAccountsIndex
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/NumericId'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    post:
+      tags: [Staff Session]
+      summary: Grant Account↔Tag authorization
+      operationId: actionRegistryTagAccountsGrant
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/NumericId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [account_id]
+              properties:
+                account_id:
+                  type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /social-automation/api/action-registry/tags/{id}/accounts/{accountId}:
+    delete:
+      tags: [Staff Session]
+      summary: Revoke Account↔Tag authorization
+      operationId: actionRegistryTagAccountsRevoke
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/NumericId'
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
           content:
             application/json:
               schema:

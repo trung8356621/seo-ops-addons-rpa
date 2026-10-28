@@ -15,6 +15,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaActionTagScript;
 use Omnichannel\Addons\SocialAutomation\Models\SaPath;
 use Omnichannel\Addons\SocialAutomation\Models\SaScriptRequest;
 use Omnichannel\Addons\SocialAutomation\Models\SaSite;
+use Omnichannel\Addons\SocialAutomation\Services\AuthScriptService;
 use Omnichannel\Addons\SocialAutomation\Support\PathPatternResolver;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationAccess;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
@@ -87,6 +88,8 @@ final class ActionRegistryController
             $pathName = $t->path?->name ?? ucfirst((string) $pathKey);
             $actionName = $t->actionDefinition?->name ?? ucfirst((string) $actionKey);
 
+            $hasAuthCols = Schema::connection($conn)->hasColumn('sa_action_tags', 'auth_script_id');
+
             return [
                 'id' => (int) $t->id,
                 'tag_key' => $t->tag_key,
@@ -101,6 +104,8 @@ final class ActionRegistryController
                 'action_name' => $actionName,
                 'name' => $t->name,
                 'description' => $t->description,
+                'auth_script_id' => $hasAuthCols && $t->auth_script_id !== null ? (int) $t->auth_script_id : null,
+                'auth_release_id' => $hasAuthCols && $t->auth_release_id !== null ? (int) $t->auth_release_id : null,
                 'scripts_count' => $linksCount,
                 'ready' => $linksCount > 0,
                 'latest_request_status' => $latestRequest?->status,
@@ -333,6 +338,9 @@ final class ActionRegistryController
 
         $displayName = "{$site->name} {$path->name} {$action->name}";
         $conn = SocialAutomationServiceConfig::CONNECTION;
+        $authScriptId = $request->has('auth_script_id') ? (int) $request->input('auth_script_id') : null;
+        $authReleaseId = $request->has('auth_release_id') ? (int) $request->input('auth_release_id') : null;
+        $wantsAuthPin = $request->filled('auth_script_id') || $request->filled('auth_release_id');
 
         try {
             $result = DB::connection($conn)->transaction(function () use (
@@ -340,7 +348,10 @@ final class ActionRegistryController
                 $site,
                 $path,
                 $action,
-                $displayName
+                $displayName,
+                $wantsAuthPin,
+                $authScriptId,
+                $authReleaseId,
             ) {
                 // Double check uniqueness inside transaction to prevent race conditions
                 if (SaActionTag::query()->where('tag_key', $tagKey)->exists()) {
@@ -361,6 +372,14 @@ final class ActionRegistryController
                     'name' => $displayName,
                     'description' => "Thao tác {$action->name} tại {$site->name} {$path->name}",
                 ]);
+
+                if ($wantsAuthPin) {
+                    $pin = app(AuthScriptService::class)->setAuthPin($tag, $authScriptId, $authReleaseId);
+                    if (! ($pin['ok'] ?? false)) {
+                        throw new \RuntimeException(implode(',', $pin['errors'] ?? ['auth_pin_invalid']));
+                    }
+                    $tag = $pin['tag'];
+                }
 
                 // Atomically create Script Request: check if active/pending request exists for idempotency
                 $existingRequest = SaScriptRequest::query()
@@ -402,6 +421,102 @@ final class ActionRegistryController
                 'error' => $e->getMessage() ?: 'Không thể tạo Action Tag và Script Request.',
             ], 422);
         }
+    }
+
+    public function updateAuthPin(Request $request, int $id): JsonResponse
+    {
+        app(SocialAutomationAccess::class)->assertCanMutate();
+
+        $tag = SaActionTag::query()->find($id);
+        if (! $tag) {
+            return response()->json(['ok' => false, 'error' => 'tag_not_found'], 404);
+        }
+
+        $clear = filter_var($request->input('clear', false), FILTER_VALIDATE_BOOLEAN);
+        $packageId = $clear ? null : ($request->has('auth_script_id') ? (int) $request->input('auth_script_id') : null);
+        $releaseId = $clear ? null : ($request->has('auth_release_id') ? (int) $request->input('auth_release_id') : null);
+
+        if (! $clear && ($packageId === null || $releaseId === null)) {
+            return response()->json(['ok' => false, 'error' => 'auth_pin_incomplete', 'errors' => ['auth_pin_incomplete']], 422);
+        }
+
+        $result = app(AuthScriptService::class)->setAuthPin(
+            $tag,
+            $clear ? null : $packageId,
+            $clear ? null : $releaseId,
+        );
+        if (! ($result['ok'] ?? false)) {
+            return response()->json([
+                'ok' => false,
+                'error' => ($result['errors'][0] ?? 'auth_pin_invalid'),
+                'errors' => $result['errors'] ?? ['auth_pin_invalid'],
+            ], 422);
+        }
+
+        return response()->json(['ok' => true, 'tag' => $result['tag']]);
+    }
+
+    public function authenticationScriptsCatalog(): JsonResponse
+    {
+        app(SocialAutomationAccess::class)->assertCanAccess();
+
+        return response()->json([
+            'ok' => true,
+            'packages' => app(AuthScriptService::class)->listAuthenticationCatalog(),
+        ]);
+    }
+
+    public function listTagAccountGrants(int $id): JsonResponse
+    {
+        app(SocialAutomationAccess::class)->assertCanAccess();
+
+        if (! SaActionTag::query()->whereKey($id)->exists()) {
+            return response()->json(['ok' => false, 'error' => 'tag_not_found'], 404);
+        }
+
+        return response()->json([
+            'ok' => true,
+            'grants' => app(AuthScriptService::class)->listGrantsForTag($id),
+        ]);
+    }
+
+    public function grantTagAccount(Request $request, int $id): JsonResponse
+    {
+        app(SocialAutomationAccess::class)->assertCanMutate();
+
+        $accountId = (int) $request->input('account_id');
+        if ($accountId < 1) {
+            return response()->json(['ok' => false, 'error' => 'account_id_required', 'errors' => ['account_id_required']], 422);
+        }
+
+        $userId = Auth::id();
+        $result = app(AuthScriptService::class)->grant(
+            $accountId,
+            $id,
+            is_numeric($userId) ? (int) $userId : null,
+        );
+        if (! ($result['ok'] ?? false)) {
+            return response()->json([
+                'ok' => false,
+                'error' => ($result['errors'][0] ?? 'grant_failed'),
+                'errors' => $result['errors'] ?? ['grant_failed'],
+            ], 422);
+        }
+
+        return response()->json(['ok' => true, 'grant' => [
+            'account_id' => (int) $result['binding']->account_id,
+            'action_tag_id' => (int) $result['binding']->action_tag_id,
+            'granted_at' => $result['binding']->granted_at?->toIso8601String(),
+        ]]);
+    }
+
+    public function revokeTagAccount(int $id, int $accountId): JsonResponse
+    {
+        app(SocialAutomationAccess::class)->assertCanMutate();
+
+        $revoked = app(AuthScriptService::class)->revoke($accountId, $id);
+
+        return response()->json(['ok' => true, 'revoked' => $revoked]);
     }
 
     public function destroyTag(int $id): JsonResponse

@@ -34,7 +34,9 @@ use Omnichannel\Addons\SocialAutomation\Http\Controllers\ScriptReleaseMediaContr
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\SocialAutomationBootstrapController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\SocialAutomationHealthController;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureRpaAdminUserApi;
+use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureClientConnectionLease;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureRpaClientApiKey;
+use Omnichannel\Addons\SocialAutomation\Services\AuthScriptService;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureSocialAutomationDocsAccess;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\RenderRpaAdminRateLimitJson;
 use Omnichannel\Addons\SocialAutomation\Orchestration\JobOrchestrator;
@@ -97,6 +99,8 @@ final class SocialAutomationServiceProvider extends ServiceProvider
         $this->app->singleton(RpaClientApiKeyGenerator::class);
         $this->app->singleton(RpaClientApiKeyService::class);
         $this->app->singleton(EnsureRpaClientApiKey::class);
+        $this->app->singleton(EnsureClientConnectionLease::class);
+        $this->app->singleton(AuthScriptService::class);
         $this->app->singleton(
             \Omnichannel\Addons\SocialAutomation\Contracts\SaAccountRepositoryContract::class,
             \Omnichannel\Addons\SocialAutomation\Repositories\EloquentSaAccountRepository::class
@@ -246,6 +250,21 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                         ->name('social-automation.action-registry.paths.update');
                     Route::post('/tags', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'storeTag'])
                         ->name('social-automation.action-registry.tags.store');
+                    Route::put('/tags/{id}/auth-pin', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'updateAuthPin'])
+                        ->whereNumber('id')
+                        ->name('social-automation.action-registry.tags.auth-pin');
+                    Route::get('/authentication-scripts', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'authenticationScriptsCatalog'])
+                        ->name('social-automation.action-registry.authentication-scripts');
+                    Route::get('/tags/{id}/accounts', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'listTagAccountGrants'])
+                        ->whereNumber('id')
+                        ->name('social-automation.action-registry.tags.accounts.index');
+                    Route::post('/tags/{id}/accounts', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'grantTagAccount'])
+                        ->whereNumber('id')
+                        ->name('social-automation.action-registry.tags.accounts.grant');
+                    Route::delete('/tags/{id}/accounts/{accountId}', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'revokeTagAccount'])
+                        ->whereNumber('id')
+                        ->whereNumber('accountId')
+                        ->name('social-automation.action-registry.tags.accounts.revoke');
                     Route::post('/tags/{id}/requests', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'createRequest'])
                         ->whereNumber('id')
                         ->name('social-automation.action-registry.tags.requests.create');
@@ -323,6 +342,14 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     ->whereUuid('notificationId');
                 Route::post('/session-confirm-login', [RpaClientApiController::class, 'confirmLogin'])
                     ->name('social-automation.client.session-confirm-login');
+
+                // CP8 Auth Script resolve/pull — API key + active connection lease
+                Route::middleware([EnsureClientConnectionLease::class])->group(function (): void {
+                    Route::post('/auth/resolve', [RpaClientApiController::class, 'resolveAuthScript'])
+                        ->name('social-automation.client.auth.resolve');
+                    Route::post('/auth/pull', [RpaClientApiController::class, 'pullAuthScript'])
+                        ->name('social-automation.client.auth.pull');
+                });
             });
 
         // RPA Admin user auth + Script sync (not Runner service_api_credentials).

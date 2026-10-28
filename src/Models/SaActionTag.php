@@ -100,4 +100,32 @@ class SaActionTag extends Model
     {
         return $this->hasMany(SaActionTagScript::class, 'action_tag_id');
     }
+
+    /**
+     * Pinned Auth Script package (sa_packages.id). Not via sa_action_tag_scripts.
+     *
+     * @return BelongsTo<SaPackage, SaActionTag>
+     */
+    public function authScript(): BelongsTo
+    {
+        return $this->belongsTo(SaPackage::class, 'auth_script_id');
+    }
+
+    /**
+     * Pinned Auth Script release (sa_package_releases.id).
+     *
+     * @return BelongsTo<SaPackageRelease, SaActionTag>
+     */
+    public function authRelease(): BelongsTo
+    {
+        return $this->belongsTo(SaPackageRelease::class, 'auth_release_id');
+    }
+
+    /**
+     * @return HasMany<SaAccountActionTag>
+     */
+    public function accountAuthorizations(): HasMany
+    {
+        return $this->hasMany(SaAccountActionTag::class, 'action_tag_id');
+    }
 }

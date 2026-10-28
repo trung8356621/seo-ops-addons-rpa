@@ -111,6 +111,8 @@ final class PackageRegistryService
 
         try {
             $result = DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($data, $userId, $syncSource, $input): PackagePublishResult {
+                $isAuthentication = (bool) ($data['is_authentication'] ?? false);
+
                 $package = SaPackage::query()->firstOrCreate(
                     ['package_key' => $data['package_key']],
                     [
@@ -118,6 +120,7 @@ final class PackageRegistryService
                         'name' => $data['name'],
                         'description' => $data['description'],
                         'is_enabled' => true,
+                        'is_authentication' => $isAuthentication,
                         'created_by_user_id' => $userId,
                         'sync_source' => $syncSource,
                     ],
@@ -130,13 +133,18 @@ final class PackageRegistryService
                     );
                 }
 
-                // Keep display name/description fresh for existing package keys.
-                $package->fill([
+                // Persist is_authentication; never silently rewrite Action Tag auth_release_id pins.
+                $packageFill = [
                     'name' => $data['name'],
                     'description' => $data['description'],
                     'updated_by_user_id' => $userId,
                     'sync_source' => $syncSource ?? $package->sync_source,
-                ])->save();
+                ];
+                if (Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasColumn('sa_packages', 'is_authentication')
+                    && array_key_exists('is_authentication', $data)) {
+                    $packageFill['is_authentication'] = $isAuthentication;
+                }
+                $package->fill($packageFill)->save();
 
                 $existing = SaPackageRelease::query()
                     ->where('package_id', $package->id)
@@ -304,6 +312,7 @@ final class PackageRegistryService
                     'name' => $package->name,
                     'description' => $package->description,
                     'is_enabled' => (bool) ($package->is_enabled ?? true),
+                    'is_authentication' => (bool) ($package->is_authentication ?? false),
                     'disabled_reason' => $package->disabled_reason ?? null,
                     'latest_version' => $latest?->version,
                     'latest_digest' => $latest?->content_digest,

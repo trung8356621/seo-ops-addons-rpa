@@ -49,6 +49,11 @@ final class PackagePublishValidator
             $errors[] = 'kind_invalid';
         }
 
+        $isAuthentication = filter_var($input['is_authentication'] ?? false, FILTER_VALIDATE_BOOLEAN);
+        if ($isAuthentication && $kind !== 'script') {
+            $errors[] = 'is_authentication_requires_script_kind';
+        }
+
         $name = trim((string) ($input['name'] ?? ''));
         if ($name === '' || mb_strlen($name) > 255) {
             $errors[] = 'name_invalid';
@@ -175,6 +180,7 @@ final class PackagePublishValidator
                 'runtime_compatibility' => is_array($runtime) ? $runtime : null,
                 'dependencies' => $normalizedDeps,
                 'content_digest' => $computedDigest,
+                'is_authentication' => $isAuthentication,
             ],
         ];
     }

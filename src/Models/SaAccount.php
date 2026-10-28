@@ -7,6 +7,7 @@ namespace Omnichannel\Addons\SocialAutomation\Models;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Facades\Crypt;
 use Omnichannel\Addons\SocialAutomation\Models\Concerns\UsesSocialAutomationConnection;
 
@@ -84,6 +85,12 @@ final class SaAccount extends Model
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    /** @return HasMany<SaAccountActionTag, $this> */
+    public function actionTagAuthorizations(): HasMany
+    {
+        return $this->hasMany(SaAccountActionTag::class, 'account_id');
     }
 
     public function getCreatorName(): ?string

@@ -13,6 +13,7 @@ use Omnichannel\Addons\SocialAutomation\Http\Controllers\ServiceApi\PackageRegis
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ServiceApi\Runner\RunnerAgentController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ServiceApi\Runner\RunnerJobController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ServiceApi\Runner\RunnerSessionController;
+use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureClientConnectionLease;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureRpaClientApiKey;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureSocialAutomationServiceApi;
 
@@ -144,4 +145,11 @@ Route::middleware([
         ->name('api.v1.services.social-automation.client.account');
     Route::get('{service}/social-automation/client/accounts/{accountId}/password', [RpaClientApiController::class, 'getAccountPassword'])
         ->name('api.v1.services.social-automation.client.account-password');
+
+    Route::middleware([EnsureClientConnectionLease::class])->group(function (): void {
+        Route::post('{service}/social-automation/client/auth/resolve', [RpaClientApiController::class, 'resolveAuthScript'])
+            ->name('api.v1.services.social-automation.client.auth.resolve');
+        Route::post('{service}/social-automation/client/auth/pull', [RpaClientApiController::class, 'pullAuthScript'])
+            ->name('api.v1.services.social-automation.client.auth.pull');
+    });
 });

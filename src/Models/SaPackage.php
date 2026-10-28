@@ -27,6 +27,7 @@ final class SaPackage extends Model
         'name',
         'description',
         'is_enabled',
+        'is_authentication',
         'disabled_reason',
         'disabled_meta',
         'created_by_user_id',
@@ -38,6 +39,7 @@ final class SaPackage extends Model
     {
         return [
             'is_enabled' => 'boolean',
+            'is_authentication' => 'boolean',
             'disabled_meta' => 'array',
             'created_by_user_id' => 'integer',
             'updated_by_user_id' => 'integer',

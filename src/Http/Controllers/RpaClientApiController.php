@@ -12,11 +12,13 @@ use Omnichannel\Addons\SocialAutomation\Domain\AgentKindPolicy;
 use Omnichannel\Addons\SocialAutomation\Domain\ClientConnectionLease;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureRpaClientApiKey;
 use Omnichannel\Addons\SocialAutomation\Models\SaAccount;
+use Omnichannel\Addons\SocialAutomation\Models\SaActionTag;
 use Omnichannel\Addons\SocialAutomation\Models\SaAgent;
 use Omnichannel\Addons\SocialAutomation\Models\SaBrowserSession;
 use Omnichannel\Addons\SocialAutomation\Models\SaClientApiKey;
 use Omnichannel\Addons\SocialAutomation\Registry\AgentRegistryService;
 use Omnichannel\Addons\SocialAutomation\Registry\SessionSyncService;
+use Omnichannel\Addons\SocialAutomation\Services\AuthScriptService;
 use Omnichannel\Addons\SocialAutomation\Services\ClientNotificationService;
 
 final class RpaClientApiController extends Controller
@@ -484,6 +486,85 @@ final class RpaClientApiController extends Controller
         );
 
         return new JsonResponse($result, ($result['ok'] ?? false) ? 200 : 422);
+    }
+
+    /**
+     * CP8 SB2/SB3 — resolve explicit Action Tag to pinned Auth release.
+     * Requires API key middleware + EnsureClientConnectionLease.
+     * No credentials/secrets in response.
+     */
+    public function resolveAuthScript(Request $request): JsonResponse
+    {
+        return $this->authScriptClientResponse($request, includeManifest: false);
+    }
+
+    /**
+     * CP8 SB2/SB3 — pull authorized pinned published Auth release payload.
+     */
+    public function pullAuthScript(Request $request): JsonResponse
+    {
+        return $this->authScriptClientResponse($request, includeManifest: true);
+    }
+
+    private function authScriptClientResponse(Request $request, bool $includeManifest): JsonResponse
+    {
+        $clientKey = $this->resolveClientKey($request);
+        if (! $clientKey instanceof SaClientApiKey) {
+            return new JsonResponse(['ok' => false, 'error' => 'unauthenticated', 'errors' => ['unauthenticated']], 401);
+        }
+
+        $accountId = trim((string) ($request->input('account_id') ?? ''));
+        $tagId = (int) $request->input('action_tag_id', 0);
+        $tagKey = trim((string) ($request->input('action_tag_key') ?? ''));
+        if ($accountId === '' || ($tagId < 1 && $tagKey === '')) {
+            return new JsonResponse([
+                'ok' => false,
+                'error' => 'account_and_tag_required',
+                'errors' => ['account_and_tag_required'],
+            ], 422);
+        }
+
+        $installationId = (string) $clientKey->installation_id;
+        $account = SaAccount::query()->where(function ($query) use ($accountId): void {
+            $query->where('account_uuid', $accountId);
+            if (ctype_digit($accountId)) {
+                $query->orWhere('id', (int) $accountId);
+            }
+        })->first();
+        if (! $account instanceof SaAccount) {
+            return new JsonResponse(['ok' => false, 'error' => 'account_not_found', 'errors' => ['account_not_found']], 404);
+        }
+        if ((string) $account->installation_id !== $installationId) {
+            return new JsonResponse(['ok' => false, 'error' => 'installation_forbidden', 'errors' => ['installation_forbidden']], 403);
+        }
+
+        $tagQuery = SaActionTag::query();
+        if ($tagId > 0) {
+            $tagQuery->whereKey($tagId);
+        } else {
+            $tagQuery->where('tag_key', $tagKey);
+        }
+        $tag = $tagQuery->first();
+        if (! $tag instanceof SaActionTag) {
+            return new JsonResponse(['ok' => false, 'error' => 'action_tag_not_found', 'errors' => ['action_tag_not_found']], 404);
+        }
+
+        $result = app(AuthScriptService::class)->resolveForClient($account, $tag, $includeManifest);
+        if (! ($result['ok'] ?? false)) {
+            $status = (int) ($result['http'] ?? 403);
+
+            return new JsonResponse([
+                'ok' => false,
+                'error' => ($result['errors'][0] ?? 'auth_resolve_failed'),
+                'errors' => $result['errors'] ?? ['auth_resolve_failed'],
+            ], $status);
+        }
+
+        $release = $result['release'];
+        // Defense-in-depth: never leak credentials/secrets keys.
+        unset($release['encrypted_password'], $release['password'], $release['cookies'], $release['credentials']);
+
+        return new JsonResponse(['ok' => true, 'release' => $release], 200);
     }
 
     /**
