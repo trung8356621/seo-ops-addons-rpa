@@ -25,6 +25,7 @@ use Omnichannel\Addons\SocialAutomation\Domain\OnlineStateCalculator;
 use Omnichannel\Addons\SocialAutomation\Domain\RpaClientApiKeyGenerator;
 use Omnichannel\Addons\SocialAutomation\Auth\RpaAdminRoleGate;
 use Omnichannel\Addons\SocialAutomation\Auth\RpaAdminSessionService;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\OpenApi\OpenApiController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaAdmin\RpaAdminAuthController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaAdmin\RpaAdminScriptSyncController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaClientApiController;
@@ -34,6 +35,7 @@ use Omnichannel\Addons\SocialAutomation\Http\Controllers\SocialAutomationBootstr
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\SocialAutomationHealthController;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureRpaAdminUserApi;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureRpaClientApiKey;
+use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureSocialAutomationDocsAccess;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\RenderRpaAdminRateLimitJson;
 use Omnichannel\Addons\SocialAutomation\Orchestration\JobOrchestrator;
 use Omnichannel\Addons\SocialAutomation\PackageRegistry\PackagePublishValidator;
@@ -156,18 +158,18 @@ final class SocialAutomationServiceProvider extends ServiceProvider
 
         $registry->register(new WorkspaceDestination(
             key: 'social-automation',
-            label: 'Social Automation',
-            url: url('/social-automation'),
+            label: 'Social Automation API',
+            url: url('/social-automation/api-docs'),
             sort: 25,
-            description: 'RPA Social Automation control plane',
-            icon: 'heroicon-o-rectangle-group',
+            description: 'RPA Social Automation API docs (Swagger)',
+            icon: 'heroicon-o-code-bracket-square',
             panelId: 'social-automation',
             canAccess: static function (\App\Models\User $user): bool {
                 if (! $user->canAccessPanel(\Filament\Facades\Filament::getPanel('social-automation'))) {
                     return false;
                 }
 
-                return app(SocialAutomationAccess::class)->canAccess($user);
+                return app(SocialAutomationAccess::class)->canAccessAdminPages($user);
             },
         ));
     }
@@ -181,7 +183,7 @@ final class SocialAutomationServiceProvider extends ServiceProvider
             }
 
             try {
-                if (! app(SocialAutomationAccess::class)->canAccess()) {
+                if (! app(SocialAutomationAccess::class)->canAccessAdminPages()) {
                     return;
                 }
             } catch (Throwable) {
@@ -189,11 +191,14 @@ final class SocialAutomationServiceProvider extends ServiceProvider
             }
 
             Filament::registerNavigationItems([
-                NavigationItem::make('Social Automation')
-                    ->icon('heroicon-o-rectangle-group')
-                    ->url(url('/social-automation'))
+                NavigationItem::make('Social Automation API')
+                    ->icon('heroicon-o-code-bracket-square')
+                    ->url(url('/api/v1/social-automation/docs'))
                     ->sort(56)
-                    ->isActiveWhen(static fn (): bool => request()->is('social-automation') || request()->is('social-automation/*')),
+                    ->isActiveWhen(static fn (): bool => request()->is('api/v1/social-automation/docs')
+                        || request()->is('api/v1/social-automation/openapi*')
+                        || request()->is('social-automation/api-docs')
+                        || request()->is('social-automation/api-docs/*')),
             ]);
         });
     }
@@ -363,6 +368,26 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                         ->where('requestId', '[A-Za-z0-9._-]+')
                         ->name('social-automation.rpa-admin.script-requests.claim');
                 });
+            });
+
+        // OpenAPI 3.x + Swagger UI (SEO-OPS admin/owner session OR RPA Admin Bearer).
+        Route::middleware([
+            EncryptCookies::class,
+            AddQueuedCookiesToResponse::class,
+            StartSession::class,
+            AuthenticateSession::class,
+            ShareErrorsFromSession::class,
+            SubstituteBindings::class,
+            EnsureSocialAutomationDocsAccess::class,
+        ])
+            ->prefix('api/v1/social-automation')
+            ->group(function (): void {
+                Route::get('/docs', [OpenApiController::class, 'ui'])
+                    ->name('social-automation.openapi.ui');
+                Route::get('/openapi.yaml', [OpenApiController::class, 'yaml'])
+                    ->name('social-automation.openapi.yaml');
+                Route::get('/openapi.json', [OpenApiController::class, 'json'])
+                    ->name('social-automation.openapi.json');
             });
     }
 

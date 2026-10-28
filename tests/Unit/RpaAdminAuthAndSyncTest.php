@@ -230,12 +230,14 @@ final class RpaAdminAuthAndSyncTest extends TestCase
         ));
     }
 
-    public function test_navigation_registers_scripts_widgets_workflows_clients(): void
+    public function test_navigation_registers_api_docs_only_api_first(): void
     {
         $panel = (string) file_get_contents(dirname(__DIR__, 2).'/src/Providers/SocialAutomationPanelProvider.php');
-        self::assertStringContainsString('SocialAutomationScriptsPage', $panel);
-        self::assertStringContainsString('SocialAutomationWidgetsPage', $panel);
-        self::assertStringContainsString('SocialAutomationWorkflowsPage', $panel);
+        self::assertStringContainsString('SocialAutomationApiDocsPage', $panel);
+        self::assertStringNotContainsString('SocialAutomationScriptsPage', $panel);
+        self::assertStringNotContainsString('SocialAutomationWidgetsPage', $panel);
+        self::assertStringNotContainsString('SocialAutomationWorkflowsPage', $panel);
+        // Legacy Filament pages remain in source for reference, not registered.
         $agents = (string) file_get_contents(dirname(__DIR__, 2).'/src/Filament/Pages/SocialAutomationAgentsPage.php');
         self::assertStringContainsString("slug = 'clients'", $agents);
         $packages = (string) file_get_contents(dirname(__DIR__, 2).'/src/Filament/Pages/SocialAutomationPackagesPage.php');

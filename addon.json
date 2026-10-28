@@ -1,8 +1,8 @@
 {
     "name": "Social Automation",
     "slug": "social-automation",
-    "version": "0.1.0",
-    "description": "Independent Social Automation control plane — package registry, agents, sessions, tasks, orchestrator.",
+    "version": "0.2.0",
+    "description": "API-first Social Automation control plane — REST API, OpenAPI/Swagger, package registry, agents, sessions, orchestrator. Admin UI lives in RPA Admin.",
     "provider": "Omnichannel\\Addons\\SocialAutomation\\SocialAutomationServiceProvider",
     "panel_provider": "Omnichannel\\Addons\\SocialAutomation\\Providers\\SocialAutomationPanelProvider",
     "providers": [
@@ -11,6 +11,7 @@
     "db_connection": "omi_social_automation",
     "register_early": true,
     "deployment_ready": true,
+    "api_first": true,
     "legacy": false,
     "provides": [
         "social-automation.control-plane",
@@ -18,7 +19,8 @@
         "social-automation.agent-registry",
         "social-automation.session-registry",
         "social-automation.orchestrator",
-        "social-automation.scheduler"
+        "social-automation.scheduler",
+        "social-automation.openapi"
     ],
     "requires": [],
     "optional": []

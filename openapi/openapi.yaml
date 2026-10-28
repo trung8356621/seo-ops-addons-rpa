@@ -1,0 +1,2926 @@
+openapi: 3.0.3
+info:
+  title: Social Automation API
+  version: 0.2.0
+  description: |
+    HTTP API for the Social Automation addon (RPA control plane, package registry, clients, runners, staff UI).
+
+    **Error envelopes**
+    - Most business endpoints return `{ "ok": false, "errors": ["code"] }` with stable HTTP status (401/403/404/409/422/503).
+    - Some RPA Client responses also include a top-level `"error"` string alongside `errors`.
+    - Core Service API middleware may return `{ "error": { "code", "message" } }` (no `ok` field).
+
+    **Client API key lease**
+    - One active connection per client API key; default lease TTL **120 seconds**.
+    - `register` / `heartbeat` return `connection_token` and `connection_lease_expires_at`; send `connection_token` on reconnect and on `disconnect`.
+    - Another holder with a valid lease → HTTP **409** with `CLIENT_KEY_IN_USE`.
+
+    **Service API**
+    - Base path `/api/v1/services/{service}/social-automation/...`
+    - Path parameter `{service}` must be public slug `social-automation`.
+    - Auth Bearer `svc_live_...` from `service_api_credentials` with documented scopes (never OPS `service_key`).
+
+servers:
+  - url: /
+    description: SEO-OPS host
+
+tags:
+  - name: Docs
+    description: Swagger UI and machine-readable OpenAPI (SEO-OPS session or RPA Admin Bearer)
+  - name: RPA Admin
+    description: RPA Admin user auth and script registry sync (admin|owner SEO-OPS users)
+  - name: RPA Client
+    description: Electron / RPA Client (Bearer client API key)
+  - name: Service API Admin
+    description: Package registry, tasks, schedules, compose, manual dispatch (service_api_credentials)
+  - name: Service API Runner
+    description: Runner agent, session sync, job lifecycle (service_api_credentials)
+  - name: Staff Session
+    description: Filament browser session (cookie) for SEO-OPS staff UI helpers
+
+security: []
+
+components:
+  securitySchemes:
+    SeoOpsSessionCookie:
+      type: apiKey
+      in: cookie
+      name: laravel_session
+      description: |
+        Browser session after Filament login on SEO-OPS. CSRF may apply on mutating staff routes.
+        Used for docs, bootstrap/health, action-registry, client-keys, accounts, client notifications.
+    RpaAdminBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: |
+        Opaque token from `POST /api/v1/social-automation/rpa-admin/login` (SEO-OPS user role admin or owner).
+        Alternative header `X-Rpa-Admin-Token` is accepted by the server but prefer Authorization Bearer.
+    RpaClientApiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: client_api_key
+      description: RPA Client API key (raw key shown once at creation in staff UI).
+    ServiceApiBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: svc_live
+      description: Core `service_api_credentials` token (e.g. `svc_live_...`) with Social Automation scopes.
+
+  parameters:
+    ServiceSlug:
+      name: service
+      in: path
+      required: true
+      schema:
+        type: string
+        enum: [social-automation]
+      description: Public catalog slug; must resolve to `social-automation`.
+    PackageKey:
+      name: packageKey
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._-]+$'
+    AgentUuid:
+      name: agentUuid
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9-]+$'
+    JobUuid:
+      name: jobUuid
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9-]+$'
+    BrowserId:
+      name: browserId
+      in: path
+      required: true
+      schema:
+        type: string
+    AccountId:
+      name: accountId
+      in: path
+      required: true
+      schema:
+        type: string
+    NotificationId:
+      name: notificationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ScriptRequestId:
+      name: requestId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._-]+$'
+    NumericId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema:
+        type: integer
+
+  schemas:
+    OkTrue:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+
+    ErrorEnvelope:
+      type: object
+      required: [ok, errors]
+      properties:
+        ok:
+          type: boolean
+          enum: [false]
+        errors:
+          type: array
+          items:
+            type: string
+          example: [unauthorized]
+
+    ClientErrorEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/ErrorEnvelope'
+        - type: object
+          properties:
+            error:
+              type: string
+              description: Primary error code (may duplicate errors[0]).
+            message:
+              type: string
+              nullable: true
+            diagnostic:
+              type: string
+              nullable: true
+
+    ServiceApiCoreError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              example: unauthorized
+            message:
+              type: string
+              example: Authentication required.
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: email@example.com
+        password:
+          type: string
+          format: password
+          example: secret
+        client_label:
+          type: string
+          maxLength: 128
+          description: Optional label stored on the admin session row.
+
+    RpaAdminLoginSuccess:
+      type: object
+      required: [ok, token, expires_at, user]
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+        token:
+          type: string
+          example: TOKEN
+        expires_at:
+          type: string
+          format: date-time
+        user:
+          $ref: '#/components/schemas/RpaAdminUserPublic'
+
+    RpaAdminUserPublic:
+      type: object
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+        name:
+          type: string
+        role:
+          type: string
+
+    RpaAdminSessionSuccess:
+      type: object
+      required: [ok, user, expires_at]
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+        user:
+          $ref: '#/components/schemas/RpaAdminUserPublic'
+        expires_at:
+          type: string
+          format: date-time
+
+    ClientValidateSuccess:
+      type: object
+      required: [ok, client_api_key, installation]
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+        client_api_key:
+          type: object
+          properties:
+            id:
+              type: integer
+            name:
+              type: string
+            key_prefix:
+              type: string
+            installation_id:
+              type: string
+            last_used_at:
+              type: string
+              format: date-time
+              nullable: true
+            created_at:
+              type: string
+              format: date-time
+              nullable: true
+        installation:
+          type: object
+          properties:
+            installation_id:
+              type: string
+
+    ClientRegisterRequest:
+      type: object
+      properties:
+        display_name:
+          type: string
+        app_version:
+          type: string
+        runtime_version:
+          type: string
+        max_concurrency:
+          type: integer
+          minimum: 1
+        capabilities:
+          type: array
+          items:
+            type: string
+        connection_token:
+          type: string
+          description: Omit on first connect; send when reclaiming lease after expiry or same session.
+        device_id:
+          type: string
+          description: Ignored on register — identity is the API key.
+
+    ClientRegisterSuccess:
+      type: object
+      required: [ok, agent, connection_token, connection_lease_expires_at]
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+        agent:
+          $ref: '#/components/schemas/ClientAgentSummary'
+        connection_token:
+          type: string
+          example: CONNECTION_TOKEN_HEX
+        connection_lease_expires_at:
+          type: string
+          format: date-time
+          description: Lease TTL defaults to 120 seconds from issue/refresh.
+
+    ClientKeyInUseError:
+      allOf:
+        - $ref: '#/components/schemas/ClientErrorEnvelope'
+        - type: object
+          properties:
+            error:
+              type: string
+              enum: [CLIENT_KEY_IN_USE]
+            errors:
+              type: array
+              items:
+                type: string
+              example: [CLIENT_KEY_IN_USE]
+            message:
+              type: string
+              example: Client API Key is already in use by another active connection.
+
+    ClientAgentSummary:
+      type: object
+      properties:
+        agent_uuid:
+          type: string
+          format: uuid
+        installation_id:
+          type: string
+        agent_kind:
+          type: string
+        display_name:
+          type: string
+          nullable: true
+        availability:
+          type: string
+
+    DisconnectRequest:
+      type: object
+      required: [connection_token]
+      properties:
+        connection_token:
+          type: string
+
+    DisconnectSuccess:
+      allOf:
+        - $ref: '#/components/schemas/OkTrue'
+        - type: object
+          properties:
+            released:
+              type: boolean
+
+    HeartbeatRequest:
+      type: object
+      properties:
+        connection_token:
+          type: string
+        agent_uuid:
+          type: string
+          description: Optional fallback if register link lag.
+
+    HeartbeatSuccess:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+        agent:
+          $ref: '#/components/schemas/ClientAgentSummary'
+        connection_token:
+          type: string
+        connection_lease_expires_at:
+          type: string
+          format: date-time
+        session_signals:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+
+    BrowserSyncRequest:
+      type: object
+      properties:
+        browsers:
+          type: array
+          items:
+            $ref: '#/components/schemas/BrowserProfileInput'
+      description: Alternatively a single browser object with browser_id at top level.
+
+    BrowserProfileInput:
+      type: object
+      properties:
+        browser_id:
+          type: string
+        platform:
+          type: string
+        browser_status:
+          type: string
+      additionalProperties: true
+      description: Cookies, passwords, and secrets are rejected.
+
+    BrowserDeleteRequest:
+      type: object
+      properties:
+        browser_id:
+          type: string
+
+    BrowserSessionsSuccess:
+      allOf:
+        - $ref: '#/components/schemas/OkTrue'
+        - type: object
+          properties:
+            browsers:
+              type: array
+              items:
+                type: object
+                properties:
+                  browser_id:
+                    type: string
+                  account_name:
+                    type: string
+                    nullable: true
+                  platform:
+                    type: string
+                  status:
+                    type: string
+                  last_confirmed_at:
+                    type: string
+                    format: date-time
+                    nullable: true
+
+    BindableAccount:
+      type: object
+      properties:
+        account_id:
+          type: string
+        platform:
+          type: string
+        display_name:
+          type: string
+        username:
+          type: string
+          nullable: true
+        email:
+          type: string
+          nullable: true
+        site_url:
+          type: string
+          nullable: true
+        has_password:
+          type: boolean
+        identity_label:
+          type: string
+          nullable: true
+        verified:
+          type: boolean
+
+    AccountDetailSuccess:
+      allOf:
+        - $ref: '#/components/schemas/OkTrue'
+        - type: object
+          properties:
+            account:
+              type: object
+              properties:
+                account_id:
+                  type: string
+                platform:
+                  type: string
+                display_name:
+                  type: string
+                email:
+                  type: string
+                  nullable: true
+                site_url:
+                  type: string
+                  nullable: true
+                password_status:
+                  type: string
+                  enum: [available, not_set]
+
+    AccountPasswordSuccess:
+      allOf:
+        - $ref: '#/components/schemas/OkTrue'
+        - type: object
+          properties:
+            password:
+              type: string
+              format: password
+
+    SessionConfirmLoginRequest:
+      type: object
+      required: [browser_id, account_id, checked_at]
+      properties:
+        browser_id:
+          type: string
+          format: uuid
+        account_id:
+          type: string
+          format: uuid
+        checked_at:
+          type: string
+          format: date-time
+
+    PackagePublishRequest:
+      type: object
+      required: [package_key, kind, name, version, schema_version, manifest]
+      properties:
+        package_key:
+          type: string
+        kind:
+          type: string
+          enum: [script, widget, workflow]
+        name:
+          type: string
+        version:
+          type: string
+        schema_version:
+          type: integer
+          minimum: 1
+        description:
+          type: string
+        manifest:
+          type: object
+          additionalProperties: true
+        dependencies:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        runtime_compatibility:
+          type: object
+          properties:
+            runner_min:
+              type: string
+
+    RunnerRegisterRequest:
+      type: object
+      required: [device_id]
+      properties:
+        device_id:
+          type: string
+        display_name:
+          type: string
+        app_version:
+          type: string
+        runtime_version:
+          type: string
+        max_concurrency:
+          type: integer
+        capabilities:
+          type: array
+          items:
+            type: string
+
+    JobAttemptBody:
+      type: object
+      required: [attempt_uuid]
+      properties:
+        attempt_uuid:
+          type: string
+          format: uuid
+      additionalProperties: true
+
+    ScriptSyncPlanRequest:
+      type: object
+      required: [local_scripts]
+      properties:
+        local_scripts:
+          type: array
+          items:
+            type: object
+            properties:
+              script_id:
+                type: string
+              package_key:
+                type: string
+              version:
+                type: string
+              content_digest:
+                type: string
+              execution_digest:
+                type: string
+                nullable: true
+              lineage:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+              assets_complete:
+                type: boolean
+
+  responses:
+    Unauthorized:
+      description: Unauthenticated
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/ErrorEnvelope'
+              - $ref: '#/components/schemas/ServiceApiCoreError'
+              - $ref: '#/components/schemas/ClientErrorEnvelope'
+    Forbidden:
+      description: Forbidden (role, scope, installation, or agent mismatch)
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/ErrorEnvelope'
+              - $ref: '#/components/schemas/ServiceApiCoreError'
+              - $ref: '#/components/schemas/ClientErrorEnvelope'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/ErrorEnvelope'
+              - $ref: '#/components/schemas/ServiceApiCoreError'
+              - $ref: '#/components/schemas/ClientErrorEnvelope'
+    Conflict:
+      description: Conflict (digest, lease, fence, locks)
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/ErrorEnvelope'
+              - $ref: '#/components/schemas/ClientKeyInUseError'
+    ValidationError:
+      description: Validation or missing required fields
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/ErrorEnvelope'
+              - $ref: '#/components/schemas/ClientErrorEnvelope'
+    ServiceUnavailable:
+      description: Schema or dependency unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+
+paths:
+  /api/v1/social-automation/docs:
+    get:
+      tags: [Docs]
+      summary: Swagger UI HTML
+      operationId: docsUi
+      security:
+        - SeoOpsSessionCookie: []
+        - RpaAdminBearer: []
+      responses:
+        '200':
+          description: Swagger UI page
+          content:
+            text/html:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/social-automation/openapi.yaml:
+    get:
+      tags: [Docs]
+      summary: OpenAPI specification (YAML)
+      operationId: openApiYaml
+      security:
+        - SeoOpsSessionCookie: []
+        - RpaAdminBearer: []
+      responses:
+        '200':
+          description: OpenAPI 3.0.3 document
+          content:
+            application/yaml:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: Spec file missing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/social-automation/openapi.json:
+    get:
+      tags: [Docs]
+      summary: OpenAPI specification (JSON)
+      operationId: openApiJson
+      security:
+        - SeoOpsSessionCookie: []
+        - RpaAdminBearer: []
+      responses:
+        '200':
+          description: Parsed OpenAPI document
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '503':
+          description: Spec missing or parser unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/social-automation/rpa-admin/login:
+    post:
+      tags: [RPA Admin]
+      summary: RPA Admin login (SEO-OPS email/password)
+      operationId: rpaAdminLogin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RpaAdminLoginSuccess'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: e.g. role_staff_forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/social-automation/rpa-admin/session:
+    get:
+      tags: [RPA Admin]
+      summary: Current RPA Admin session
+      operationId: rpaAdminSession
+      security:
+        - RpaAdminBearer: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RpaAdminSessionSuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/social-automation/rpa-admin/logout:
+    post:
+      tags: [RPA Admin]
+      summary: Revoke RPA Admin session token
+      operationId: rpaAdminLogout
+      security:
+        - RpaAdminBearer: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkTrue'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/social-automation/rpa-admin/scripts:
+    get:
+      tags: [RPA Admin]
+      summary: Script catalog
+      operationId: rpaAdminScriptsCatalog
+      security:
+        - RpaAdminBearer: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkTrue'
+                  - type: object
+                    properties:
+                      scripts:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+
+  /api/v1/social-automation/rpa-admin/scripts/sync/plan:
+    post:
+      tags: [RPA Admin]
+      summary: Plan script sync from local script inventory
+      operationId: rpaAdminScriptsSyncPlan
+      security:
+        - RpaAdminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScriptSyncPlanRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkTrue'
+                  - type: object
+                    properties:
+                      plan:
+                        type: object
+                        additionalProperties: true
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/social-automation/rpa-admin/scripts/publish:
+    post:
+      tags: [RPA Admin]
+      summary: Publish script package release
+      operationId: rpaAdminScriptsPublish
+      security:
+        - RpaAdminBearer: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PackagePublishRequest'
+      responses:
+        '200':
+          description: Published or idempotent replay
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '409':
+          description: e.g. version_digest_conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/social-automation/rpa-admin/scripts/pull:
+    post:
+      tags: [RPA Admin]
+      summary: Pull script release manifest by key and version
+      operationId: rpaAdminScriptsPull
+      security:
+        - RpaAdminBearer: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [package_key, version]
+              properties:
+                package_key:
+                  type: string
+                version:
+                  type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  release:
+                    type: object
+                    additionalProperties: true
+                  assets_complete:
+                    type: boolean
+                  ready_to_execute:
+                    type: boolean
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/social-automation/rpa-admin/scripts/video-demo:
+    get:
+      tags: [RPA Admin]
+      summary: Download script video demo or thumbnail metadata
+      operationId: rpaAdminScriptsVideoDemoGet
+      security:
+        - RpaAdminBearer: []
+      parameters:
+        - name: package_key
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: version
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: kind
+          in: query
+          schema:
+            type: string
+            enum: [video_demo, thumbnail]
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [binary]
+          description: When `binary`, returns raw media stream instead of JSON base64.
+      responses:
+        '200':
+          description: JSON base64 payload or binary stream
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            video/webm:
+              schema:
+                type: string
+                format: binary
+            video/mp4:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    post:
+      tags: [RPA Admin]
+      summary: Attach video demo (and optional thumbnail) to script release
+      operationId: rpaAdminScriptsVideoDemoPost
+      security:
+        - RpaAdminBearer: []
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                package_key:
+                  type: string
+                version:
+                  type: string
+                mime:
+                  type: string
+                sha256:
+                  type: string
+                video:
+                  type: string
+                  format: binary
+                video_base64:
+                  type: string
+                thumbnail:
+                  type: string
+                  format: binary
+                thumbnail_base64:
+                  type: string
+                thumbnail_sha256:
+                  type: string
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkTrue'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/social-automation/rpa-admin/scripts/asset:
+    get:
+      tags: [RPA Admin]
+      summary: Download declared script asset bytes
+      operationId: rpaAdminScriptsAssetGet
+      security:
+        - RpaAdminBearer: []
+      parameters:
+        - name: package_key
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: version
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: asset_path
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  asset_path:
+                    type: string
+                  sha256:
+                    type: string
+                  mime:
+                    type: string
+                  asset_base64:
+                    type: string
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    post:
+      tags: [RPA Admin]
+      summary: Upload script asset declared in release manifest
+      operationId: rpaAdminScriptsAssetPost
+      security:
+        - RpaAdminBearer: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [package_key, version, asset_path, asset_base64, sha256]
+              properties:
+                package_key:
+                  type: string
+                version:
+                  type: string
+                asset_path:
+                  type: string
+                asset_base64:
+                  type: string
+                sha256:
+                  type: string
+                mime:
+                  type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkTrue'
+                  - type: object
+                    properties:
+                      sha256:
+                        type: string
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/social-automation/rpa-admin/active-scripts:
+    get:
+      tags: [RPA Admin]
+      summary: Active scripts linked to action tags
+      operationId: rpaAdminActiveScripts
+      security:
+        - RpaAdminBearer: []
+      parameters:
+        - name: tag_key
+          in: query
+          schema:
+            type: string
+        - name: action_tag_id
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkTrue'
+                  - type: object
+                    properties:
+                      active_scripts:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/social-automation/rpa-admin/backup:
+    get:
+      tags: [RPA Admin]
+      summary: Backup metadata for installation
+      operationId: rpaAdminBackupInfo
+      security:
+        - RpaAdminBearer: []
+      parameters:
+        - name: installation_id
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  backup:
+                    nullable: true
+                    type: object
+                    additionalProperties: true
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    post:
+      tags: [RPA Admin]
+      summary: Store RPA Admin draft backup archive
+      operationId: rpaAdminBackupPut
+      security:
+        - RpaAdminBearer: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [archive_base64, installation_id, draft_revision, sha256]
+              properties:
+                installation_id:
+                  type: string
+                draft_revision:
+                  type: integer
+                archive_base64:
+                  type: string
+                sha256:
+                  type: string
+                summary:
+                  type: object
+                  additionalProperties: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/social-automation/rpa-admin/backup/download:
+    post:
+      tags: [RPA Admin]
+      summary: Download stored backup archive
+      operationId: rpaAdminBackupDownload
+      security:
+        - RpaAdminBearer: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [installation_id]
+              properties:
+                installation_id:
+                  type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  archive_base64:
+                    type: string
+                  sha256:
+                    type: string
+                  backup:
+                    type: object
+                    additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/social-automation/rpa-admin/execution-reports:
+    get:
+      tags: [RPA Admin]
+      summary: Poll execution reports after cursor
+      operationId: rpaAdminExecutionReportsList
+      security:
+        - RpaAdminBearer: []
+      parameters:
+        - name: after_id
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  reports:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  next_after_id:
+                    type: integer
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    post:
+      tags: [RPA Admin]
+      summary: Ingest execution report row
+      operationId: rpaAdminExecutionReportsStore
+      security:
+        - RpaAdminBearer: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [installation_id, script_id, script_version, run_id, timestamp, status]
+              properties:
+                installation_id:
+                  type: string
+                script_id:
+                  type: string
+                script_version:
+                  type: string
+                run_id:
+                  type: string
+                timestamp:
+                  type: string
+                status:
+                  type: string
+                step_id:
+                  type: string
+                step_version:
+                  type: string
+                error_category:
+                  type: string
+                details:
+                  type: object
+                  additionalProperties: true
+      responses:
+        '200':
+          description: Idempotent existing row
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkTrue'
+                  - type: object
+                    properties:
+                      id:
+                        type: integer
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkTrue'
+                  - type: object
+                    properties:
+                      id:
+                        type: integer
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/social-automation/rpa-admin/action-tags:
+    get:
+      tags: [RPA Admin]
+      summary: List action tags with registry metadata
+      operationId: rpaAdminActionTags
+      security:
+        - RpaAdminBearer: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkTrue'
+                  - type: object
+                    properties:
+                      action_tags:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/social-automation/rpa-admin/script-requests:
+    get:
+      tags: [RPA Admin]
+      summary: List script development requests
+      operationId: rpaAdminScriptRequests
+      security:
+        - RpaAdminBearer: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkTrue'
+                  - type: object
+                    properties:
+                      script_requests:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/social-automation/rpa-admin/script-requests/{requestId}/claim:
+    post:
+      tags: [RPA Admin]
+      summary: Claim script request (moves pending/needs_fix → developing)
+      operationId: rpaAdminScriptRequestClaim
+      security:
+        - RpaAdminBearer: []
+      parameters:
+        - $ref: '#/components/parameters/ScriptRequestId'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  request:
+                    type: object
+                    additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/social-automation/client/validate:
+    get:
+      tags: [RPA Client]
+      summary: Validate client API key and installation context
+      operationId: clientValidate
+      security:
+        - RpaClientApiKey: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientValidateSuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/social-automation/client/register:
+    post:
+      tags: [RPA Client]
+      summary: Register or reconnect client agent for API key
+      operationId: clientRegister
+      security:
+        - RpaClientApiKey: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClientRegisterRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientRegisterSuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: CLIENT_KEY_IN_USE — another connection holds the 120s lease
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientKeyInUseError'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/social-automation/client/disconnect:
+    post:
+      tags: [RPA Client]
+      summary: Release connection lease (does not revoke API key)
+      operationId: clientDisconnect
+      security:
+        - RpaClientApiKey: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DisconnectRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DisconnectSuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/social-automation/client/heartbeat:
+    post:
+      tags: [RPA Client]
+      summary: Client heartbeat (resolved by API key)
+      operationId: clientHeartbeat
+      security:
+        - RpaClientApiKey: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeartbeatRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeartbeatSuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: client_not_registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientErrorEnvelope'
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientKeyInUseError'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/social-automation/client/agents/{agentUuid}/heartbeat:
+    post:
+      tags: [RPA Client]
+      summary: Client heartbeat for explicit agent UUID
+      operationId: clientAgentHeartbeat
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/AgentUuid'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeartbeatRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeartbeatSuccess'
+        '403':
+          description: client_api_key_mismatch
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientErrorEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientKeyInUseError'
+
+  /api/v1/social-automation/client/browser-sync:
+    post:
+      tags: [RPA Client]
+      summary: Sync browser profile metadata (no secrets)
+      operationId: clientBrowserSync
+      security:
+        - RpaClientApiKey: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BrowserSyncRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/social-automation/client/browser-delete:
+    post:
+      tags: [RPA Client]
+      summary: Delete browser session by body browser_id
+      operationId: clientBrowserDeletePost
+      security:
+        - RpaClientApiKey: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BrowserDeleteRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkTrue'
+                  - type: object
+                    properties:
+                      deleted:
+                        type: boolean
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/social-automation/client/browsers/{browserId}:
+    delete:
+      tags: [RPA Client]
+      summary: Delete browser session by path browser id
+      operationId: clientBrowserDelete
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/BrowserId'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkTrue'
+                  - type: object
+                    properties:
+                      deleted:
+                        type: boolean
+
+  /api/v1/social-automation/client/browser-sessions:
+    get:
+      tags: [RPA Client]
+      summary: List browser sessions for registered client
+      operationId: clientBrowserSessions
+      security:
+        - RpaClientApiKey: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BrowserSessionsSuccess'
+
+  /api/v1/social-automation/client/accounts:
+    get:
+      tags: [RPA Client]
+      summary: List bindable accounts (no secrets)
+      operationId: clientAccounts
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - name: platform
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkTrue'
+                  - type: object
+                    properties:
+                      accounts:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/BindableAccount'
+
+  /api/v1/social-automation/client/accounts/{accountId}:
+    get:
+      tags: [RPA Client]
+      summary: Account detail for client installation
+      operationId: clientAccountShow
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountDetailSuccess'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/social-automation/client/accounts/{accountId}/password:
+    get:
+      tags: [RPA Client]
+      summary: Decrypted account password (HTTPS required except local dev)
+      operationId: clientAccountPassword
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountPasswordSuccess'
+        '400':
+          description: https_required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientErrorEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/social-automation/client/notifications:
+    get:
+      tags: [RPA Client]
+      summary: Pending staff notifications for client
+      operationId: clientNotifications
+      security:
+        - RpaClientApiKey: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkTrue'
+                  - type: object
+                    properties:
+                      notifications:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+
+  /api/v1/social-automation/client/notifications/{notificationId}/ack:
+    post:
+      tags: [RPA Client]
+      summary: Acknowledge notification
+      operationId: clientNotificationAck
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/NotificationId'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  acked:
+                    type: boolean
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/social-automation/client/session-confirm-login:
+    post:
+      tags: [RPA Client]
+      summary: Confirm login check for browser/account pair
+      operationId: clientSessionConfirmLogin
+      security:
+        - RpaClientApiKey: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionConfirmLoginRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/services/{service}/social-automation/packages:
+    get:
+      tags: [Service API Admin]
+      summary: List package registry entries
+      operationId: servicePackagesIndex
+      security:
+        - ServiceApiBearer: []
+      description: Requires scope `social-automation:package:read`.
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkTrue'
+                  - type: object
+                    properties:
+                      packages:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/services/{service}/social-automation/packages/{packageKey}:
+    get:
+      tags: [Service API Admin]
+      summary: Show package releases or single release by version query
+      operationId: servicePackagesShow
+      security:
+        - ServiceApiBearer: []
+      description: Requires scope `social-automation:package:read`.
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+        - $ref: '#/components/parameters/PackageKey'
+        - name: version
+          in: query
+          schema:
+            type: string
+          description: When set, returns single `release`; otherwise filtered package list.
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/services/{service}/social-automation/packages/publish:
+    post:
+      tags: [Service API Admin]
+      summary: Publish package release
+      operationId: servicePackagesPublish
+      security:
+        - ServiceApiBearer: []
+      description: Requires scope `social-automation:package:publish`.
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PackagePublishRequest'
+      responses:
+        '200':
+          description: Published or idempotent
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '409':
+          description: version_digest_conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          description: package_registry_unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/services/{service}/social-automation/tasks:
+    get:
+      tags: [Service API Admin]
+      summary: List tasks
+      operationId: serviceTasksIndex
+      security:
+        - ServiceApiBearer: []
+      description: Requires scope `social-automation:admin:task`.
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    post:
+      tags: [Service API Admin]
+      summary: Create task
+      operationId: serviceTasksStore
+      security:
+        - ServiceApiBearer: []
+      description: Requires scope `social-automation:admin:task`.
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Task created or updated
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '201':
+          description: Task created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/services/{service}/social-automation/schedules:
+    post:
+      tags: [Service API Admin]
+      summary: Create schedule for task
+      operationId: serviceSchedulesStore
+      security:
+        - ServiceApiBearer: []
+      description: Requires scope `social-automation:admin:task`.
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Schedule created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '201':
+          description: Schedule created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /api/v1/services/{service}/social-automation/widgets/compose-input:
+    post:
+      tags: [Service API Admin]
+      summary: Compose widget input from manual or AI auto payload
+      operationId: serviceWidgetsComposeInput
+      security:
+        - ServiceApiBearer: []
+      description: Requires scope `social-automation:admin:task`.
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/services/{service}/social-automation/workflows/compose-preview:
+    post:
+      tags: [Service API Admin]
+      summary: Preview Script→Widget→Workflow mapping
+      operationId: serviceWorkflowsComposePreview
+      security:
+        - ServiceApiBearer: []
+      description: Requires scope `social-automation:admin:task`.
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /api/v1/services/{service}/social-automation/dispatch/manual:
+    post:
+      tags: [Service API Admin]
+      summary: Manual task dispatch to eligible runners
+      operationId: serviceDispatchManual
+      security:
+        - ServiceApiBearer: []
+      description: Requires scope `social-automation:admin:dispatch`.
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/services/{service}/social-automation/runner/register:
+    post:
+      tags: [Service API Runner]
+      summary: Register runner agent by device_id
+      operationId: runnerRegister
+      security:
+        - ServiceApiBearer: []
+      description: Requires scope `social-automation:runner:agent`. Never use OPS service_key as Bearer.
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunnerRegisterRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/services/{service}/social-automation/runner/agents/{agentUuid}/heartbeat:
+    post:
+      tags: [Service API Runner]
+      summary: Runner agent heartbeat
+      operationId: runnerHeartbeat
+      security:
+        - ServiceApiBearer: []
+      description: Requires scope `social-automation:runner:agent`.
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+        - $ref: '#/components/parameters/AgentUuid'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/services/{service}/social-automation/runner/agents/{agentUuid}/sessions/sync:
+    post:
+      tags: [Service API Runner]
+      summary: Sync browser sessions and account bindings
+      operationId: runnerSessionsSync
+      security:
+        - ServiceApiBearer: []
+      description: Requires scope `social-automation:runner:session`. Never send cookies/passwords/profile paths.
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+        - $ref: '#/components/parameters/AgentUuid'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/services/{service}/social-automation/runner/agents/{agentUuid}/jobs/{jobUuid}/claim:
+    post:
+      tags: [Service API Runner]
+      summary: Claim job and receive attempt fence
+      operationId: runnerJobClaim
+      security:
+        - ServiceApiBearer: []
+      description: Requires scope `social-automation:runner:job`.
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+        - $ref: '#/components/parameters/AgentUuid'
+        - $ref: '#/components/parameters/JobUuid'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '403':
+          description: agent_disabled, cross_agent_forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: account_locked, invalid_transition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/services/{service}/social-automation/runner/agents/{agentUuid}/jobs/{jobUuid}/ack:
+    post:
+      tags: [Service API Runner]
+      summary: Acknowledge job running
+      operationId: runnerJobAck
+      security:
+        - ServiceApiBearer: []
+      description: Requires scope `social-automation:runner:job`. Body must include attempt_uuid.
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+        - $ref: '#/components/parameters/AgentUuid'
+        - $ref: '#/components/parameters/JobUuid'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobAttemptBody'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '409':
+          description: stale_attempt, attempt_fence_mismatch
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/services/{service}/social-automation/runner/agents/{agentUuid}/jobs/{jobUuid}/progress:
+    post:
+      tags: [Service API Runner]
+      summary: Report job progress (extends lease)
+      operationId: runnerJobProgress
+      security:
+        - ServiceApiBearer: []
+      description: Requires scope `social-automation:runner:job`. Body must include attempt_uuid.
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+        - $ref: '#/components/parameters/AgentUuid'
+        - $ref: '#/components/parameters/JobUuid'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobAttemptBody'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/services/{service}/social-automation/runner/agents/{agentUuid}/jobs/{jobUuid}/result:
+    post:
+      tags: [Service API Runner]
+      summary: Terminal job result
+      operationId: runnerJobResult
+      security:
+        - ServiceApiBearer: []
+      description: Requires scope `social-automation:runner:job`. Body must include attempt_uuid.
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+        - $ref: '#/components/parameters/AgentUuid'
+        - $ref: '#/components/parameters/JobUuid'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobAttemptBody'
+      responses:
+        '200':
+          description: May include idempotent true on replay
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '409':
+          description: stale_attempt, attempt_fence_mismatch
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/services/{service}/social-automation/runner/agents/{agentUuid}/jobs/{jobUuid}/artifacts:
+    post:
+      tags: [Service API Runner]
+      summary: Upload job artifact (screenshot, etc.)
+      operationId: runnerJobArtifacts
+      security:
+        - ServiceApiBearer: []
+      description: Requires scope `social-automation:runner:job`. Body must include attempt_uuid.
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+        - $ref: '#/components/parameters/AgentUuid'
+        - $ref: '#/components/parameters/JobUuid'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/JobAttemptBody'
+                - type: object
+                  properties:
+                    kind:
+                      type: string
+                    checksum_sha256:
+                      type: string
+                    content_base64:
+                      type: string
+                    metadata:
+                      type: object
+                      additionalProperties: true
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/services/{service}/social-automation/client/validate:
+    get:
+      tags: [RPA Client]
+      summary: Validate client API key (service-prefixed mirror)
+      operationId: serviceClientValidate
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientValidateSuccess'
+
+  /api/v1/services/{service}/social-automation/client/register:
+    post:
+      tags: [RPA Client]
+      summary: Register client (service-prefixed mirror)
+      operationId: serviceClientRegister
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClientRegisterRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientRegisterSuccess'
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientKeyInUseError'
+
+  /api/v1/services/{service}/social-automation/client/disconnect:
+    post:
+      tags: [RPA Client]
+      summary: Disconnect client lease (service-prefixed mirror)
+      operationId: serviceClientDisconnect
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DisconnectRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DisconnectSuccess'
+
+  /api/v1/services/{service}/social-automation/client/heartbeat:
+    post:
+      tags: [RPA Client]
+      summary: Client heartbeat (service-prefixed mirror)
+      operationId: serviceClientHeartbeat
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeartbeatRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeartbeatSuccess'
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientKeyInUseError'
+
+  /api/v1/services/{service}/social-automation/client/browser-sync:
+    post:
+      tags: [RPA Client]
+      summary: Browser sync (service-prefixed mirror)
+      operationId: serviceClientBrowserSync
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BrowserSyncRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /api/v1/services/{service}/social-automation/client/browser-delete:
+    post:
+      tags: [RPA Client]
+      summary: Browser delete (service-prefixed mirror)
+      operationId: serviceClientBrowserDelete
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BrowserDeleteRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkTrue'
+                  - type: object
+                    properties:
+                      deleted:
+                        type: boolean
+
+  /api/v1/services/{service}/social-automation/client/accounts:
+    get:
+      tags: [RPA Client]
+      summary: List accounts (service-prefixed mirror)
+      operationId: serviceClientAccounts
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+        - name: platform
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkTrue'
+                  - type: object
+                    properties:
+                      accounts:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/BindableAccount'
+
+  /api/v1/services/{service}/social-automation/client/accounts/{accountId}:
+    get:
+      tags: [RPA Client]
+      summary: Account detail (service-prefixed mirror)
+      operationId: serviceClientAccountShow
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+        - $ref: '#/components/parameters/AccountId'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountDetailSuccess'
+
+  /api/v1/services/{service}/social-automation/client/accounts/{accountId}/password:
+    get:
+      tags: [RPA Client]
+      summary: Account password (service-prefixed mirror)
+      operationId: serviceClientAccountPassword
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/ServiceSlug'
+        - $ref: '#/components/parameters/AccountId'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountPasswordSuccess'
+
+  /api/social-automation/bootstrap:
+    get:
+      tags: [Staff Session]
+      summary: Staff UI bootstrap payload
+      operationId: staffBootstrap
+      security:
+        - SeoOpsSessionCookie: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  bootstrap:
+                    type: object
+                    additionalProperties: true
+        '403':
+          description: Service inactive or access denied
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /api/social-automation/health:
+    get:
+      tags: [Staff Session]
+      summary: Service health report
+      operationId: staffHealth
+      security:
+        - SeoOpsSessionCookie: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '503':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /social-automation/api/action-registry/data:
+    get:
+      tags: [Staff Session]
+      summary: Action registry tree for UI
+      operationId: actionRegistryData
+      security:
+        - SeoOpsSessionCookie: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /social-automation/api/action-registry/sites:
+    post:
+      tags: [Staff Session]
+      summary: Create action registry site
+      operationId: actionRegistrySitesStore
+      security:
+        - SeoOpsSessionCookie: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /social-automation/api/action-registry/sites/{id}:
+    put:
+      tags: [Staff Session]
+      summary: Update action registry site
+      operationId: actionRegistrySitesUpdate
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/NumericId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /social-automation/api/action-registry/paths:
+    post:
+      tags: [Staff Session]
+      summary: Create action registry path
+      operationId: actionRegistryPathsStore
+      security:
+        - SeoOpsSessionCookie: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /social-automation/api/action-registry/paths/{id}:
+    put:
+      tags: [Staff Session]
+      summary: Update action registry path
+      operationId: actionRegistryPathsUpdate
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/NumericId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /social-automation/api/action-registry/tags:
+    post:
+      tags: [Staff Session]
+      summary: Create action tag
+      operationId: actionRegistryTagsStore
+      security:
+        - SeoOpsSessionCookie: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /social-automation/api/action-registry/tags/{id}/requests:
+    post:
+      tags: [Staff Session]
+      summary: Create script request for action tag
+      operationId: actionRegistryTagRequestsCreate
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/NumericId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /social-automation/api/action-registry/tags/{id}:
+    delete:
+      tags: [Staff Session]
+      summary: Delete action tag
+      operationId: actionRegistryTagsDestroy
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/NumericId'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /social-automation/api/client-keys:
+    get:
+      tags: [Staff Session]
+      summary: List client API keys
+      operationId: clientKeysIndex
+      security:
+        - SeoOpsSessionCookie: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkTrue'
+                  - type: object
+                    properties:
+                      keys:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+    post:
+      tags: [Staff Session]
+      summary: Create client API key (raw key returned once)
+      operationId: clientKeysStore
+      security:
+        - SeoOpsSessionCookie: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  message:
+                    type: string
+                  raw_key:
+                    type: string
+                    example: CLIENT_KEY_PLACEHOLDER
+                  key:
+                    type: object
+                    additionalProperties: true
+
+  /social-automation/api/client-keys/active-or-candidate:
+    get:
+      tags: [Staff Session]
+      summary: Active or candidate key state for UI
+      operationId: clientKeysActiveOrCandidate
+      security:
+        - SeoOpsSessionCookie: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  endpoint:
+                    type: string
+                  data:
+                    type: object
+                    additionalProperties: true
+
+  /social-automation/api/client-keys/activate-candidate:
+    post:
+      tags: [Staff Session]
+      summary: Activate candidate client API key
+      operationId: clientKeysActivateCandidate
+      security:
+        - SeoOpsSessionCookie: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [candidate_token]
+              properties:
+                candidate_token:
+                  type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /social-automation/api/client-keys/{id}/revoke:
+    post:
+      tags: [Staff Session]
+      summary: Revoke client API key by id
+      operationId: clientKeysRevoke
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/NumericId'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /social-automation/api/accounts:
+    get:
+      tags: [Staff Session]
+      summary: List accounts for staff UI
+      operationId: staffAccountsIndex
+      security:
+        - SeoOpsSessionCookie: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    post:
+      tags: [Staff Session]
+      summary: Create account
+      operationId: staffAccountsStore
+      security:
+        - SeoOpsSessionCookie: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Account created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '201':
+          description: Account created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /social-automation/api/accounts/{id}:
+    put:
+      tags: [Staff Session]
+      summary: Update account
+      operationId: staffAccountsUpdate
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/NumericId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    delete:
+      tags: [Staff Session]
+      summary: Delete account
+      operationId: staffAccountsDestroy
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/NumericId'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /social-automation/api/clients/sessions/{sessionId}/notifications:
+    post:
+      tags: [Staff Session]
+      summary: Push notification to client session
+      operationId: staffClientSessionNotify
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '422':
+          $ref: '#/components/responses/ValidationError'

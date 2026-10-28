@@ -18,21 +18,12 @@ use Illuminate\Foundation\Http\Middleware\VerifyCsrfToken;
 use Illuminate\Routing\Middleware\SubstituteBindings;
 use Illuminate\Session\Middleware\StartSession;
 use Illuminate\View\Middleware\ShareErrorsFromSession;
-use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationAccountsPage;
-use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationAgentsPage;
-use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationClientKeysPage;
-use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationDashboardPage;
-use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationJobsPage;
-use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationPackagesPage;
-use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationSchedulesPage;
-use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationActionTagsPage;
-use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationScriptsPage;
-use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationServiceStatusPage;
-use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationSessionsPage;
-use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationTasksPage;
-use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationWidgetsPage;
-use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationWorkflowsPage;
+use Omnichannel\Addons\SocialAutomation\Filament\Pages\SocialAutomationApiDocsPage;
 
+/**
+ * API-first panel: docs entry only. Legacy Filament admin pages remain in source
+ * for reference but are not registered in the deployment path.
+ */
 final class SocialAutomationPanelProvider extends PanelProvider
 {
     public function panel(Panel $panel): Panel
@@ -40,8 +31,8 @@ final class SocialAutomationPanelProvider extends PanelProvider
         return $panel
             ->id('social-automation')
             ->path('social-automation')
-            ->homeUrl(static fn (): string => url('/social-automation'))
-            ->brandName('Social Automation')
+            ->homeUrl(static fn (): string => url('/social-automation/api-docs'))
+            ->brandName('Social Automation API')
             ->brandLogo(asset('images/logo.png'))
             ->brandLogoHeight('2.5rem')
             ->favicon(asset('favicon.ico'))
@@ -51,23 +42,7 @@ final class SocialAutomationPanelProvider extends PanelProvider
             ->maxContentWidth(MaxWidth::Full)
             ->sidebarCollapsibleOnDesktop()
             ->pages([
-                SocialAutomationDashboardPage::class,
-                SocialAutomationActionTagsPage::class,
-                SocialAutomationScriptsPage::class,
-                SocialAutomationWidgetsPage::class,
-                SocialAutomationWorkflowsPage::class,
-                // Legacy packages route kept registered but hidden from nav.
-                SocialAutomationPackagesPage::class,
-                SocialAutomationAgentsPage::class,
-                SocialAutomationClientKeysPage::class,
-                // Accounts DB/API kept; nav hidden per navigation redesign.
-                SocialAutomationAccountsPage::class,
-                SocialAutomationSessionsPage::class,
-                SocialAutomationTasksPage::class,
-                SocialAutomationSchedulesPage::class,
-                SocialAutomationJobsPage::class,
-                // Service status uses Admin Service page — nav hidden.
-                SocialAutomationServiceStatusPage::class,
+                SocialAutomationApiDocsPage::class,
             ])
             ->middleware([
                 EncryptCookies::class,

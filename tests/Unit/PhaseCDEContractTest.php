@@ -67,9 +67,10 @@ final class PhaseCDEContractTest extends TestCase
         self::assertStringContainsString('service_key', $src);
     }
 
-    public function test_panel_registers_all_nav_pages(): void
+    public function test_panel_registers_api_docs_only(): void
     {
         $src = (string) file_get_contents($this->root.'/src/Providers/SocialAutomationPanelProvider.php');
+        self::assertStringContainsString('SocialAutomationApiDocsPage', $src);
         foreach ([
             'SocialAutomationScriptsPage',
             'SocialAutomationWidgetsPage',
@@ -81,7 +82,7 @@ final class PhaseCDEContractTest extends TestCase
             'SocialAutomationSchedulesPage',
             'SocialAutomationJobsPage',
         ] as $page) {
-            self::assertStringContainsString($page, $src);
+            self::assertStringNotContainsString($page, $src);
         }
     }
 

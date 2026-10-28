@@ -114,6 +114,7 @@ final class SocialAutomationFoundationContractTest extends TestCase
 
         self::assertStringContainsString("->id('social-automation')", $source);
         self::assertStringContainsString("->path('social-automation')", $source);
+        self::assertStringContainsString('SocialAutomationApiDocsPage::class', $source);
     }
 
     public function test_db_connection_constant_and_migration_readme(): void
