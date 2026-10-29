@@ -10,6 +10,7 @@ use Illuminate\Http\Request;
 use Omnichannel\Addons\SocialAutomation\Contracts\SaAccountRepositoryContract;
 use Omnichannel\Addons\SocialAutomation\Domain\AgentKindPolicy;
 use Omnichannel\Addons\SocialAutomation\Domain\ClientConnectionLease;
+use Omnichannel\Addons\SocialAutomation\Domain\StaffClientEnrollmentBootstrap;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureRpaClientApiKey;
 use Omnichannel\Addons\SocialAutomation\Models\SaAccount;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTag;
@@ -20,6 +21,8 @@ use Omnichannel\Addons\SocialAutomation\Registry\AgentRegistryService;
 use Omnichannel\Addons\SocialAutomation\Registry\SessionSyncService;
 use Omnichannel\Addons\SocialAutomation\Services\AuthScriptService;
 use Omnichannel\Addons\SocialAutomation\Services\ClientNotificationService;
+use Omnichannel\Addons\SocialAutomation\Services\RpaClientApiKeyService;
+use Omnichannel\Addons\SocialAutomation\Services\StaffClientEnrollmentService;
 
 final class RpaClientApiController extends Controller
 {
@@ -64,10 +67,40 @@ final class RpaClientApiController extends Controller
     /**
      * Register / connect Client under authenticated Client API Key.
      * Identity = client_api_key_id (1 key → 1 client). Device UUID not required.
+     *
+     * Staff enrollment bootstrap Bearer Keys are materialized into sa_client_api_keys
+     * on successful registration only (unused bootstraps never create DB rows).
      */
     public function registerDevice(Request $request): JsonResponse
     {
         $clientKey = $this->resolveClientKey($request);
+        $bootstrap = $request->attributes->get(EnsureRpaClientApiKey::REQUEST_ENROLLMENT_BOOTSTRAP);
+        $bootstrapRaw = $request->attributes->get(EnsureRpaClientApiKey::REQUEST_ENROLLMENT_RAW_KEY);
+
+        if (! $clientKey instanceof SaClientApiKey && is_array($bootstrap) && is_string($bootstrapRaw) && $bootstrapRaw !== '') {
+            $enrollment = $this->enrollmentService();
+            if (! $enrollment instanceof StaffClientEnrollmentService) {
+                return new JsonResponse(['ok' => false, 'error' => 'enrollment_unavailable'], 503);
+            }
+            $materialized = $enrollment->materializeFromBootstrap($bootstrap, $bootstrapRaw);
+            if (! ($materialized['ok'] ?? false) || ! ($materialized['key'] instanceof SaClientApiKey)) {
+                $error = (string) ($materialized['error'] ?? StaffClientEnrollmentBootstrap::ERROR_INVALID);
+                $status = in_array($error, [
+                    StaffClientEnrollmentService::ERROR_STAFF_SLOT_TAKEN,
+                    StaffClientEnrollmentService::ERROR_ALREADY_CONNECTED,
+                ], true) ? 409 : 401;
+
+                return new JsonResponse([
+                    'ok' => false,
+                    'error' => $error,
+                    'errors' => [$error],
+                    'message' => $materialized['message'] ?? null,
+                ], $status);
+            }
+            $clientKey = $materialized['key'];
+            $request->attributes->set(EnsureRpaClientApiKey::REQUEST_CLIENT_KEY, $clientKey);
+        }
+
         if (! $clientKey instanceof SaClientApiKey) {
             return new JsonResponse(['ok' => false, 'error' => 'unauthenticated'], 401);
         }
@@ -75,6 +108,8 @@ final class RpaClientApiController extends Controller
         $payload = $request->all();
         // Ignore client-supplied device_id — identity is the API key.
         unset($payload['device_id']);
+        // Never trust staff identity from Electron body; ownership is key.created_by.
+        unset($payload['staff_user_id'], $payload['user_id'], $payload['created_by']);
         $payload['agent_kind'] = AgentKindPolicy::KIND_CLIENT;
         $payload['installation_id'] = (string) $clientKey->getAttribute('installation_id');
 
@@ -83,6 +118,15 @@ final class RpaClientApiController extends Controller
         if (($result['ok'] ?? false) !== true) {
             $error = (string) ($result['error'] ?? ($result['errors'][0] ?? 'register_failed'));
             $status = $error === ClientConnectionLease::ERROR_KEY_IN_USE ? 409 : 422;
+
+            // Failed registration after bootstrap materialize: revoke so no successful history remains.
+            if (is_array($bootstrap) && $clientKey->created_by) {
+                try {
+                    app(RpaClientApiKeyService::class)->revoke((int) $clientKey->id, (string) $clientKey->installation_id);
+                    $this->agents->forceReleaseConnection((int) $clientKey->id);
+                } catch (\Throwable) {
+                }
+            }
 
             return new JsonResponse([
                 'ok' => false,
@@ -595,5 +639,17 @@ final class RpaClientApiController extends Controller
         }
 
         return $clientKey instanceof SaClientApiKey ? $clientKey : null;
+    }
+
+    private function enrollmentService(): ?StaffClientEnrollmentService
+    {
+        if (function_exists('app')) {
+            try {
+                return app(StaffClientEnrollmentService::class);
+            } catch (\Throwable) {
+            }
+        }
+
+        return null;
     }
 }

@@ -44,6 +44,16 @@ final class EloquentRpaClientApiKeyRepository implements RpaClientApiKeyReposito
             ->first();
     }
 
+    public function findActiveByCreator(string $installationId, int $createdByUserId): ?SaClientApiKey
+    {
+        return SaClientApiKey::query()
+            ->where('installation_id', $installationId)
+            ->where('created_by', $createdByUserId)
+            ->whereNull('revoked_at')
+            ->orderByDesc('id')
+            ->first();
+    }
+
     public function findByPrefix(string $prefix): Collection
     {
         return SaClientApiKey::query()

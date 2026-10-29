@@ -15,6 +15,15 @@ info:
     - `register` / `heartbeat` return `connection_token` and `connection_lease_expires_at`; send `connection_token` on reconnect and on `disconnect`.
     - Another holder with a valid lease → HTTP **409** with `CLIENT_KEY_IN_USE`.
 
+    **Staff Client enrollment (CP17A)**
+    - Staff Session issues a **stateless bootstrap Key** (no DB row until Electron successfully registers).
+    - Browser may cache bootstrap in `localStorage` under key `sa_staff_client_bootstrap_v1` (`raw_key`, `expires_at`, `key_prefix`, `installation_id`).
+    - Bootstrap Bearer authorizes **POST /client/register only**; it does not grant heartbeat, browser-sync, accounts, or auth pull.
+    - Successful register materializes `sa_client_api_keys` with `created_by` = Staff user id and issues the normal connection lease.
+    - Enforcement: **1 Staff = 1 active Client** (one non-revoked key per `created_by` per installation).
+    - Staff Disconnect revokes the key and force-releases the lease **without requiring Electron**; history rows are preserved (`revoked_at` = disconnected_at).
+    - Owner inventory lists successful connections only (keys with a client agent); unused bootstraps never appear.
+
     **Service API**
     - Base path `/api/v1/services/{service}/social-automation/...`
     - Path parameter `{service}` must be public slug `social-automation`.
@@ -60,7 +69,9 @@ components:
       type: http
       scheme: bearer
       bearerFormat: client_api_key
-      description: RPA Client API key (raw key shown once at creation in staff UI).
+      description: |
+        Persisted RPA Client API key, or a staff enrollment bootstrap Key on POST /client/register only.
+        Bootstrap Keys are HMAC-signed, staff+installation scoped, and expire; they are not stored until successful registration.
     ServiceApiBearer:
       type: http
       scheme: bearer
@@ -3288,6 +3299,132 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+
+  /social-automation/api/staff/client-connection:
+    get:
+      tags: [Staff Session]
+      summary: Staff Client connection state (or temporary bootstrap Key)
+      description: |
+        Authenticated Staff only (session user id). When not connected, returns a fresh bootstrap Key
+        for localStorage (`localstorage_key` = `sa_staff_client_bootstrap_v1`) plus tutorial placeholder.
+        Unused Keys are not persisted. When connected, returns this Staff's machine only.
+      operationId: staffClientConnectionShow
+      security:
+        - SeoOpsSessionCookie: []
+      responses:
+        '200':
+          description: Connection state or bootstrap Key
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, connected, status, localstorage_key]
+                properties:
+                  ok:
+                    type: boolean
+                  connected:
+                    type: boolean
+                  status:
+                    type: string
+                    enum: [connected, not_connected]
+                  bootstrap:
+                    type: object
+                    nullable: true
+                    additionalProperties: true
+                  connection:
+                    type: object
+                    nullable: true
+                    additionalProperties: true
+                  localstorage_key:
+                    type: string
+                    example: sa_staff_client_bootstrap_v1
+                  endpoint:
+                    type: string
+        '401':
+          description: Unauthenticated
+        '403':
+          description: Forbidden
+
+  /social-automation/api/staff/client-connection/bootstrap-key:
+    post:
+      tags: [Staff Session]
+      summary: Re-issue temporary Staff bootstrap Key
+      description: |
+        Refresh/reuse contract: issues a new signed bootstrap Key; previous unused Keys remain
+        valid until their own expiry but are not tracked server-side. Rejects if Staff already connected.
+      operationId: staffClientConnectionBootstrapKey
+      security:
+        - SeoOpsSessionCookie: []
+      responses:
+        '200':
+          description: Bootstrap Key issued (zero DB writes)
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '409':
+          description: Staff already connected
+        '403':
+          description: Forbidden
+
+  /social-automation/api/staff/client-connection/disconnect:
+    post:
+      tags: [Staff Session]
+      summary: Disconnect this Staff's Client without Electron cooperation
+      description: |
+        Revokes the Staff's active Client API Key and force-releases the connection lease.
+        Works when Electron is offline/uninstalled. Preserves successful connection history.
+      operationId: staffClientConnectionDisconnect
+      security:
+        - SeoOpsSessionCookie: []
+      responses:
+        '200':
+          description: Disconnected
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          description: No active connection
+        '403':
+          description: Forbidden
+
+  /social-automation/api/owner/client-connections:
+    get:
+      tags: [Staff Session]
+      summary: Owner inventory of successful Client connections
+      description: |
+        Owner/Admin only. Lists connected/disconnected Clients with responsible Staff,
+        key prefix, machine name, status, connected_at, disconnected_at, last_heartbeat.
+        Unused temporary Keys are never stored and never listed.
+      operationId: ownerClientConnectionsIndex
+      security:
+        - SeoOpsSessionCookie: []
+      responses:
+        '200':
+          description: Successful connection inventory
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, connections, summary]
+                properties:
+                  ok:
+                    type: boolean
+                  connections:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  summary:
+                    type: object
+                    additionalProperties: true
+                  notes:
+                    type: string
+        '403':
+          description: Forbidden (Staff cannot access)
 
   /social-automation/api/browsers:
     get:

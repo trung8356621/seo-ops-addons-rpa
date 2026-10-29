@@ -360,6 +360,24 @@ final class AgentRegistryService
     }
 
     /**
+     * Staff/server force-release: clear lease without requiring Electron connection_token.
+     * Used after credential revoke so offline/broken Clients cannot keep a live lease.
+     */
+    public function forceReleaseConnection(int $clientApiKeyId): bool
+    {
+        $agent = $this->findClientByApiKeyId($clientApiKeyId);
+        if (! $agent instanceof SaAgent) {
+            return false;
+        }
+        $agent->fill([
+            'connection_token' => null,
+            'connection_lease_expires_at' => null,
+        ])->save();
+
+        return true;
+    }
+
+    /**
      * @return array{ok: bool, agent?: array<string, mixed>, errors?: list<string>}
      */
     public function disable(string $agentUuid, ?int $credentialId = null): array

@@ -72,6 +72,35 @@ final class InMemoryRpaClientApiKeyRepository implements RpaClientApiKeyReposito
         return null;
     }
 
+    public function findActiveByCreator(string $installationId, int $createdByUserId): ?SaClientApiKey
+    {
+        $match = null;
+        foreach ($this->items as $item) {
+            if ((string) $item->getAttribute('installation_id') !== $installationId) {
+                continue;
+            }
+            if ((int) ($item->getAttribute('created_by') ?? 0) !== $createdByUserId) {
+                continue;
+            }
+            if (! $item->isActive()) {
+                continue;
+            }
+            if ($match === null || (int) $item->getAttribute('id') > (int) $match->getAttribute('id')) {
+                $match = $item;
+            }
+        }
+
+        return $match;
+    }
+
+    /**
+     * Test helper: count persisted keys for an installation.
+     */
+    public function countForInstallation(string $installationId): int
+    {
+        return $this->list($installationId)->count();
+    }
+
     public function findByPrefix(string $prefix): Collection
     {
         $filtered = array_filter(

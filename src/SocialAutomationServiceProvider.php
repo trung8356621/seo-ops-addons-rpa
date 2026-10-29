@@ -312,6 +312,18 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                         ->name('social-automation.client-keys.revoke');
                 });
 
+                // CP17A — Staff Client enrollment (bootstrap Key / connection / disconnect)
+                Route::prefix('api/staff/client-connection')->group(function (): void {
+                    Route::get('/', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\StaffClientEnrollmentController::class, 'connection'])
+                        ->name('social-automation.staff.client-connection.show');
+                    Route::post('/bootstrap-key', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\StaffClientEnrollmentController::class, 'issueBootstrapKey'])
+                        ->name('social-automation.staff.client-connection.bootstrap-key');
+                    Route::post('/disconnect', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\StaffClientEnrollmentController::class, 'disconnect'])
+                        ->name('social-automation.staff.client-connection.disconnect');
+                });
+                Route::get('/api/owner/client-connections', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\StaffClientEnrollmentController::class, 'ownerConnections'])
+                    ->name('social-automation.owner.client-connections.index');
+
                 // Account Inventory Management for SEO-OPS UI / API
                 Route::prefix('api/accounts')->group(function (): void {
                     Route::get('/', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\SocialAutomationAccountManagementController::class, 'index'])

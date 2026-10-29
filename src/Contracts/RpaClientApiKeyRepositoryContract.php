@@ -24,6 +24,11 @@ interface RpaClientApiKeyRepositoryContract
     public function firstUsable(string $installationId): ?SaClientApiKey;
 
     /**
+     * Active (non-revoked) key owned by staff user within installation.
+     */
+    public function findActiveByCreator(string $installationId, int $createdByUserId): ?SaClientApiKey;
+
+    /**
      * @return Collection<int, SaClientApiKey>
      */
     public function findByPrefix(string $prefix): Collection;
