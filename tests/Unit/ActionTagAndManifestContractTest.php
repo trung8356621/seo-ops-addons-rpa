@@ -165,4 +165,43 @@ final class ActionTagAndManifestContractTest extends TestCase
         self::assertSame('published', SaScriptRequest::STATUS_PUBLISHED);
         self::assertSame('needs_fix', SaScriptRequest::STATUS_NEEDS_FIX);
     }
+
+    public function test_open_create_request_statuses_match_lifecycle(): void
+    {
+        self::assertSame(
+            [
+                SaScriptRequest::STATUS_PENDING,
+                SaScriptRequest::STATUS_DEVELOPING,
+                SaScriptRequest::STATUS_PUBLISHED,
+            ],
+            SaScriptRequest::openCreateRequestStatuses()
+        );
+        self::assertNotContains('in_progress', SaScriptRequest::openCreateRequestStatuses());
+        self::assertNotContains('completed', SaScriptRequest::openCreateRequestStatuses());
+        self::assertNotContains(SaScriptRequest::STATUS_NEEDS_FIX, SaScriptRequest::openCreateRequestStatuses());
+        self::assertFalse(defined(SaScriptRequest::class.'::STATUS_IN_PROGRESS'));
+        self::assertFalse(defined(SaScriptRequest::class.'::STATUS_COMPLETED'));
+    }
+
+    public function test_store_tag_uses_open_create_request_statuses_helper(): void
+    {
+        $src = (string) file_get_contents(
+            dirname(__DIR__, 2).'/src/Http/Controllers/ActionRegistry/ActionRegistryController.php'
+        );
+
+        self::assertMatchesRegularExpression(
+            '/function\s+storeTag\b[\s\S]*?openCreateRequestStatuses\s*\(/',
+            $src
+        );
+
+        if (! preg_match('/function\s+storeTag\b([\s\S]*?)(?=\n    public function |\n    protected function |\n    private function |\n}\s*$)/', $src, $m)) {
+            self::fail('storeTag() not found in ActionRegistryController');
+        }
+
+        $storeTag = $m[1];
+        self::assertStringContainsString('openCreateRequestStatuses()', $storeTag);
+        self::assertStringNotContainsString('STATUS_IN_PROGRESS', $storeTag);
+        self::assertStringNotContainsString('STATUS_COMPLETED', $storeTag);
+        self::assertStringContainsString("STATUS_PENDING", $storeTag);
+    }
 }

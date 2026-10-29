@@ -21,6 +21,21 @@ class SaScriptRequest extends Model
     public const STATUS_PUBLISHED = 'published';
     public const STATUS_NEEDS_FIX = 'needs_fix';
 
+    /**
+     * Statuses that block creating a duplicate TYPE_CREATE Script Request
+     * for the same action tag (idempotency window in storeTag).
+     *
+     * @return list<string>
+     */
+    public static function openCreateRequestStatuses(): array
+    {
+        return [
+            self::STATUS_PENDING,
+            self::STATUS_DEVELOPING,
+            self::STATUS_PUBLISHED,
+        ];
+    }
+
     protected $connection = SocialAutomationServiceConfig::CONNECTION;
 
     protected $table = 'sa_script_requests';

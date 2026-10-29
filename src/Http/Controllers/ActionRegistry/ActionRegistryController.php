@@ -381,14 +381,10 @@ final class ActionRegistryController
                     $tag = $pin['tag'];
                 }
 
-                // Atomically create Script Request: check if active/pending request exists for idempotency
+                // Atomically create Script Request: check if open create request exists for idempotency
                 $existingRequest = SaScriptRequest::query()
                     ->where('action_tag_key', $tag->tag_key)
-                    ->whereIn('status', [
-                        SaScriptRequest::STATUS_PENDING,
-                        SaScriptRequest::STATUS_IN_PROGRESS,
-                        SaScriptRequest::STATUS_COMPLETED,
-                    ])
+                    ->whereIn('status', SaScriptRequest::openCreateRequestStatuses())
                     ->first();
 
                 $userId = Auth::id();
