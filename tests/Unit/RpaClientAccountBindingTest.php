@@ -101,7 +101,22 @@ final class RpaClientAccountBindingTest extends TestCase
 
     public function test_wordpress_and_explicit_non_success_session_states_are_allowed(): void
     {
+        // Non-success statuses are accepted on sync and never become authenticated via SessionSignalState.
+        foreach (['absent', 'unsupported', 'error', 'unknown'] as $status) {
+            self::assertFalse(
+                \Omnichannel\Addons\SocialAutomation\Domain\SessionSignalState::isPresent(['status' => $status]),
+                $status.' must not be treated as authenticated'
+            );
+        }
+        self::assertTrue(
+            \Omnichannel\Addons\SocialAutomation\Domain\SessionSignalState::isPresent(['status' => 'present'])
+        );
+
         $source = (string) file_get_contents(dirname(__DIR__, 2).'/src/Registry/SessionSyncService.php');
-        self::assertStringContainsString("['present', 'absent', 'unsupported', 'error', 'unknown']", $source);
+        // First insert must not require present; account binding + installation + platform remain hard gates.
+        self::assertStringNotContainsString("! \$session->exists && \$incomingSignalStatus !== 'present'", $source);
+        self::assertStringContainsString('account_id_required', $source);
+        self::assertStringContainsString('account_installation_mismatch', $source);
+        self::assertStringContainsString('account_platform_mismatch', $source);
     }
 }

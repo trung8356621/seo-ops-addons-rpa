@@ -155,12 +155,10 @@ final class SessionSyncService
                         throw new \DomainException('account_id_required');
                     }
 
+                    // Browser identity/binding is independent of login success.
+                    // session_signal.present/absent is stored as login evidence only —
+                    // never a first-insert gate (Checkpoint remains authoritative for auth).
                     $rawSignal = is_array($item['session_signal'] ?? null) ? $item['session_signal'] : [];
-                    $incomingSignalStatus = strtolower((string) ($rawSignal['status'] ?? 'unknown'));
-                    // New browsers still require a present session signal before first upload.
-                    if (! $session->exists && $incomingSignalStatus !== 'present') {
-                        continue;
-                    }
 
                     $accountModel = SaAccount::query()
                         ->where('account_uuid', $targetAccountId)
@@ -379,6 +377,225 @@ final class SessionSyncService
                     'last_seen_at' => $capabilities['last_reported_at'] ?? $s->last_confirmed_at?->toIso8601String(),
                 ];
             })->all();
+    }
+
+    /**
+     * Staff Session Browser-first inventory (read-only).
+     * Reuses OnlineStateCalculator TTL for device presence; does not invent browser online from row presence.
+     *
+     * @return array{
+     *   ok: bool,
+     *   browsers: list<array<string, mixed>>,
+     *   summary: array{total_browsers: int, online_browsers: int, offline_browsers: int, total_clients: int},
+     *   status_policy: array{source: string, heartbeat_ttl_seconds: int, notes: string}
+     * }
+     */
+    public function staffBrowserInventory(?string $installationId = null): array
+    {
+        $policy = [
+            'source' => 'backend',
+            'heartbeat_ttl_seconds' => $this->online->ttlSeconds(),
+            'notes' => 'Device online = agent.last_heartbeat_at within heartbeat_ttl_seconds. '
+                .'Browser is_online=true only when device online AND runtime reported running. '
+                .'Device offline → runtime_status=unknown_stale and is_online=null (not fake offline).',
+        ];
+
+        if (! SocialAutomationSchema::agentsReady()) {
+            return $this->assembleStaffBrowserInventoryResponse([], $policy);
+        }
+
+        $query = SaBrowserSession::query()
+            ->with('agent')
+            ->orderByDesc('updated_at')
+            ->limit(200);
+
+        if (is_string($installationId) && $installationId !== '') {
+            $query->whereHas('agent', static function ($q) use ($installationId): void {
+                $q->where('installation_id', $installationId);
+            });
+        }
+
+        $sessions = $query->get();
+        $accountIds = $sessions
+            ->pluck('account_id')
+            ->filter(static fn ($id) => $id !== null && (int) $id > 0)
+            ->map(static fn ($id) => (int) $id)
+            ->unique()
+            ->values()
+            ->all();
+
+        /** @var array<int, SaAccount> $accountsById */
+        $accountsById = [];
+        if ($accountIds !== []) {
+            $accountsById = SaAccount::query()
+                ->whereIn('id', $accountIds)
+                ->get()
+                ->keyBy(static fn (SaAccount $a): int => (int) $a->getAttribute('id'))
+                ->all();
+        }
+
+        $now = new \DateTimeImmutable('now');
+        $browsers = [];
+        foreach ($sessions as $session) {
+            if (! $session instanceof SaBrowserSession) {
+                continue;
+            }
+            $agent = $session->agent instanceof SaAgent ? $session->agent : null;
+            $accountId = $session->account_id !== null ? (int) $session->account_id : null;
+            $account = ($accountId !== null && isset($accountsById[$accountId]))
+                ? $accountsById[$accountId]
+                : null;
+            $browsers[] = $this->mapStaffBrowserRow($session, $agent, $account, $now);
+        }
+
+        return $this->assembleStaffBrowserInventoryResponse($browsers, $policy);
+    }
+
+    /**
+     * Map one browser session to Staff Browser-first DTO.
+     * Never includes secrets, connection tokens, passwords, or filesystem paths.
+     *
+     * @return array<string, mixed>
+     */
+    public function mapStaffBrowserRow(
+        SaBrowserSession $session,
+        ?SaAgent $agent,
+        ?SaAccount $account,
+        ?\DateTimeInterface $now = null,
+    ): array {
+        $capabilities = is_array($session->capabilities) ? $session->capabilities : [];
+        $browserLabel = trim((string) ($capabilities['name'] ?? ''));
+        if ($browserLabel === '') {
+            $browserLabel = (string) $session->session_uuid;
+        }
+
+        $reportedStatus = (string) ($capabilities['status'] ?? ($session->ready_status === 'ready' ? 'running' : 'stopped'));
+        if (! in_array($reportedStatus, ['running', 'stopped', 'error', 'crashed'], true)) {
+            $reportedStatus = 'stopped';
+        }
+
+        $deviceOnline = $agent instanceof SaAgent
+            ? $this->online->isOnline($agent->last_heartbeat_at, $now)
+            : false;
+
+        // Existing SessionSync listForUi policy: device offline → unknown_stale (not invent running/stopped).
+        $runtimeStatus = ! $deviceOnline
+            ? 'unknown_stale'
+            : $reportedStatus;
+
+        $isOnline = null;
+        if ($deviceOnline) {
+            $isOnline = $reportedStatus === 'running';
+        }
+
+        $lastReported = $capabilities['last_reported_at'] ?? null;
+        $lastSeenAt = is_string($lastReported) && trim($lastReported) !== ''
+            ? trim($lastReported)
+            : $this->toIso8601OrNull($session->last_confirmed_at);
+
+        $clientApiKeyId = $agent?->client_api_key_id !== null
+            ? (int) $agent->client_api_key_id
+            : null;
+
+        $accountName = $account instanceof SaAccount ? $account->getAccountName() : null;
+        if ($accountName === '') {
+            $accountName = null;
+        }
+
+        $accountUuid = null;
+        if ($account instanceof SaAccount) {
+            $rawUuid = $account->getAttribute('account_uuid');
+            if (is_string($rawUuid) && $rawUuid !== '') {
+                $accountUuid = $rawUuid;
+            }
+        }
+
+        return [
+            'browser_id' => (string) $session->session_uuid,
+            'browser_name' => $browserLabel,
+            'browser_label' => $browserLabel,
+            'username' => $account instanceof SaAccount ? $account->getDisplayUsername() : null,
+            'account_name' => $accountName,
+            'account_id' => $session->account_id !== null ? (int) $session->account_id : null,
+            'account_uuid' => $accountUuid,
+            'platform' => (string) ($account?->platform ?? $session->platform ?? 'unknown'),
+            'site_url' => $account instanceof SaAccount ? $account->getSiteUrl() : null,
+            'client_id' => $clientApiKeyId,
+            'client_api_key_id' => $clientApiKeyId,
+            'machine_name' => $agent?->display_name !== null && trim((string) $agent->display_name) !== ''
+                ? trim((string) $agent->display_name)
+                : null,
+            'device_id' => $agent?->device_id !== null && trim((string) $agent->device_id) !== ''
+                ? (string) $agent->device_id
+                : null,
+            'runtime_status' => $runtimeStatus,
+            'reported_status' => $reportedStatus,
+            'is_online' => $isOnline,
+            'device_online' => $deviceOnline,
+            'last_seen_at' => $lastSeenAt,
+            'device_heartbeat_at' => $this->toIso8601OrNull($agent?->last_heartbeat_at),
+            'session_state' => (string) ($session->session_state ?? 'candidate'),
+            'signal_status' => SessionSignalState::normalize(
+                is_array($session->capabilities) ? ($session->capabilities['session_signal'] ?? null) : null
+            )['status'],
+            'last_task_at' => $this->toIso8601OrNull($session->last_task_at),
+        ];
+    }
+
+    private function toIso8601OrNull(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+        if ($value instanceof \DateTimeInterface) {
+            if (method_exists($value, 'toIso8601String')) {
+                return $value->toIso8601String();
+            }
+
+            return $value->format(\DateTimeInterface::ATOM);
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $browsers
+     * @param  array{source: string, heartbeat_ttl_seconds: int, notes: string}  $policy
+     * @return array{
+     *   ok: bool,
+     *   browsers: list<array<string, mixed>>,
+     *   summary: array{total_browsers: int, online_browsers: int, offline_browsers: int, total_clients: int},
+     *   status_policy: array{source: string, heartbeat_ttl_seconds: int, notes: string}
+     * }
+     */
+    public function assembleStaffBrowserInventoryResponse(array $browsers, array $policy): array
+    {
+        $online = 0;
+        $offline = 0;
+        $clientIds = [];
+        foreach ($browsers as $row) {
+            if (($row['is_online'] ?? null) === true) {
+                $online++;
+            } elseif (($row['is_online'] ?? null) === false) {
+                $offline++;
+            }
+            $cid = $row['client_api_key_id'] ?? null;
+            if (is_int($cid) && $cid > 0) {
+                $clientIds[$cid] = true;
+            }
+        }
+
+        return [
+            'ok' => true,
+            'browsers' => array_values($browsers),
+            'summary' => [
+                'total_browsers' => count($browsers),
+                'online_browsers' => $online,
+                'offline_browsers' => $offline,
+                'total_clients' => count($clientIds),
+            ],
+            'status_policy' => $policy,
+        ];
     }
 
     /** @return array{metrics: array<string,int>, devices:list<array<string,mixed>>} */

@@ -15,6 +15,11 @@ final class OnlineStateCalculator
         private readonly int $onlineTtlSeconds = self::DEFAULT_ONLINE_TTL_SECONDS,
     ) {}
 
+    public function ttlSeconds(): int
+    {
+        return $this->onlineTtlSeconds;
+    }
+
     public function isOnline(?\DateTimeInterface $lastHeartbeatAt, ?\DateTimeInterface $now = null): bool
     {
         if ($lastHeartbeatAt === null) {

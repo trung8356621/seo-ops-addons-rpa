@@ -48,7 +48,7 @@ components:
       name: laravel_session
       description: |
         Browser session after Filament login on SEO-OPS. CSRF may apply on mutating staff routes.
-        Used for docs, bootstrap/health, action-registry, client-keys, accounts, client notifications.
+        Used for docs, bootstrap/health, action-registry, client-keys, accounts, browsers inventory, client notifications.
     RpaAdminBearer:
       type: http
       scheme: bearer
@@ -144,6 +144,129 @@ components:
         ok:
           type: boolean
           enum: [true]
+
+    StaffScriptRegistryListItem:
+      type: object
+      required:
+        - package_key
+        - script_id
+        - name
+        - version
+        - status
+        - is_authentication
+        - assets_complete
+        - video_demo_status
+      properties:
+        package_key:
+          type: string
+        script_id:
+          type: string
+          description: Manifest script_id; may differ from package_key
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        version:
+          type: string
+        release_id:
+          type: integer
+        status:
+          type: string
+        is_authentication:
+          type: boolean
+        action_tag_key:
+          type: string
+          nullable: true
+        assets_complete:
+          type: boolean
+        video_demo_status:
+          type: string
+        has_playable_video:
+          type: boolean
+        has_thumbnail:
+          type: boolean
+        video_media_id:
+          type: integer
+          nullable: true
+        thumbnail_media_id:
+          type: integer
+          nullable: true
+        video_media_url:
+          type: string
+          nullable: true
+          description: Staff Session URL (/social-automation/script-media/{id})
+        thumbnail_media_url:
+          type: string
+          nullable: true
+        published_at:
+          type: string
+          nullable: true
+        updated_by_label:
+          type: string
+        widget_dependency_count:
+          type: integer
+
+    StaffScriptRegistryListResponse:
+      allOf:
+        - $ref: '#/components/schemas/OkTrue'
+        - type: object
+          required: [scripts, count]
+          properties:
+            scripts:
+              type: array
+              items:
+                $ref: '#/components/schemas/StaffScriptRegistryListItem'
+            count:
+              type: integer
+
+    StaffScriptRegistryDetailResponse:
+      allOf:
+        - $ref: '#/components/schemas/OkTrue'
+        - type: object
+          required: [script]
+          properties:
+            script:
+              type: object
+              additionalProperties: true
+              properties:
+                package_key:
+                  type: string
+                script_id:
+                  type: string
+                name:
+                  type: string
+                description:
+                  type: string
+                  nullable: true
+                is_authentication:
+                  type: boolean
+                version:
+                  type: string
+                status:
+                  type: string
+                assets_complete:
+                  type: boolean
+                video_demo_status:
+                  type: string
+                video_media_id:
+                  type: integer
+                  nullable: true
+                thumbnail_media_id:
+                  type: integer
+                  nullable: true
+                video_media_url:
+                  type: string
+                  nullable: true
+                thumbnail_media_url:
+                  type: string
+                  nullable: true
+                releases:
+                  type: array
+                  maxItems: 25
+                  items:
+                    type: object
+                    additionalProperties: true
 
     ErrorEnvelope:
       type: object
@@ -1617,6 +1740,11 @@ paths:
     post:
       tags: [RPA Client]
       summary: Sync browser profile metadata (no secrets)
+      description: >
+        Persists browsers with valid identity and Account binding.
+        session_signal (present/absent) records login evidence only and is not
+        a first-insert gate. Cookies, passwords, and secrets are rejected.
+        Checkpoint remains authoritative for authentication success.
       operationId: clientBrowserSync
       security:
         - RpaClientApiKey: []
@@ -2987,6 +3115,62 @@ paths:
                 type: object
                 additionalProperties: true
 
+  /social-automation/api/script-registry:
+    get:
+      tags: [Staff Session]
+      summary: List published scripts for React Script Registry
+      description: |
+        Staff Session GET only. Reuses ScriptRegistryUiService::listScriptsForUi.
+        Identity fields: package_key (stable package identity) and script_id (manifest script_id, may differ).
+        Media fields are IDs + Staff session URLs under /social-automation/script-media/{id}; no filesystem paths.
+      operationId: staffScriptRegistryIndex
+      security:
+        - SeoOpsSessionCookie: []
+      responses:
+        '200':
+          description: Script list (may be empty)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StaffScriptRegistryListResponse'
+        '401':
+          description: Unauthenticated (Staff Session required)
+        '403':
+          description: Authenticated but not allowed for Social Automation
+
+  /social-automation/api/script-registry/{id}:
+    get:
+      tags: [Staff Session]
+      summary: Script detail by package_key
+      description: |
+        Path `{id}` is the package_key (not numeric DB id, not necessarily equal to script_id).
+        Releases are capped and sanitized (media IDs/URLs only; no asset storage paths).
+      operationId: staffScriptRegistryShow
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: package_key
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 191
+      responses:
+        '200':
+          description: Script detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StaffScriptRegistryDetailResponse'
+        '401':
+          description: Unauthenticated
+        '403':
+          description: Forbidden
+        '404':
+          description: Script package not found
+
   /social-automation/api/client-keys:
     get:
       tags: [Staff Session]
@@ -3104,6 +3288,129 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+
+  /social-automation/api/browsers:
+    get:
+      tags: [Staff Session]
+      summary: Browser-first inventory for staff Clients UI (read-only)
+      description: |
+        Flattened Browser rows (primary identity = browser_id / session_uuid).
+        Client/PC fields are metadata only (client_api_key_id, machine_name).
+        Online policy reuses OnlineStateCalculator agent heartbeat TTL.
+        Device offline → runtime_status=unknown_stale and is_online=null (not invented offline).
+        Never returns raw Client API keys, passwords, cookies, connection tokens, or filesystem paths.
+      operationId: staffBrowsersIndex
+      security:
+        - SeoOpsSessionCookie: []
+      responses:
+        '200':
+          description: Browser inventory snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, browsers, summary, status_policy]
+                properties:
+                  ok:
+                    type: boolean
+                  browsers:
+                    type: array
+                    items:
+                      type: object
+                      required: [browser_id, runtime_status, is_online]
+                      properties:
+                        browser_id:
+                          type: string
+                        browser_name:
+                          type: string
+                        browser_label:
+                          type: string
+                        username:
+                          type: string
+                          nullable: true
+                        account_name:
+                          type: string
+                          nullable: true
+                        account_id:
+                          type: integer
+                          nullable: true
+                        account_uuid:
+                          type: string
+                          nullable: true
+                        platform:
+                          type: string
+                        site_url:
+                          type: string
+                          nullable: true
+                        client_id:
+                          type: integer
+                          nullable: true
+                          description: Logical Client = client_api_key_id
+                        client_api_key_id:
+                          type: integer
+                          nullable: true
+                        machine_name:
+                          type: string
+                          nullable: true
+                        device_id:
+                          type: string
+                          nullable: true
+                        runtime_status:
+                          type: string
+                          enum: [running, stopped, error, crashed, unknown_stale]
+                        reported_status:
+                          type: string
+                        is_online:
+                          type: boolean
+                          nullable: true
+                        device_online:
+                          type: boolean
+                        last_seen_at:
+                          type: string
+                          nullable: true
+                          format: date-time
+                        device_heartbeat_at:
+                          type: string
+                          nullable: true
+                          format: date-time
+                        session_state:
+                          type: string
+                        signal_status:
+                          type: string
+                        last_task_at:
+                          type: string
+                          nullable: true
+                          format: date-time
+                  summary:
+                    type: object
+                    required: [total_browsers, online_browsers, offline_browsers, total_clients]
+                    properties:
+                      total_browsers:
+                        type: integer
+                      online_browsers:
+                        type: integer
+                        description: Count of browsers with is_online=true
+                      offline_browsers:
+                        type: integer
+                        description: Count of browsers with is_online=false (excludes unknown/null)
+                      total_clients:
+                        type: integer
+                        description: Distinct non-null client_api_key_id in the same browser list
+                  status_policy:
+                    type: object
+                    required: [source, heartbeat_ttl_seconds]
+                    properties:
+                      source:
+                        type: string
+                        enum: [backend]
+                      heartbeat_ttl_seconds:
+                        type: integer
+                      notes:
+                        type: string
+        '401':
+          description: Unauthenticated staff session
+        '403':
+          description: Authenticated but not allowed to access Social Automation
 
   /social-automation/api/accounts:
     get:

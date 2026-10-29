@@ -4,12 +4,15 @@ namespace Omnichannel\Addons\SocialAutomation\Tests\Unit;
 use PHPUnit\Framework\TestCase;
 final class ClientSessionLifecycleContractTest extends TestCase
 {
-    public function test_empty_profiles_are_not_uploaded_and_binding_is_immutable(): void
+    public function test_browser_first_insert_is_not_gated_on_present_and_binding_is_immutable(): void
     {
         $sync = file_get_contents(dirname(__DIR__,2).'/src/Registry/SessionSyncService.php');
-        self::assertStringContainsString("!== 'present'", $sync);
+        // CP16B: Browser existence != authentication success — no first-insert present gate.
+        self::assertStringNotContainsString('New browsers still require a present session signal', $sync);
+        self::assertStringNotContainsString("! \$session->exists && \$incomingSignalStatus !== 'present'", $sync);
         self::assertStringContainsString('browser_account_binding_immutable', $sync);
         self::assertStringContainsString('account_browser_duplicate_on_device', $sync);
+        self::assertStringContainsString('account_id_required', $sync);
     }
     public function test_task_failure_does_not_mark_needs_login_and_success_verifies_exact_session(): void
     {

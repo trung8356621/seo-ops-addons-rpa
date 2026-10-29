@@ -63,6 +63,8 @@ final class ScriptRegistryUiService
                 'package_key' => (string) $package->package_key,
                 'script_id' => $scriptId,
                 'name' => (string) $package->name,
+                'description' => $package->description !== null ? (string) $package->description : null,
+                'is_authentication' => (bool) ($package->is_authentication ?? false),
                 'action_tag_key' => $actionTagKey,
                 'version' => (string) $latest->version,
                 'release_id' => (int) $latest->id,
@@ -152,9 +154,13 @@ final class ScriptRegistryUiService
             })
             ->all();
 
+        $scriptId = (string) ($latestManifest['script_id'] ?? $package->package_key);
+
         return [
             'package_key' => (string) $package->package_key,
+            'script_id' => $scriptId,
             'name' => (string) $package->name,
+            'is_authentication' => (bool) ($package->is_authentication ?? false),
             'action_tag_key' => $actionTagKey,
             'description' => $package->description,
             'sync_source' => $package->sync_source,

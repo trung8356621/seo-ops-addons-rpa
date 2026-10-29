@@ -31,8 +31,10 @@ use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaAdmin\RpaAdminScript
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaAdmin\RpaAdminSpaController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaClientApiController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaClientApiKeyManagementController;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\ScriptRegistry\StaffScriptRegistryController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ScriptReleaseMediaController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\SocialAutomationBootstrapController;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\SocialAutomationBrowserInventoryController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\SocialAutomationHealthController;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureRpaAdminUserApi;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureClientConnectionLease;
@@ -286,6 +288,15 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                         ->name('social-automation.action-registry.tags.destroy');
                 });
 
+                // CP12A: Staff Script Registry REST (GET only) for React Scripts UI.
+                Route::prefix('api/script-registry')->group(function (): void {
+                    Route::get('/', [StaffScriptRegistryController::class, 'index'])
+                        ->name('social-automation.script-registry.index');
+                    Route::get('/{id}', [StaffScriptRegistryController::class, 'show'])
+                        ->where('id', '^(?!.*\\.\\.)[^/]{1,191}$')
+                        ->name('social-automation.script-registry.show');
+                });
+
                 // Client API Key Management for SEO-OPS UI / Staff session
                 Route::prefix('api/client-keys')->group(function (): void {
                     Route::get('/', [RpaClientApiKeyManagementController::class, 'index'])
@@ -314,6 +325,11 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                         ->whereNumber('id')
                         ->name('social-automation.accounts.destroy');
                 });
+
+                // CP15A: Staff Browser-first inventory (read-only)
+                Route::get('/api/browsers', [SocialAutomationBrowserInventoryController::class, 'index'])
+                    ->name('social-automation.browsers.index');
+
                 Route::post('/api/clients/sessions/{sessionId}/notifications', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ClientManagementController::class, 'notify'])
                     ->whereNumber('sessionId')->name('social-automation.clients.notifications.store');
             });
