@@ -28,6 +28,7 @@ use Omnichannel\Addons\SocialAutomation\Auth\RpaAdminSessionService;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\OpenApi\OpenApiController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaAdmin\RpaAdminAuthController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaAdmin\RpaAdminScriptSyncController;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaAdmin\RpaAdminSpaController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaClientApiController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaClientApiKeyManagementController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ScriptReleaseMediaController;
@@ -231,6 +232,18 @@ final class SocialAutomationServiceProvider extends ServiceProvider
         Route::middleware($middleware)
             ->prefix('social-automation')
             ->group(function (): void {
+                // CP9B: exact React SPA shells (Staff Session). No catch-all.
+                Route::get('/action-tags', RpaAdminSpaController::class)
+                    ->name('social-automation.spa.action-tags');
+                Route::get('/scripts', RpaAdminSpaController::class)
+                    ->name('social-automation.spa.scripts');
+                Route::get('/accounts', RpaAdminSpaController::class)
+                    ->name('social-automation.spa.accounts');
+                Route::get('/clients', RpaAdminSpaController::class)
+                    ->name('social-automation.spa.clients');
+                Route::get('/client-api-keys', RpaAdminSpaController::class)
+                    ->name('social-automation.spa.client-api-keys');
+
                 Route::get('/script-media/{mediaId}', [ScriptReleaseMediaController::class, 'show'])
                     ->whereNumber('mediaId')
                     ->name('social-automation.script-media.show');
