@@ -104,13 +104,15 @@ final class PathPatternResolver
     }
 
     /**
-     * Resolve full URL for a site taking into account Fixed vs Dynamic Base URL mode.
+     * Resolve full URL for a site using the unified Base URL contract.
+     *
+     * - `base_url` is canonical for Fixed and Dynamic Sites (preview + production).
+     * - Dynamic mode may still accept an explicit one-shot `$runtimeBaseUrl` override.
+     * - `test_base_url` is never used as a permanent runtime/preview fallback.
+     * - `$isTestExecution` retained for call-site compatibility; it no longer changes URL source.
      *
      * @param SaSite|array<string, mixed> $site
-     * @param string $urlPattern
      * @param array<string, mixed> $inputValues
-     * @param string|null $runtimeBaseUrl Base URL provided at runtime for dynamic sites
-     * @param bool $isTestExecution When true, allows using test_base_url for preview/test
      * @return array{url: string, missing: list<string>, valid: bool, error: ?string}
      */
     public static function resolveSiteUrl(
@@ -120,55 +122,40 @@ final class PathPatternResolver
         ?string $runtimeBaseUrl = null,
         bool $isTestExecution = false
     ): array {
+        unset($isTestExecution); // signature retained; no longer selects test_base_url
+
         $mode = $site instanceof SaSite
             ? ($site->base_url_mode ?? SaSite::MODE_FIXED)
             : ($site['base_url_mode'] ?? SaSite::MODE_FIXED);
 
         $siteName = $site instanceof SaSite
-            ? $site->name
-            : ($site['name'] ?? 'Site');
+            ? (string) $site->name
+            : (string) ($site['name'] ?? 'Site');
 
-        $testBaseUrl = $site instanceof SaSite
-            ? $site->test_base_url
-            : ($site['test_base_url'] ?? null);
+        $canonicalBaseUrl = $site instanceof SaSite
+            ? (string) ($site->base_url ?? '')
+            : (string) ($site['base_url'] ?? '');
+        $canonicalBaseUrl = trim($canonicalBaseUrl);
 
-        $fixedBaseUrl = $site instanceof SaSite
-            ? $site->base_url
-            : ($site['base_url'] ?? null);
+        $runtime = trim((string) ($runtimeBaseUrl ?? ''));
 
         if ($mode === SaSite::MODE_DYNAMIC) {
-            $effectiveBaseUrl = trim((string) ($runtimeBaseUrl ?? ''));
-
-            // If this is an explicit test execution and runtime base URL is empty, fallback to test_base_url
-            if ($isTestExecution && $effectiveBaseUrl === '') {
-                $effectiveBaseUrl = trim((string) ($testBaseUrl ?? ''));
-            }
-
-            // At runtime / production, Test Base URL MUST NEVER be used as fallback!
+            // Explicit runtime override wins; otherwise use configured base_url.
+            $effectiveBaseUrl = $runtime !== '' ? $runtime : $canonicalBaseUrl;
             if ($effectiveBaseUrl === '') {
-                $errorMsg = $isTestExecution
-                    ? "Dynamic Base URL hoặc Test Base URL chưa được cung cấp cho Site [{$siteName}]."
-                    : "Dynamic Base URL bắt buộc phải được cung cấp khi chạy Site [{$siteName}]. Không được dùng Test Base URL trong production.";
-
                 return [
                     'url' => '',
-                    'missing' => ['dynamic_base_url'],
+                    'missing' => ['base_url'],
                     'valid' => false,
-                    'error' => $errorMsg,
+                    'error' => "Site [{$siteName}] chưa được cấu hình Base URL.",
                 ];
             }
 
-            $resolved = self::resolveUrl($effectiveBaseUrl, $urlPattern, $inputValues);
-            if (! $resolved['valid'] && ! empty($resolved['missing']) && $resolved['error'] === null) {
-                $resolved['error'] = 'Chưa điền đủ tham số: '.implode(', ', $resolved['missing']);
-            }
-
-            return $resolved;
+            return self::finalizeResolved(self::resolveUrl($effectiveBaseUrl, $urlPattern, $inputValues));
         }
 
-        // Fixed mode
-        $fixed = trim((string) ($fixedBaseUrl ?? ''));
-        if ($fixed === '') {
+        // Fixed mode: always use configured base_url (runtime override ignored).
+        if ($canonicalBaseUrl === '') {
             return [
                 'url' => '',
                 'missing' => ['base_url'],
@@ -177,7 +164,15 @@ final class PathPatternResolver
             ];
         }
 
-        $resolved = self::resolveUrl($fixed, $urlPattern, $inputValues);
+        return self::finalizeResolved(self::resolveUrl($canonicalBaseUrl, $urlPattern, $inputValues));
+    }
+
+    /**
+     * @param  array{url: string, missing: list<string>, valid: bool, error: ?string}  $resolved
+     * @return array{url: string, missing: list<string>, valid: bool, error: ?string}
+     */
+    private static function finalizeResolved(array $resolved): array
+    {
         if (! $resolved['valid'] && ! empty($resolved['missing']) && $resolved['error'] === null) {
             $resolved['error'] = 'Chưa điền đủ tham số: '.implode(', ', $resolved['missing']);
         }

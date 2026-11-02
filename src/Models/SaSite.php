@@ -10,6 +10,13 @@ use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
 
 /**
  * Site registry entity representing a destination platform (e.g. Facebook, X, Reddit).
+ *
+ * Unified Base URL contract (CP18D.3A):
+ * - `base_url` is the single canonical Site URL for preview, path resolution,
+ *   Social Account site_url, and Electron Browser navigation.
+ * - `test_base_url` is a legacy column retained for compatibility/backfill only;
+ *   it is not used at runtime as a permanent fallback.
+ * - `base_url_mode` (fixed|dynamic) is preserved; both modes may configure base_url.
  */
 class SaSite extends Model
 {
@@ -34,6 +41,16 @@ class SaSite extends Model
     public function isFixed(): bool
     {
         return ! $this->isDynamic();
+    }
+
+    /**
+     * Canonical Site Base URL (never invents; never reads test_base_url).
+     */
+    public function canonicalBaseUrl(): ?string
+    {
+        $normalized = self::normalizeBaseUrl((string) ($this->base_url ?? ''));
+
+        return $normalized !== '' ? $normalized : null;
     }
 
     /**

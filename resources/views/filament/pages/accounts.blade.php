@@ -61,7 +61,7 @@
                         <tr>
                             <th class="px-4 py-3 text-left font-semibold text-gray-700 dark:text-gray-200">{{ __('social-automation::filament.accounts.col_platform') }}</th>
                             <th class="px-4 py-3 text-left font-semibold text-gray-700 dark:text-gray-200">{{ __('social-automation::filament.accounts.col_name') }}</th>
-                            <th class="px-4 py-3 text-left font-semibold text-gray-700 dark:text-gray-200">{{ __('social-automation::filament.accounts.col_email') }}</th>
+                            <th class="px-4 py-3 text-left font-semibold text-gray-700 dark:text-gray-200">{{ __('social-automation::filament.accounts.col_username') }}</th>
                             <th class="px-4 py-3 text-left font-semibold text-gray-700 dark:text-gray-200">{{ __('social-automation::filament.accounts.col_password') }}</th>
                             <th class="px-4 py-3 text-left font-semibold text-gray-700 dark:text-gray-200">{{ __('social-automation::filament.accounts.col_note') }}</th>
                             <th class="px-4 py-3 text-left font-semibold text-gray-700 dark:text-gray-200">{{ __('social-automation::filament.accounts.col_last_interaction') }}</th>
@@ -84,16 +84,17 @@
                                     {{ $row->getAccountName() }}
                                 </td>
                                 <td class="px-4 py-3 text-xs text-gray-600 dark:text-gray-300">
-                                    @if ($row->getDisplayEmail())
+                                    @php($loginId = $row->getDisplayUsername() ?: $row->getDisplayEmail())
+                                    @if ($loginId)
                                         <div
-                                            x-data="{ copied: false, text: @js($row->getDisplayEmail()) }"
+                                            x-data="{ copied: false, text: @js($loginId) }"
                                             class="inline-flex items-center gap-1.5"
                                         >
-                                            <span class="font-mono">{{ $row->getDisplayEmail() }}</span>
+                                            <span class="font-mono">{{ $loginId }}</span>
                                             <button
                                                 type="button"
                                                 @click="navigator.clipboard.writeText(text); copied = true; setTimeout(() => copied = false, 2000)"
-                                                title="{{ __('social-automation::filament.accounts.copy_email') }}"
+                                                title="{{ __('social-automation::filament.accounts.copy_username') }}"
                                                 class="px-1.5 py-0.5 text-[10px] font-semibold rounded border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition"
                                             >
                                                 <span x-show="!copied">{{ __('social-automation::filament.accounts.copy_btn') }}</span>
@@ -216,13 +217,13 @@
 
                     <div>
                         <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                            {{ __('social-automation::filament.accounts.field_email') }} <span class="text-danger-600 dark:text-danger-400">*</span>
+                            {{ __('social-automation::filament.accounts.field_username') }} <span class="text-danger-600 dark:text-danger-400">*</span>
                         </label>
                         <input
-                            wire:model="email"
-                            type="email"
+                            wire:model="username"
+                            type="text"
                             required
-                            placeholder="Email tài khoản (bắt buộc)"
+                            placeholder="VD: mayhopphat, @username, SĐT, hoặc email"
                             class="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:border-teal-500 focus:ring-teal-500"
                         />
                     </div>
@@ -326,13 +327,13 @@
 
                     <div>
                         <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                            {{ __('social-automation::filament.accounts.field_email') }} <span class="text-danger-600 dark:text-danger-400">*</span>
+                            {{ __('social-automation::filament.accounts.field_username') }} <span class="text-danger-600 dark:text-danger-400">*</span>
                         </label>
                         <input
-                            wire:model="email"
-                            type="email"
+                            wire:model="username"
+                            type="text"
                             required
-                            placeholder="Email tài khoản (bắt buộc)"
+                            placeholder="VD: mayhopphat, @username, SĐT, hoặc email"
                             class="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:border-teal-500 focus:ring-teal-500"
                         />
                     </div>

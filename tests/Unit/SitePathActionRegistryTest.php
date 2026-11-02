@@ -156,29 +156,29 @@ final class SitePathActionRegistryTest extends TestCase
         self::assertNotContains('images', $inputKeys);
     }
 
-    public function test_dynamic_site_url_resolution_with_subdirectory(): void
+    public function test_dynamic_site_url_resolution_uses_unified_base_url(): void
     {
         $site = [
             'name' => 'WordPress',
             'base_url_mode' => SaSite::MODE_DYNAMIC,
-            'base_url' => null,
-            'test_base_url' => 'https://example.test/blog/',
+            'base_url' => 'https://example.test/blog/',
+            'test_base_url' => 'https://should-not-be-used.test/',
         ];
 
-        // 1. Preview / Test mode resolves using test_base_url
+        // Preview / resolution uses canonical base_url (not test_base_url).
         $previewRes = PathPatternResolver::resolveSiteUrl(
             $site,
             '/wp-admin/post-new.php',
             [],
             null,
-            true // isTestExecution
+            true
         );
 
         self::assertTrue($previewRes['valid']);
         self::assertSame('https://example.test/blog/wp-admin/post-new.php', $previewRes['url']);
         self::assertSame([], $previewRes['missing']);
 
-        // 2. Deep subdirectory test
+        // Explicit runtime override still allowed for dynamic mode.
         $deepRes = PathPatternResolver::resolveSiteUrl(
             $site,
             '/wp-admin/edit.php',
@@ -189,19 +189,18 @@ final class SitePathActionRegistryTest extends TestCase
         self::assertTrue($deepRes['valid']);
         self::assertSame('https://my-cms.local:8080/sites/demo-client/wp-admin/edit.php', $deepRes['url']);
 
-        // 3. Root domain dynamic site
         $rootRes = PathPatternResolver::resolveSiteUrl(
             $site,
             '/wp-admin/post-new.php',
             [],
             'https://standalone.org',
-            false // runtime
+            false
         );
         self::assertTrue($rootRes['valid']);
         self::assertSame('https://standalone.org/wp-admin/post-new.php', $rootRes['url']);
     }
 
-    public function test_dynamic_site_runtime_fails_when_base_url_missing_without_fallback(): void
+    public function test_dynamic_site_does_not_fallback_to_test_base_url(): void
     {
         $site = [
             'name' => 'WordPress',
@@ -210,19 +209,28 @@ final class SitePathActionRegistryTest extends TestCase
             'test_base_url' => 'https://example.test/blog/',
         ];
 
-        // In production runtime (isTestExecution = false), missing runtime base URL must NOT fallback to test_base_url!
+        // Unified contract: missing base_url fails; test_base_url is never a permanent fallback.
         $runtimeRes = PathPatternResolver::resolveSiteUrl(
             $site,
             '/wp-admin/post-new.php',
             [],
-            null, // runtime base URL missing
-            false // runtime mode
+            null,
+            false
         );
 
         self::assertFalse($runtimeRes['valid']);
-        self::assertContains('dynamic_base_url', $runtimeRes['missing']);
-        self::assertStringContainsString('Không được dùng Test Base URL trong production', $runtimeRes['error'] ?? '');
+        self::assertContains('base_url', $runtimeRes['missing']);
         self::assertSame('', $runtimeRes['url']);
+
+        $previewRes = PathPatternResolver::resolveSiteUrl(
+            $site,
+            '/wp-admin/post-new.php',
+            [],
+            null,
+            true
+        );
+        self::assertFalse($previewRes['valid']);
+        self::assertContains('base_url', $previewRes['missing']);
     }
 
     public function test_fixed_site_url_resolution(): void
@@ -258,11 +266,24 @@ final class SitePathActionRegistryTest extends TestCase
         $dynamicSite = new SaSite([
             'key' => 'wordpress',
             'name' => 'WordPress',
-            'base_url' => null,
+            'base_url' => 'https://example.test/blog/',
             'base_url_mode' => SaSite::MODE_DYNAMIC,
-            'test_base_url' => 'https://example.test/blog/',
+            'test_base_url' => 'https://legacy-should-not-be-used.test/',
         ]);
         self::assertTrue($dynamicSite->isDynamic());
         self::assertFalse($dynamicSite->isFixed());
+        self::assertSame('https://example.test/blog', $dynamicSite->canonicalBaseUrl());
+    }
+
+    public function test_canonical_base_url_ignores_legacy_test_base_url(): void
+    {
+        $site = new SaSite([
+            'key' => 'mayhopphat',
+            'name' => 'mayhopphat',
+            'base_url' => null,
+            'base_url_mode' => SaSite::MODE_DYNAMIC,
+            'test_base_url' => 'https://mayhopphat.com',
+        ]);
+        self::assertNull($site->canonicalBaseUrl());
     }
 }

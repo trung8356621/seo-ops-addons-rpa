@@ -661,12 +661,60 @@ components:
 
     BindableAccount:
       type: object
+      description: |
+        Client bindable Account metadata. Never includes password or encrypted_password.
+        `site_url` is resolved from Action Tags Site Registry (`sa_sites.base_url`)
+        using Account.platform as site_key. May be null when the Site has no usable
+        production base_url (e.g. dynamic Sites). Electron uses site_url for Browser
+        URL resolution on dynamic platform keys. Persisted Account.site_url is not
+        mutated; it is only a legacy fallback when Registry base_url is missing.
       properties:
         account_id:
           type: string
         platform:
           type: string
+          description: Canonical platform / Site Registry site_key
         display_name:
+          type: string
+        username:
+          type: string
+          nullable: true
+        email:
+          type: string
+          nullable: true
+        site_url:
+          type: string
+          nullable: true
+          description: |
+            Resolved from Site Registry base_url for Account.platform (site_key).
+            Null/empty when Site URL is not configured. Used by Electron Browser URL resolver.
+            Never invented from site_key. Legacy test_base_url is never returned.
+        has_password:
+          type: boolean
+        identity_label:
+          type: string
+          nullable: true
+        verified:
+          type: boolean
+
+    StaffAccountPublic:
+      type: object
+      description: |
+        Staff/Owner inventory metadata. Secrets (password, encrypted_password) are never included.
+      required: [id, platform, account_name, has_password]
+      properties:
+        id:
+          type: integer
+        account_uuid:
+          type: string
+        installation_id:
+          type: string
+        platform:
+          type: string
+          description: Align with Site Registry site_key when possible
+        name:
+          type: string
+        account_name:
           type: string
         username:
           type: string
@@ -679,11 +727,27 @@ components:
           nullable: true
         has_password:
           type: boolean
-        identity_label:
+        note:
           type: string
           nullable: true
-        verified:
-          type: boolean
+        last_interaction_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_by:
+          type: integer
+          nullable: true
+        created_by_name:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
 
     AccountDetailSuccess:
       allOf:
@@ -697,6 +761,7 @@ components:
                   type: string
                 platform:
                   type: string
+                  description: Canonical platform / Site Registry site_key
                 display_name:
                   type: string
                 email:
@@ -705,6 +770,10 @@ components:
                 site_url:
                   type: string
                   nullable: true
+                  description: |
+                    Resolved from Site Registry base_url for Account.platform (site_key).
+                    Null when Site URL is not configured. Used by Electron Browser URL resolver.
+                    Same resolution policy as bindable Account inventory.
                 password_status:
                   type: string
                   enum: [available, not_set]
@@ -713,7 +782,24 @@ components:
       allOf:
         - $ref: '#/components/schemas/OkTrue'
         - type: object
+          required: [account_id, password]
+          description: |
+            Secret credential payload for on-demand login only.
+            Distinct from inventory metadata (which exposes has_password, never password).
           properties:
+            account_id:
+              type: string
+              description: Canonical account UUID
+            username:
+              type: string
+              nullable: true
+            email:
+              type: string
+              nullable: true
+            login:
+              type: string
+              nullable: true
+              description: Preferred login identity (username if set, else email)
             password:
               type: string
               format: password
@@ -1843,6 +1929,11 @@ paths:
     get:
       tags: [RPA Client]
       summary: List bindable accounts (no secrets)
+      description: |
+        Installation-scoped Account inventory for the Client API Key.
+        `site_url` is resolved from Action Tags Site Registry (sa_sites.base_url)
+        via Account.platform = site_key. Registry is warmed once per request (no N+1).
+        Passwords are never included.
       operationId: clientAccounts
       security:
         - RpaClientApiKey: []
@@ -1869,6 +1960,9 @@ paths:
     get:
       tags: [RPA Client]
       summary: Account detail for client installation
+      description: |
+        Single Account detail for the Client installation. `site_url` uses the same
+        Site Registry resolution as the inventory list.
       operationId: clientAccountShow
       security:
         - RpaClientApiKey: []
@@ -1888,14 +1982,34 @@ paths:
   /api/v1/social-automation/client/accounts/{accountId}/password:
     get:
       tags: [RPA Client]
-      summary: Decrypted account password (HTTPS required except local dev)
+      summary: On-demand Account credential for Auth Script login
+      description: |
+        Decrypts one Account password for an authorized Client login operation.
+        Requires Client API Key + `browser_id` (query or body).
+        Laravel verifies: installation match, Browser owned by this Client agent,
+        and Browser bound to the requested Account. Staff session alone cannot call this.
+        Response includes `Cache-Control: no-store`. Never bulk-retrieves credentials.
+        Electron: request immediately before Auth Script login; clear credential after login finishes.
       operationId: clientAccountPassword
       security:
         - RpaClientApiKey: []
       parameters:
         - $ref: '#/components/parameters/AccountId'
+        - name: browser_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Browser session UUID bound to this Account on this Client
       responses:
         '200':
+          description: Minimal login credential (do not cache)
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store, private
           content:
             application/json:
               schema:
@@ -1906,8 +2020,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ClientErrorEnvelope'
+        '403':
+          description: installation_forbidden | browser_forbidden | account_not_bound_to_browser
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientErrorEnvelope'
         '404':
-          $ref: '#/components/responses/NotFound'
+          description: account_not_found | password_not_set | client_not_registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientErrorEnvelope'
+        '422':
+          description: browser_id_required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientErrorEnvelope'
 
   /api/v1/social-automation/client/notifications:
     get:
@@ -2752,6 +2882,10 @@ paths:
     get:
       tags: [Staff Session]
       summary: Staff UI bootstrap payload
+      description: |
+        Authenticated Social Automation bootstrap. `bootstrap.user.role` is server-derived
+        from the authenticated `App\Models\User` role (`owner` | `admin` | `staff`).
+        Role is never accepted from request parameters.
       operationId: staffBootstrap
       security:
         - SeoOpsSessionCookie: []
@@ -2761,11 +2895,33 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [ok, bootstrap]
                 properties:
                   ok:
                     type: boolean
                   bootstrap:
                     type: object
+                    required: [service, user, config]
+                    properties:
+                      service:
+                        type: object
+                        additionalProperties: true
+                      user:
+                        type: object
+                        nullable: true
+                        required: [id, name, role]
+                        properties:
+                          id:
+                            type: integer
+                          name:
+                            type: string
+                          role:
+                            type: string
+                            enum: [owner, admin, staff]
+                            description: Authenticated User.role from the server session
+                      config:
+                        type: object
+                        additionalProperties: true
                     additionalProperties: true
         '403':
           description: Service inactive or access denied
@@ -2815,6 +2971,10 @@ paths:
     post:
       tags: [Staff Session]
       summary: Create action registry site
+      description: |
+        Unified Base URL contract: `base_url` is required for both fixed and dynamic modes.
+        Used by Action Tags preview, path resolution, Client Account site_url, and Electron Browser.
+        `test_base_url` is legacy/optional and is not required for dual entry of the same URL.
       operationId: actionRegistrySitesStore
       security:
         - SeoOpsSessionCookie: []
@@ -2823,6 +2983,26 @@ paths:
           application/json:
             schema:
               type: object
+              required: [name, base_url]
+              properties:
+                name:
+                  type: string
+                key:
+                  type: string
+                  description: Site key (site_key); optional — derived from name when omitted
+                base_url_mode:
+                  type: string
+                  enum: [fixed, dynamic]
+                  description: Mode preserved; both modes use the same base_url field
+                base_url:
+                  type: string
+                  description: Canonical Site Base URL (http/https)
+                test_base_url:
+                  type: string
+                  nullable: true
+                  description: Legacy optional field; not used as runtime fallback
+                description:
+                  type: string
               additionalProperties: true
       responses:
         '200':
@@ -2839,11 +3019,15 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+        '422':
+          description: Validation failed (e.g. empty base_url)
 
   /social-automation/api/action-registry/sites/{id}:
     put:
       tags: [Staff Session]
       summary: Update action registry site
+      description: |
+        Updates Site fields. `base_url` remains the single canonical URL for Fixed and Dynamic.
       operationId: actionRegistrySitesUpdate
       security:
         - SeoOpsSessionCookie: []
@@ -2854,6 +3038,21 @@ paths:
           application/json:
             schema:
               type: object
+              properties:
+                name:
+                  type: string
+                base_url_mode:
+                  type: string
+                  enum: [fixed, dynamic]
+                base_url:
+                  type: string
+                  description: Canonical Site Base URL
+                test_base_url:
+                  type: string
+                  nullable: true
+                  description: Legacy optional; dual entry not required
+                description:
+                  type: string
               additionalProperties: true
       responses:
         '200':
@@ -2862,6 +3061,8 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+        '422':
+          description: Validation failed (e.g. empty base_url)
 
   /social-automation/api/action-registry/paths:
     post:
@@ -3552,7 +3753,11 @@ paths:
   /social-automation/api/accounts:
     get:
       tags: [Staff Session]
-      summary: List accounts for staff UI
+      summary: List accounts for staff UI (metadata only)
+      description: |
+        Public inventory metadata. Returns has_password boolean.
+        Never returns password or encrypted_password.
+        platform should align with Site Registry site_key (not free-form display names).
       operationId: staffAccountsIndex
       security:
         - SeoOpsSessionCookie: []
@@ -3562,10 +3767,22 @@ paths:
             application/json:
               schema:
                 type: object
-                additionalProperties: true
+                required: [ok, accounts]
+                properties:
+                  ok:
+                    type: boolean
+                  accounts:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/StaffAccountPublic'
     post:
       tags: [Staff Session]
       summary: Create account
+      description: |
+        Owner/Admin only. Username is a free-text login identifier (plain handle,
+        @handle, phone, or email-as-text) — not email-format validated.
+        Optional non-empty password is encrypted at rest (Laravel Crypt).
+        Response never includes password/ciphertext. Email remains optional.
       operationId: staffAccountsStore
       security:
         - SeoOpsSessionCookie: []
@@ -3574,6 +3791,34 @@ paths:
           application/json:
             schema:
               type: object
+              required: [name, username]
+              properties:
+                name:
+                  type: string
+                account_name:
+                  type: string
+                platform:
+                  type: string
+                  description: Site Registry key/platform identifier
+                username:
+                  type: string
+                  minLength: 1
+                  description: |
+                    Free-text Social Account login identifier (username, @handle,
+                    phone, or email-as-text). Not validated as email format.
+                    Legacy clients may send the identifier in `email` instead.
+                email:
+                  type: string
+                  nullable: true
+                  description: Optional compatibility field; never invented from username
+                password:
+                  type: string
+                  format: password
+                  description: Optional; stored encrypted; never returned
+                site_url:
+                  type: string
+                note:
+                  type: string
               additionalProperties: true
       responses:
         '200':
@@ -3584,17 +3829,27 @@ paths:
                 type: object
                 additionalProperties: true
         '201':
-          description: Account created
+          description: Account created (metadata only; no password)
           content:
             application/json:
               schema:
                 type: object
-                additionalProperties: true
+                properties:
+                  ok:
+                    type: boolean
+                  account:
+                    $ref: '#/components/schemas/StaffAccountPublic'
+        '422':
+          description: Validation failed (e.g. empty username)
 
   /social-automation/api/accounts/{id}:
     put:
       tags: [Staff Session]
       summary: Update account
+      description: |
+        Owner/Admin only. Password contract: omitted or empty → preserve existing;
+        non-empty → replace encrypted password. Response never includes password.
+        Username is free-text login identifier (no email-format validation).
       operationId: staffAccountsUpdate
       security:
         - SeoOpsSessionCookie: []
@@ -3605,6 +3860,26 @@ paths:
           application/json:
             schema:
               type: object
+              properties:
+                name:
+                  type: string
+                platform:
+                  type: string
+                username:
+                  type: string
+                  minLength: 1
+                  description: Free-text Social Account login identifier
+                email:
+                  type: string
+                  nullable: true
+                  description: Optional compatibility field; no email-format validation
+                password:
+                  type: string
+                  format: password
+                site_url:
+                  type: string
+                note:
+                  type: string
               additionalProperties: true
       responses:
         '200':
@@ -3612,7 +3887,11 @@ paths:
             application/json:
               schema:
                 type: object
-                additionalProperties: true
+                properties:
+                  ok:
+                    type: boolean
+                  account:
+                    $ref: '#/components/schemas/StaffAccountPublic'
     delete:
       tags: [Staff Session]
       summary: Delete account

@@ -150,6 +150,7 @@ final class ActionRegistryController
 
         $rawBaseUrl = (string) $request->input('base_url', '');
         $baseUrl = SaSite::normalizeBaseUrl($rawBaseUrl);
+        // Legacy column retained for compatibility; not required for unified Base URL contract.
         $testBaseUrl = SaSite::normalizeBaseUrl((string) $request->input('test_base_url', ''));
         $description = trim((string) $request->input('description', ''));
 
@@ -157,8 +158,9 @@ final class ActionRegistryController
             return response()->json(['ok' => false, 'error' => 'Tên Site không được để trống.'], 422);
         }
 
-        if ($mode === SaSite::MODE_FIXED && $baseUrl === '') {
-            return response()->json(['ok' => false, 'error' => 'Base URL là bắt buộc với chế độ Fixed.'], 422);
+        // Unified contract: both Fixed and Dynamic Sites configure the same base_url.
+        if ($baseUrl === '') {
+            return response()->json(['ok' => false, 'error' => 'Base URL là bắt buộc.'], 422);
         }
 
         $key = $rawKey !== '' ? preg_replace('/[^a-z0-9_-]/', '', $rawKey) : preg_replace('/[^a-z0-9_-]/', '', strtolower(str_replace(' ', '_', $name)));
@@ -174,7 +176,7 @@ final class ActionRegistryController
             'key' => $key,
             'name' => $name,
             'base_url_mode' => $mode,
-            'base_url' => $mode === SaSite::MODE_FIXED ? $baseUrl : ($baseUrl !== '' ? $baseUrl : null),
+            'base_url' => $baseUrl,
             'test_base_url' => $testBaseUrl !== '' ? $testBaseUrl : null,
             'description' => $description !== '' ? $description : null,
         ]);
@@ -208,13 +210,14 @@ final class ActionRegistryController
             $site->base_url = $rawBaseUrl !== '' ? SaSite::normalizeBaseUrl($rawBaseUrl) : null;
         }
 
+        // Legacy write path retained; do not require dual entry of the same URL.
         if ($request->has('test_base_url')) {
             $rawTest = (string) $request->input('test_base_url', '');
             $site->test_base_url = $rawTest !== '' ? SaSite::normalizeBaseUrl($rawTest) : null;
         }
 
-        if ($site->isFixed() && empty($site->base_url)) {
-            return response()->json(['ok' => false, 'error' => 'Base URL là bắt buộc với chế độ Fixed.'], 422);
+        if (empty($site->base_url)) {
+            return response()->json(['ok' => false, 'error' => 'Base URL là bắt buộc.'], 422);
         }
 
         if ($request->has('description')) {
@@ -393,7 +396,7 @@ final class ActionRegistryController
                     'action_tag_id' => $tag->id,
                     'action_tag_key' => $tag->tag_key,
                     'site_key' => $site->key,
-                    'site_base_url' => $site->isDynamic() ? null : $site->base_url,
+                    'site_base_url' => $site->canonicalBaseUrl(),
                     'path_key' => $path->key,
                     'url_pattern' => $path->url_pattern,
                     'path_inputs' => $path->path_inputs,
@@ -584,7 +587,7 @@ final class ActionRegistryController
                         'action_tag_id' => $tag->id,
                         'action_tag_key' => $tag->tag_key,
                         'site_key' => $site?->key ?? $tag->platform,
-                        'site_base_url' => $site?->isDynamic() ? null : ($site?->base_url ?? 'https://www.facebook.com'),
+                        'site_base_url' => $site?->canonicalBaseUrl(),
                         'path_key' => $path?->key ?? $tag->target,
                         'url_pattern' => $path?->url_pattern ?? '/',
                         'path_inputs' => $path?->path_inputs ?? [],
@@ -633,7 +636,7 @@ final class ActionRegistryController
             'action_tag_id' => $tag->id,
             'action_tag_key' => $tag->tag_key,
             'site_key' => $tag->site_key ?: $tag->platform,
-            'site_base_url' => $site?->isDynamic() ? null : $site?->base_url,
+            'site_base_url' => $site?->canonicalBaseUrl(),
             'path_key' => $tag->path_key ?: $tag->target,
             'url_pattern' => $path?->url_pattern,
             'path_inputs' => $path?->path_inputs,

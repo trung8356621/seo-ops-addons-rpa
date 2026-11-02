@@ -57,36 +57,12 @@ export const SitesPathsScreen: React.FC<SitesPathsScreenProps> = ({
   const [pathError, setPathError] = useState('');
   const [copiedUrl, setCopiedUrl] = useState(false);
 
-  // Dynamic Test Base URL (remembered per site in localStorage)
-  const [currentTestBaseUrl, setCurrentTestBaseUrl] = useState<string>('');
-
-  useEffect(() => {
-    if (!activeSite) {
-      setCurrentTestBaseUrl('');
-      return;
-    }
-    if (activeSite.base_url_mode === 'dynamic') {
-      const stored = localStorage.getItem(`sa_test_base_url_${activeSite.id}`);
-      setCurrentTestBaseUrl(stored ?? (activeSite.test_base_url || 'https://example.test/blog/'));
-    } else {
-      setCurrentTestBaseUrl(activeSite.base_url || '');
-    }
-  }, [activeSite?.id, activeSite?.base_url_mode, activeSite?.test_base_url, activeSite?.base_url]);
-
-  const handleTestBaseUrlChange = (val: string) => {
-    setCurrentTestBaseUrl(val);
-    if (activeSite && activeSite.base_url_mode === 'dynamic') {
-      localStorage.setItem(`sa_test_base_url_${activeSite.id}`, val);
-    }
-  };
-
   // Site Modal State (Add or Edit Site)
   const [siteModalOpen, setSiteModalOpen] = useState(false);
   const [editingSite, setEditingSite] = useState<Site | null>(null);
   const [siteBaseUrlMode, setSiteBaseUrlMode] = useState<'fixed' | 'dynamic'>('fixed');
   const [siteNameInput, setSiteNameInput] = useState('');
   const [siteBaseUrlInput, setSiteBaseUrlInput] = useState('');
-  const [siteTestBaseUrlInput, setSiteTestBaseUrlInput] = useState('');
   const [siteDescInput, setSiteDescInput] = useState('');
   const [isSavingSite, setIsSavingSite] = useState(false);
   const [siteError, setSiteError] = useState('');
@@ -142,12 +118,11 @@ export const SitesPathsScreen: React.FC<SitesPathsScreenProps> = ({
     return parseInputsFromPattern(pathPatternInput);
   }, [pathPatternInput]);
 
-  // Resolved URL based on active site base_url (or currentTestBaseUrl for dynamic) and test inputs
+  // Resolved URL preview always uses the Site's canonical base_url (Fixed and Dynamic).
   const resolvedPreview = useMemo(() => {
     if (!activeSite) return { url: '', missing: ['base_url'], valid: false, error: 'Chưa chọn Site.' };
-    const effectiveBase = isDynamicSite ? currentTestBaseUrl : activeSite.base_url;
-    return resolveUrl(effectiveBase, pathPatternInput, testValues);
-  }, [activeSite, isDynamicSite, currentTestBaseUrl, pathPatternInput, testValues]);
+    return resolveUrl(activeSite.base_url || '', pathPatternInput, testValues);
+  }, [activeSite, pathPatternInput, testValues]);
 
   // Handle Save Path
   const handleSavePath = async () => {
@@ -178,7 +153,6 @@ export const SitesPathsScreen: React.FC<SitesPathsScreenProps> = ({
     setSiteBaseUrlMode('fixed');
     setSiteNameInput('');
     setSiteBaseUrlInput('https://');
-    setSiteTestBaseUrlInput('');
     setSiteDescInput('');
     setSiteError('');
     setSiteModalOpen(true);
@@ -188,8 +162,8 @@ export const SitesPathsScreen: React.FC<SitesPathsScreenProps> = ({
     setEditingSite(site);
     setSiteBaseUrlMode(site.base_url_mode ?? 'fixed');
     setSiteNameInput(site.name);
-    setSiteBaseUrlInput(site.base_url || '');
-    setSiteTestBaseUrlInput(site.test_base_url || '');
+    // Prefer canonical base_url; legacy test_base_url only seeds the form when base_url is empty.
+    setSiteBaseUrlInput(site.base_url || site.test_base_url || '');
     setSiteDescInput(site.description || '');
     setSiteError('');
     setSiteModalOpen(true);
@@ -201,8 +175,8 @@ export const SitesPathsScreen: React.FC<SitesPathsScreenProps> = ({
       setSiteError('Vui lòng nhập Tên Site.');
       return;
     }
-    if (siteBaseUrlMode === 'fixed' && !siteBaseUrlInput.trim()) {
-      setSiteError('Vui lòng nhập Base URL hợp lệ cho Site cố định.');
+    if (!siteBaseUrlInput.trim()) {
+      setSiteError('Vui lòng nhập Base URL.');
       return;
     }
     setSiteError('');
@@ -211,9 +185,8 @@ export const SitesPathsScreen: React.FC<SitesPathsScreenProps> = ({
       await onSaveSite({
         id: editingSite?.id,
         name: siteNameInput.trim(),
-        base_url: siteBaseUrlMode === 'fixed' ? siteBaseUrlInput.trim() : '',
+        base_url: siteBaseUrlInput.trim(),
         base_url_mode: siteBaseUrlMode,
-        test_base_url: siteTestBaseUrlInput.trim() || undefined,
         description: siteDescInput.trim() || undefined,
       });
       setSiteModalOpen(false);
@@ -382,9 +355,7 @@ export const SitesPathsScreen: React.FC<SitesPathsScreenProps> = ({
                           )}
                         </div>
                         <div className="text-[11px] text-gray-400 truncate font-mono">
-                          {isDynamic
-                            ? (site.test_base_url ? `Test: ${site.test_base_url}` : 'Dynamic Base URL')
-                            : site.base_url}
+                          {site.base_url || site.test_base_url || 'Chưa có Base URL'}
                         </div>
                       </div>
                     </div>
@@ -525,31 +496,6 @@ export const SitesPathsScreen: React.FC<SitesPathsScreenProps> = ({
               </div>
             </div>
 
-            {/* Dynamic Site: Test Base URL Input */}
-            {isDynamicSite && (
-              <div className="p-3.5 bg-sky-50/70 border border-sky-200/80 rounded-xl flex flex-col gap-2">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-bold text-sky-900 flex items-center gap-1.5">
-                    <span className="px-1.5 py-0.5 rounded text-[10px] uppercase font-semibold bg-sky-200/80 text-sky-800">
-                      Dynamic Base URL
-                    </span>
-                    <span>Test Base URL</span>
-                  </label>
-                  <span className="text-[11px] text-sky-600 font-medium">Được ghi nhớ tự động cho site này</span>
-                </div>
-                <input
-                  type="text"
-                  value={currentTestBaseUrl}
-                  onChange={(e) => handleTestBaseUrlChange(e.target.value)}
-                  placeholder="https://example.test/blog/"
-                  className="w-full h-8 px-2.5 text-xs font-mono bg-white border border-sky-300 rounded-md text-gray-900 focus:outline-none focus:ring-1 focus:ring-sky-500"
-                />
-                <p className="text-[11px] text-sky-700">
-                  🔒 Test Base URL hỗ trợ cả thư mục con (ví dụ <code>https://example.test/blog/</code>). Tuyệt đối KHÔNG tự dùng làm URL chạy production.
-                </p>
-              </div>
-            )}
-
             {/* Detected Path Inputs */}
             <div>
               <h4 className="text-xs font-semibold text-gray-800 mb-1.5">Detected Path Inputs</h4>
@@ -616,7 +562,7 @@ export const SitesPathsScreen: React.FC<SitesPathsScreenProps> = ({
                   type="text"
                   readOnly
                   value={resolvedPreview.url}
-                  placeholder={isDynamicSite && !currentTestBaseUrl.trim() ? 'Vui lòng nhập Test Base URL ở trên để xem preview...' : ''}
+                  placeholder={!activeSite?.base_url ? 'Cấu hình Base URL của Site để xem preview...' : ''}
                   className="flex-1 h-9 px-3 text-xs font-mono bg-gray-50 border border-gray-200 rounded-lg text-gray-800 focus:outline-none select-all"
                 />
                 <button
@@ -744,39 +690,22 @@ export const SitesPathsScreen: React.FC<SitesPathsScreenProps> = ({
               />
             </div>
 
-            {siteBaseUrlMode === 'fixed' ? (
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1.5">
-                  Base URL <span className="text-red-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  value={siteBaseUrlInput}
-                  onChange={(e) => setSiteBaseUrlInput(e.target.value)}
-                  placeholder="https://www.facebook.com"
-                  className="w-full h-9 px-3 text-sm font-mono border border-gray-200 rounded-lg focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500"
-                />
-                <p className="text-[11px] text-gray-400 mt-1">
-                  URL cố định cho platform (ví dụ: https://www.facebook.com).
-                </p>
-              </div>
-            ) : (
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1.5">
-                  Test Base URL <span className="text-gray-400 font-normal">(Dùng preview/test)</span>
-                </label>
-                <input
-                  type="text"
-                  value={siteTestBaseUrlInput}
-                  onChange={(e) => setSiteTestBaseUrlInput(e.target.value)}
-                  placeholder="https://example.test/blog/"
-                  className="w-full h-9 px-3 text-sm font-mono border border-gray-200 rounded-lg focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500"
-                />
-                <p className="text-[11px] text-amber-700 bg-amber-50/80 border border-amber-200/60 rounded-md p-2 mt-1.5">
-                  ⚠️ Với Dynamic: Không bắt buộc nhập Base URL cố định. Test Base URL dùng để preview/test nhanh và tuyệt đối không tự dùng làm URL chạy production.
-                </p>
-              </div>
-            )}
+            <div>
+              <label className="block text-xs font-semibold text-gray-700 mb-1.5">
+                Base URL <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={siteBaseUrlInput}
+                onChange={(e) => setSiteBaseUrlInput(e.target.value)}
+                placeholder={siteBaseUrlMode === 'dynamic' ? 'https://example.com/blog' : 'https://www.facebook.com'}
+                className="w-full h-9 px-3 text-sm font-mono border border-gray-200 rounded-lg focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500"
+              />
+              <p className="text-[11px] text-gray-400 mt-1">
+                Một Base URL dùng chung cho preview, path resolution và Electron Browser
+                {siteBaseUrlMode === 'dynamic' ? ' (hỗ trợ thư mục con).' : '.'}
+              </p>
+            </div>
 
             <div>
               <label className="block text-xs font-semibold text-gray-700 mb-1.5">Description (Optional)</label>

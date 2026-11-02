@@ -56,11 +56,27 @@ final class SocialAutomationServiceHealth
                 'version' => $config->version,
                 'scope' => 'global',
             ],
-            'user' => $user instanceof User ? [
-                'id' => (int) $user->id,
-                'name' => (string) ($user->name ?? ''),
-            ] : null,
+            'user' => self::publicUser($user instanceof User ? $user : null),
             'config' => $config->toArray(),
+        ];
+    }
+
+    /**
+     * Public bootstrap user projection. Role is server-derived from User.role only.
+     *
+     * @return array{id: int, name: string, role: string}|null
+     */
+    public static function publicUser(?User $user): ?array
+    {
+        if (! $user instanceof User) {
+            return null;
+        }
+
+        return [
+            'id' => (int) $user->id,
+            'name' => (string) ($user->name ?? ''),
+            // Server-derived from authenticated User model — never request/body.
+            'role' => (string) ($user->role ?? ''),
         ];
     }
 }

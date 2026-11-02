@@ -97,9 +97,7 @@ final class SocialAutomationAccountInventoryTest extends TestCase
         ], 10);
 
         self::assertInstanceOf(SaAccount::class, $account);
-        self::assertFalse($account->hasPassword());
-        $account = $this->accountService->updatePassword($account->id, $rawPassword);
-        self::assertTrue($account->hasPassword());
+        self::assertTrue($account->hasPassword(), 'Non-empty password on create must be encrypted at rest');
 
         $encrypted = (string) $account->getAttribute('encrypted_password');
         self::assertNotEmpty($encrypted);
@@ -165,28 +163,33 @@ final class SocialAutomationAccountInventoryTest extends TestCase
             'password' => $rawPassword,
         ], 10);
 
-        $account = $this->accountService->updatePassword($account->id, $rawPassword);
         $originalEncrypted = $account->getAttribute('encrypted_password');
         self::assertNotEmpty($originalEncrypted);
 
-        // Update name and username, but password is empty string
+        // Empty password on update → preserve existing (never silent erase)
         $updated = $this->accountService->update($account->id, [
             'name' => 'Updated Fanpage Name',
             'username' => 'new_username',
-            'password' => 'must-be-ignored',
+            'password' => '',
         ]);
 
         self::assertInstanceOf(SaAccount::class, $updated);
         self::assertSame('Updated Fanpage Name', $updated->getAccountName());
         self::assertSame('new_username', $updated->getDisplayUsername());
-
-        // Password MUST be preserved
         self::assertSame($originalEncrypted, $updated->getAttribute('encrypted_password'));
         self::assertSame($rawPassword, $updated->getDecryptedPassword());
 
-        // Only the dedicated password method can replace it.
+        // Omitted password → preserve
+        $updatedOmit = $this->accountService->update($account->id, [
+            'note' => 'note only',
+        ]);
+        self::assertSame($originalEncrypted, $updatedOmit->getAttribute('encrypted_password'));
+
+        // Non-empty password on update → replace encrypted value
         $newRaw = 'BrandNewPassword456!';
-        $updatedAgain = $this->accountService->updatePassword($account->id, $newRaw);
+        $updatedAgain = $this->accountService->update($account->id, [
+            'password' => $newRaw,
+        ]);
 
         self::assertNotSame($originalEncrypted, $updatedAgain->getAttribute('encrypted_password'));
         self::assertSame($newRaw, $updatedAgain->getDecryptedPassword());
@@ -326,19 +329,23 @@ final class SocialAutomationAccountInventoryTest extends TestCase
     }
 
     /**
-     * Requirement: Username removed from Accounts Page form and list, replaced by last_interaction.
+     * CP18C.2: Staff UI uses free-text username (type=text), keeps last_interaction column.
      */
-    public function test_page_and_view_username_removed_and_last_interaction_shown(): void
+    public function test_page_and_view_use_free_text_username_and_last_interaction(): void
     {
         $pageSrc = (string) file_get_contents(
             dirname(__DIR__, 2) . '/src/Filament/Pages/SocialAutomationAccountsPage.php'
         );
-        self::assertStringNotContainsString('public string $username', $pageSrc);
+        self::assertStringContainsString('public string $username', $pageSrc);
+        self::assertStringNotContainsString('public string $email', $pageSrc);
 
         $bladeSrc = (string) file_get_contents(
             dirname(__DIR__, 2) . '/resources/views/filament/pages/accounts.blade.php'
         );
-        self::assertStringNotContainsString('col_username', $bladeSrc);
+        self::assertStringContainsString('col_username', $bladeSrc);
+        self::assertStringContainsString('wire:model="username"', $bladeSrc);
+        self::assertStringContainsString('type="text"', $bladeSrc);
+        self::assertStringNotContainsString('type="email"', $bladeSrc);
         self::assertStringContainsString('col_last_interaction', $bladeSrc);
         self::assertStringContainsString('interaction_none', $bladeSrc);
     }
@@ -353,17 +360,86 @@ final class SocialAutomationAccountInventoryTest extends TestCase
         self::assertStringContainsString("'https_required'", $source);
         self::assertStringContainsString("'Cache-Control', 'no-store, private'", $source);
         self::assertStringContainsString('getDecryptedPassword()', $source);
+        self::assertStringContainsString('authorizeAccountCredential', $source);
+        self::assertStringContainsString('browser_id', $source);
+        self::assertStringContainsString('AccountCredentialGate', $source);
+        self::assertStringContainsString("'account_id'", $source);
     }
 
-    public function test_email_is_strictly_required_on_create(): void
+    public function test_free_text_username_accepted_and_empty_rejected(): void
     {
-        $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('Email is required.');
+        $plain = $this->accountService->create([
+            'platform' => 'Facebook',
+            'name' => 'Plain User',
+            'username' => 'mayhopphat',
+            'password' => 'SecretPass1!',
+        ]);
+        self::assertSame('mayhopphat', $plain->getDisplayUsername());
+        self::assertNull($plain->getDisplayEmail(), 'Must not invent email from username');
+        self::assertTrue($plain->hasPassword());
+        self::assertSame('SecretPass1!', $plain->getDecryptedPassword());
 
+        $at = $this->accountService->create([
+            'platform' => 'Facebook',
+            'name' => 'At Handle',
+            'username' => '@username',
+        ]);
+        self::assertSame('@username', $at->getDisplayUsername());
+        self::assertNull($at->getDisplayEmail());
+
+        $phone = $this->accountService->create([
+            'platform' => 'Facebook',
+            'name' => 'Phone Login',
+            'username' => '0912345678',
+        ]);
+        self::assertSame('0912345678', $phone->getDisplayUsername());
+
+        $emailAsText = $this->accountService->create([
+            'platform' => 'Facebook',
+            'name' => 'Email As Text',
+            'username' => 'marketing@example.com',
+        ]);
+        self::assertSame('marketing@example.com', $emailAsText->getDisplayUsername());
+        self::assertNull($emailAsText->getDisplayEmail(), 'Email-shaped username stays in username only');
+
+        $legacyEmailField = $this->accountService->create([
+            'platform' => 'Facebook',
+            'name' => 'Legacy Email Field',
+            'email' => 'legacy@example.com',
+        ]);
+        self::assertSame('legacy@example.com', $legacyEmailField->getDisplayUsername());
+        self::assertNull($legacyEmailField->getDisplayEmail());
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Username is required.');
         $this->accountService->create([
             'platform' => 'Facebook',
-            'name' => 'No Email Account',
-            'email' => '', // Empty email rejected
+            'name' => 'No Username Account',
+            'username' => '',
+            'email' => '',
+        ]);
+    }
+
+    public function test_update_rejects_empty_username_and_accepts_free_text(): void
+    {
+        $account = $this->accountService->create([
+            'platform' => 'Facebook',
+            'name' => 'Update Target',
+            'username' => 'old_user',
+            'password' => 'KeepMeEncrypted!',
+        ]);
+        $encrypted = $account->getAttribute('encrypted_password');
+
+        $updated = $this->accountService->update($account->id, [
+            'username' => '@newhandle',
+        ]);
+        self::assertSame('@newhandle', $updated->getDisplayUsername());
+        self::assertSame($encrypted, $updated->getAttribute('encrypted_password'));
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Username is required.');
+        $this->accountService->update($account->id, [
+            'username' => '   ',
         ]);
     }
 
@@ -378,21 +454,20 @@ final class SocialAutomationAccountInventoryTest extends TestCase
         ]);
 
         self::assertSame('https://example.com/tech-blog', $account->getSiteUrl());
-        self::assertSame('author@techblog.vn', $account->getDisplayEmail());
-        self::assertFalse($account->hasPassword());
-        $account = $this->accountService->updatePassword($account->id, 'WpSecretPass#2026');
+        // Legacy email-only payload → stored as free-text username (email not invented).
+        self::assertSame('author@techblog.vn', $account->getDisplayUsername());
+        self::assertNull($account->getDisplayEmail());
         self::assertTrue($account->hasPassword());
     }
 
     public function test_list_bindable_accounts_includes_email_site_url_has_password_and_omits_password(): void
     {
-        $fbAccount = $this->accountService->create([
+        $this->accountService->create([
             'platform' => 'facebook',
             'name' => 'FB Seeding Account',
             'email' => 'seeder@fb.com',
             'password' => 'ConfidentialPassword',
         ]);
-        $this->accountService->updatePassword($fbAccount->id, 'ConfidentialPassword');
 
         $this->accountService->create([
             'platform' => 'wordpress',
@@ -423,7 +498,11 @@ final class SocialAutomationAccountInventoryTest extends TestCase
         $controller = new \Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaClientApiController(
             new \Omnichannel\Addons\SocialAutomation\Registry\AgentRegistryService(),
             new \Omnichannel\Addons\SocialAutomation\Registry\SessionSyncService(new \Omnichannel\Addons\SocialAutomation\Domain\OnlineStateCalculator()),
-            $this->repository
+            $this->repository,
+            null,
+            new \Omnichannel\Addons\SocialAutomation\Domain\AccountSiteUrlResolver([
+                'facebook' => 'https://www.facebook.com',
+            ]),
         );
 
         $request = \Illuminate\Http\Request::create('/api/v1/social-automation/client/accounts', 'GET');
@@ -437,16 +516,19 @@ final class SocialAutomationAccountInventoryTest extends TestCase
 
         $accountsMap = collect($data['accounts'])->keyBy('display_name');
 
-        // Check FB account
+        // Check FB account — login identifier lives in username; email optional/null.
         $fb = $accountsMap['FB Seeding Account'];
-        self::assertSame('seeder@fb.com', $fb['email']);
+        self::assertSame('seeder@fb.com', $fb['username']);
+        self::assertNull($fb['email']);
+        self::assertSame('https://www.facebook.com', $fb['site_url']);
         self::assertTrue($fb['has_password']);
         self::assertArrayNotHasKey('password', $fb);
         self::assertArrayNotHasKey('encrypted_password', $fb);
 
-        // Check WP account
+        // Check WP account — unknown registry key falls back to persisted Account.site_url
         $wp = $accountsMap['WP Subdir Site'];
-        self::assertSame('admin@subdir.com', $wp['email']);
+        self::assertSame('admin@subdir.com', $wp['username']);
+        self::assertNull($wp['email']);
         self::assertSame('https://portal.domain.com/cms', $wp['site_url']);
         self::assertFalse($wp['has_password']);
 

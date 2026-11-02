@@ -8,6 +8,8 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Omnichannel\Addons\SocialAutomation\Contracts\SaAccountRepositoryContract;
+use Omnichannel\Addons\SocialAutomation\Domain\AccountCredentialGate;
+use Omnichannel\Addons\SocialAutomation\Domain\AccountSiteUrlResolver;
 use Omnichannel\Addons\SocialAutomation\Domain\AgentKindPolicy;
 use Omnichannel\Addons\SocialAutomation\Domain\ClientConnectionLease;
 use Omnichannel\Addons\SocialAutomation\Domain\StaffClientEnrollmentBootstrap;
@@ -31,6 +33,7 @@ final class RpaClientApiController extends Controller
         private readonly SessionSyncService $sessionSync,
         private readonly ?SaAccountRepositoryContract $accountsRepo = null,
         private readonly ?ClientNotificationService $notifications = null,
+        private readonly ?AccountSiteUrlResolver $siteUrlResolver = null,
     ) {}
 
     /**
@@ -283,6 +286,8 @@ final class RpaClientApiController extends Controller
                 ? app(SaAccountRepositoryContract::class)
                 : null);
 
+        $resolver = $this->siteUrlResolver();
+
         if ($accountsRepo instanceof SaAccountRepositoryContract) {
             $accountCollection = $accountsRepo->list($installationId);
             if ($request->has('platform')) {
@@ -294,7 +299,10 @@ final class RpaClientApiController extends Controller
                 }
             }
 
-            $accounts = $accountCollection->map(static function (SaAccount $a): array {
+            // Warm Site Registry once for the whole inventory (no N+1).
+            $resolver->ensureWarmed();
+
+            $accounts = $accountCollection->map(function (SaAccount $a) use ($resolver): array {
                 $email = $a->email ?? $a->declared_email;
                 $emailStr = is_string($email) && trim($email) !== '' ? trim($email) : null;
 
@@ -304,7 +312,7 @@ final class RpaClientApiController extends Controller
                     'display_name' => (string) ($a->name ?? $a->label ?? $a->username ?? 'Account'),
                     'username' => $a->username ?? $a->declared_username,
                     'email' => $emailStr,
-                    'site_url' => $a->getSiteUrl(),
+                    'site_url' => $resolver->resolveForAccount($a),
                     'has_password' => $a->hasPassword(),
                     'identity_label' => $a->label,
                     'verified' => (bool) $a->verified,
@@ -329,7 +337,9 @@ final class RpaClientApiController extends Controller
             }
         }
 
-        $accounts = $query->orderByDesc('updated_at')->get()->map(static function (SaAccount $a): array {
+        $resolver->ensureWarmed();
+
+        $accounts = $query->orderByDesc('updated_at')->get()->map(function (SaAccount $a) use ($resolver): array {
             $email = $a->email ?? $a->declared_email;
             $emailStr = is_string($email) && trim($email) !== '' ? trim($email) : null;
 
@@ -339,7 +349,7 @@ final class RpaClientApiController extends Controller
                 'display_name' => (string) ($a->name ?? $a->label ?? $a->username ?? 'Account'),
                 'username' => $a->username ?? $a->declared_username,
                 'email' => $emailStr,
-                'site_url' => $a->site_url ?? $a->domain,
+                'site_url' => $resolver->resolveForAccount($a),
                 'has_password' => $a->hasPassword(),
                 'identity_label' => $a->label,
                 'verified' => (bool) $a->verified,
@@ -367,18 +377,46 @@ final class RpaClientApiController extends Controller
                 'platform' => strtolower((string) $account->platform),
                 'display_name' => $account->getAccountName(),
                 'email' => $account->getDisplayEmail(),
-                'site_url' => $account->getSiteUrl(),
+                'site_url' => $this->siteUrlResolver()->resolveForAccount($account),
                 'password_status' => $account->hasPassword() ? 'available' : 'not_set',
             ],
         ]);
     }
 
+    private function siteUrlResolver(): AccountSiteUrlResolver
+    {
+        if ($this->siteUrlResolver instanceof AccountSiteUrlResolver) {
+            return $this->siteUrlResolver;
+        }
+
+        if (function_exists('app') && app()->bound(AccountSiteUrlResolver::class)) {
+            return app(AccountSiteUrlResolver::class);
+        }
+
+        return new AccountSiteUrlResolver;
+    }
+
+    /**
+     * On-demand credential for Auth Script login.
+     *
+     * Requires Client API Key + browser_id query/body. Laravel verifies the Browser
+     * belongs to this Client agent and is bound to the Account before decrypting.
+     * Staff session auth alone cannot call this route (RpaClientApiKey middleware).
+     *
+     * Electron contract (DESKTOP):
+     * 1) Staff selects Browser + Account (bound via browser-sync).
+     * 2) Client begins authorized login → GET .../accounts/{accountId}/password?browser_id={uuid}
+     * 3) On 200: use account_id, username/email, password transiently for Auth Script.
+     * 4) Clear credential from Client memory when login finishes.
+     * Never cache; response includes Cache-Control: no-store.
+     */
     public function getAccountPassword(Request $request, string $accountId): JsonResponse
     {
         if (! $request->isSecure() && ! $this->allowsInsecureLocalPasswordAccess($request)) {
             return new JsonResponse(['ok' => false, 'error' => 'https_required'], 400);
         }
-        $auth = $this->authorizeAccount($request, $accountId);
+
+        $auth = $this->authorizeAccountCredential($request, $accountId);
         if ($auth instanceof JsonResponse) {
             return $auth;
         }
@@ -392,7 +430,18 @@ final class RpaClientApiController extends Controller
             return new JsonResponse(['ok' => false, 'error' => 'password_decryption_failed'], 500);
         }
 
-        $response = new JsonResponse(['ok' => true, 'password' => $password]);
+        $username = $account->getDisplayUsername();
+        $email = $account->getDisplayEmail();
+        $loginIdentity = $username ?: $email;
+
+        $response = new JsonResponse([
+            'ok' => true,
+            'account_id' => (string) ($account->account_uuid ?? $account->id),
+            'username' => $username,
+            'email' => $email,
+            'login' => $loginIdentity,
+            'password' => $password,
+        ]);
         $response->headers->set('Cache-Control', 'no-store, private');
         $response->headers->set('Pragma', 'no-cache');
 
@@ -419,6 +468,49 @@ final class RpaClientApiController extends Controller
             return new JsonResponse(['ok' => false, 'error' => 'installation_forbidden'], 403);
         }
 
+        return $account;
+    }
+
+    /**
+     * Credential retrieval: Client key + installation + Browser ownership + Account binding.
+     */
+    private function authorizeAccountCredential(Request $request, string $accountId): SaAccount|JsonResponse
+    {
+        $clientKey = $this->resolveClientKey($request);
+        if (! $clientKey instanceof SaClientApiKey) {
+            return new JsonResponse(['ok' => false, 'error' => 'unauthenticated'], 401);
+        }
+
+        $browserId = trim((string) ($request->query('browser_id') ?? $request->input('browser_id') ?? ''));
+        $account = SaAccount::query()->where(function ($query) use ($accountId): void {
+            $query->where('account_uuid', $accountId);
+            if (ctype_digit($accountId)) {
+                $query->orWhere('id', (int) $accountId);
+            }
+        })->first();
+
+        $agent = $this->agents->findClientByApiKeyId((int) $clientKey->id);
+        $session = null;
+        if ($agent instanceof SaAgent && $browserId !== '') {
+            $session = SaBrowserSession::query()
+                ->where('session_uuid', $browserId)
+                ->where('agent_id', (int) $agent->id)
+                ->first();
+        }
+
+        $deny = (new AccountCredentialGate)->denyReason($clientKey, $agent, $session, $account, $browserId);
+        if ($deny !== null) {
+            $status = match ($deny) {
+                AccountCredentialGate::ERROR_BROWSER_ID_REQUIRED => 422,
+                AccountCredentialGate::ERROR_ACCOUNT_NOT_FOUND => 404,
+                AccountCredentialGate::ERROR_CLIENT_NOT_REGISTERED => 404,
+                default => 403,
+            };
+
+            return new JsonResponse(['ok' => false, 'error' => $deny], $status);
+        }
+
+        /** @var SaAccount $account */
         return $account;
     }
 

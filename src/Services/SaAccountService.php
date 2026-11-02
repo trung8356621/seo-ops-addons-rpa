@@ -53,19 +53,19 @@ final class SaAccountService
             $platform = 'Facebook';
         }
 
-        $username = isset($data['username']) && trim((string) $data['username']) !== ''
-            ? trim((string) $data['username'])
-            : (isset($data['declared_username']) && trim((string) $data['declared_username']) !== ''
-                ? trim((string) $data['declared_username'])
-                : null);
-
-        $email = isset($data['email']) && trim((string) $data['email']) !== ''
-            ? trim((string) $data['email'])
-            : (isset($data['declared_email']) && trim((string) $data['declared_email']) !== ''
-                ? trim((string) $data['declared_email'])
-                : null);
-        if ($email === null || filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
-            throw new InvalidArgumentException('Email is required.');
+        // Social login identifier is free-text username (no email-format validation).
+        $explicitUsername = $this->optionalFreeTextField($data, 'username', 'declared_username');
+        $emailInput = $this->optionalFreeTextField($data, 'email', 'declared_email');
+        if ($explicitUsername !== null) {
+            $username = $explicitUsername;
+            // Optional email for compatibility; never invent from username.
+            $email = $emailInput;
+        } elseif ($emailInput !== null) {
+            // Legacy payload: identifier sent only in email field → store as username.
+            $username = $emailInput;
+            $email = null;
+        } else {
+            throw new InvalidArgumentException('Username is required.');
         }
 
         $siteUrl = isset($data['site_url']) && trim((string) $data['site_url']) !== ''
@@ -75,6 +75,15 @@ final class SaAccountService
         $note = isset($data['note']) && trim((string) $data['note']) !== ''
             ? trim((string) $data['note'])
             : null;
+
+        $encryptedPassword = null;
+        if (array_key_exists('password', $data)) {
+            $password = trim((string) $data['password']);
+            if ($password !== '') {
+                $encryptedPassword = $this->encryptPassword($password);
+            }
+            // Empty password on create → store null (no credential). Never plaintext.
+        }
 
         $attributes = [
             'account_uuid' => (string) Str::uuid(),
@@ -87,7 +96,7 @@ final class SaAccountService
             'email' => $email,
             'declared_email' => $email,
             'site_url' => $siteUrl,
-            'encrypted_password' => null,
+            'encrypted_password' => $encryptedPassword,
             'note' => $note,
             'created_by' => $userId,
             'identity_source' => 'inventory',
@@ -126,19 +135,31 @@ final class SaAccountService
             }
         }
 
-        if (array_key_exists('username', $data) || array_key_exists('declared_username', $data)) {
-            $u = $data['username'] ?? $data['declared_username'] ?? null;
-            $username = $u !== null && trim((string) $u) !== '' ? trim((string) $u) : null;
+        $touchesUsername = array_key_exists('username', $data) || array_key_exists('declared_username', $data);
+        $touchesEmail = array_key_exists('email', $data) || array_key_exists('declared_email', $data);
+
+        if ($touchesUsername) {
+            $username = $this->optionalFreeTextField($data, 'username', 'declared_username');
+            if ($username === null) {
+                throw new InvalidArgumentException('Username is required.');
+            }
             $attributes['username'] = $username;
             $attributes['declared_username'] = $username;
+        } elseif ($touchesEmail) {
+            // Legacy: email-only update carries the free-text login identifier.
+            $legacyLogin = $this->optionalFreeTextField($data, 'email', 'declared_email');
+            if ($legacyLogin === null) {
+                throw new InvalidArgumentException('Username is required.');
+            }
+            $attributes['username'] = $legacyLogin;
+            $attributes['declared_username'] = $legacyLogin;
+            $attributes['email'] = null;
+            $attributes['declared_email'] = null;
         }
 
-        if (array_key_exists('email', $data) || array_key_exists('declared_email', $data)) {
-            $e = $data['email'] ?? $data['declared_email'] ?? null;
-            $email = $e !== null && trim((string) $e) !== '' ? trim((string) $e) : null;
-            if ($email === null || filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
-                throw new InvalidArgumentException('Email is required.');
-            }
+        if ($touchesEmail && $touchesUsername) {
+            // Optional email alongside explicit username — free text, no format check.
+            $email = $this->optionalFreeTextField($data, 'email', 'declared_email');
             $attributes['email'] = $email;
             $attributes['declared_email'] = $email;
         }
@@ -152,6 +173,17 @@ final class SaAccountService
         if (array_key_exists('note', $data)) {
             $note = $data['note'] !== null && trim((string) $data['note']) !== '' ? trim((string) $data['note']) : null;
             $attributes['note'] = $note;
+        }
+
+        // Password update contract:
+        // - omitted → preserve
+        // - empty/whitespace → preserve (never silent erase)
+        // - non-empty → replace encrypted value
+        if (array_key_exists('password', $data)) {
+            $password = trim((string) $data['password']);
+            if ($password !== '') {
+                $attributes['encrypted_password'] = $this->encryptPassword($password);
+            }
         }
 
         if ($attributes === []) {
@@ -217,6 +249,27 @@ final class SaAccountService
             } catch (\Throwable) {
                 return null;
             }
+        }
+
+        return null;
+    }
+
+    /**
+     * Optional free-text field (no email-format enforcement).
+     *
+     * @param  array<string, mixed>  $data
+     */
+    private function optionalFreeTextField(array $data, string $primary, string $alias): ?string
+    {
+        if (array_key_exists($primary, $data)) {
+            $value = trim((string) ($data[$primary] ?? ''));
+
+            return $value !== '' ? $value : null;
+        }
+        if (array_key_exists($alias, $data)) {
+            $value = trim((string) ($data[$alias] ?? ''));
+
+            return $value !== '' ? $value : null;
         }
 
         return null;

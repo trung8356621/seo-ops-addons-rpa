@@ -40,7 +40,7 @@ final class SocialAutomationAccountsPage extends Page
 
     public string $name = '';
 
-    public string $email = '';
+    public string $username = '';
 
     public string $site_url = '';
 
@@ -119,10 +119,10 @@ final class SocialAutomationAccountsPage extends Page
             return;
         }
 
-        $email = trim($this->email);
-        if ($email === '') {
+        $username = trim($this->username);
+        if ($username === '') {
             Notification::make()
-                ->title('Email là bắt buộc.')
+                ->title('Username là bắt buộc.')
                 ->danger()
                 ->send();
 
@@ -134,7 +134,7 @@ final class SocialAutomationAccountsPage extends Page
         app(SaAccountService::class)->create([
             'platform' => $this->platform,
             'name' => $name,
-            'email' => $email,
+            'username' => $username,
             'site_url' => trim($this->site_url) !== '' ? trim($this->site_url) : null,
             'note' => $this->note,
         ], $userId);
@@ -162,7 +162,8 @@ final class SocialAutomationAccountsPage extends Page
         $this->editingAccountId = $id;
         $this->platform = (string) $account->getAttribute('platform');
         $this->name = $account->getAccountName();
-        $this->email = (string) ($account->getDisplayEmail() ?? '');
+        // Prefer username; fall back to legacy email-only rows for edit compatibility.
+        $this->username = (string) ($account->getDisplayUsername() ?? $account->getDisplayEmail() ?? '');
         $this->site_url = (string) ($account->getSiteUrl() ?? '');
         $this->note = (string) ($account->getAttribute('note') ?? '');
 
@@ -193,10 +194,10 @@ final class SocialAutomationAccountsPage extends Page
             return;
         }
 
-        $email = trim($this->email);
-        if ($email === '') {
+        $username = trim($this->username);
+        if ($username === '') {
             Notification::make()
-                ->title('Email là bắt buộc.')
+                ->title('Username là bắt buộc.')
                 ->danger()
                 ->send();
 
@@ -206,7 +207,7 @@ final class SocialAutomationAccountsPage extends Page
         $payload = [
             'platform' => $this->platform,
             'name' => $name,
-            'email' => $email,
+            'username' => $username,
             'site_url' => trim($this->site_url) !== '' ? trim($this->site_url) : null,
             'note' => $this->note,
         ];
@@ -295,7 +296,7 @@ final class SocialAutomationAccountsPage extends Page
         $this->editingAccountId = null;
         $this->platform = 'Facebook';
         $this->name = '';
-        $this->email = '';
+        $this->username = '';
         $this->site_url = '';
         $this->password = '';
         $this->password_confirmation = '';
