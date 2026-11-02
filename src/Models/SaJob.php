@@ -16,8 +16,10 @@ final class SaJob extends Model
     protected $table = 'sa_jobs';
 
     protected $fillable = [
-        'job_uuid', 'task_id', 'schedule_trigger_id', 'agent_id', 'browser_session_id', 'account_id',
+        'job_uuid', 'task_id', 'campaign_id', 'campaign_content_id', 'schedule_trigger_id',
+        'agent_id', 'browser_session_id', 'account_id',
         'package_key', 'package_version', 'content_digest', 'status', 'idempotency_key',
+        'lease_token', 'fencing_generation',
         'payload', 'result', 'error_code', 'error_message',
         'reserved_at', 'claimed_at', 'lease_expires_at', 'started_at', 'finished_at',
         'duration_ms', 'dispatch_source',
@@ -34,6 +36,9 @@ final class SaJob extends Model
             'started_at' => 'datetime',
             'finished_at' => 'datetime',
             'duration_ms' => 'integer',
+            'campaign_id' => 'integer',
+            'campaign_content_id' => 'integer',
+            'fencing_generation' => 'integer',
         ];
     }
 

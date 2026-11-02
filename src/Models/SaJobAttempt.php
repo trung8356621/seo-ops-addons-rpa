@@ -15,16 +15,24 @@ final class SaJobAttempt extends Model
     protected $table = 'sa_job_attempts';
 
     protected $fillable = [
-        'attempt_uuid', 'job_id', 'attempt_no', 'status', 'started_at', 'finished_at', 'result', 'error_code',
+        'attempt_uuid', 'lease_token', 'job_id', 'attempt_no', 'fencing_generation', 'status',
+        'agent_id', 'browser_session_id', 'account_id',
+        'started_at', 'finished_at', 'lease_expires_at', 'result', 'progress', 'error_code', 'error_message',
     ];
 
     protected function casts(): array
     {
         return [
             'result' => 'array',
+            'progress' => 'array',
             'attempt_no' => 'integer',
+            'fencing_generation' => 'integer',
+            'agent_id' => 'integer',
+            'browser_session_id' => 'integer',
+            'account_id' => 'integer',
             'started_at' => 'datetime',
             'finished_at' => 'datetime',
+            'lease_expires_at' => 'datetime',
         ];
     }
 

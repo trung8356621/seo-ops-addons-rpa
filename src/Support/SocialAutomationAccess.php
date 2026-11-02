@@ -149,6 +149,22 @@ class SocialAutomationAccess
         return false;
     }
 
+    /**
+     * Campaign CRUD / lifecycle / content admin actions — Owner/Admin only.
+     * Staff cannot create or modify Campaigns by default.
+     */
+    public function canManageCampaigns(?User $user = null): bool
+    {
+        return $this->canManageAccounts($user);
+    }
+
+    public function assertCanManageCampaigns(?User $user = null): void
+    {
+        if (! $this->canManageCampaigns($user)) {
+            $this->abort403();
+        }
+    }
+
     public function assertCanAccess(?User $user = null): void
     {
         if (! $this->canAccess($user)) {

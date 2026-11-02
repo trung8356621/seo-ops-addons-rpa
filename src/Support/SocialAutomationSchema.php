@@ -32,4 +32,12 @@ final class SocialAutomationSchema
     {
         return self::has('sa_schedules') && self::has('sa_schedule_triggers');
     }
+
+    public static function campaignsReady(): bool
+    {
+        return self::has('sa_campaigns')
+            && self::has('sa_campaign_contents')
+            && self::has('sa_campaign_account_assignments')
+            && self::jobsReady();
+    }
 }

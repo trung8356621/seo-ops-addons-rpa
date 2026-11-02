@@ -368,19 +368,31 @@ final class RpaClientApiController extends Controller
         if ($auth instanceof JsonResponse) {
             return $auth;
         }
-        $account = $auth;
 
         return new JsonResponse([
             'ok' => true,
-            'account' => [
-                'account_id' => (string) ($account->account_uuid ?? $account->id),
-                'platform' => strtolower((string) $account->platform),
-                'display_name' => $account->getAccountName(),
-                'email' => $account->getDisplayEmail(),
-                'site_url' => $this->siteUrlResolver()->resolveForAccount($account),
-                'password_status' => $account->hasPassword() ? 'available' : 'not_set',
-            ],
+            'account' => $this->serializeClientAccountDetail($auth),
         ]);
+    }
+
+    /**
+     * Client Account detail payload. Matches list username semantics.
+     * Never includes plaintext/encrypted password.
+     *
+     * @return array<string, mixed>
+     */
+    public function serializeClientAccountDetail(SaAccount $account): array
+    {
+        return [
+            'account_id' => (string) ($account->account_uuid ?? $account->id),
+            'platform' => strtolower((string) $account->platform),
+            'display_name' => $account->getAccountName(),
+            'username' => $account->username ?? $account->declared_username,
+            'email' => $account->getDisplayEmail(),
+            'site_url' => $this->siteUrlResolver()->resolveForAccount($account),
+            'has_password' => $account->hasPassword(),
+            'password_status' => $account->hasPassword() ? 'available' : 'not_set',
+        ];
     }
 
     private function siteUrlResolver(): AccountSiteUrlResolver

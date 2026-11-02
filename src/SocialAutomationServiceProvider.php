@@ -42,7 +42,12 @@ use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureRpaClientApiKey;
 use Omnichannel\Addons\SocialAutomation\Services\AuthScriptService;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureSocialAutomationDocsAccess;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\RenderRpaAdminRateLimitJson;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\ClientCampaignJobController;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\StaffCampaignContentController;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\StaffCampaignController;
+use Omnichannel\Addons\SocialAutomation\Orchestration\CampaignOrchestrator;
 use Omnichannel\Addons\SocialAutomation\Orchestration\JobOrchestrator;
+use Omnichannel\Addons\SocialAutomation\Services\CampaignService;
 use Omnichannel\Addons\SocialAutomation\PackageRegistry\PackagePublishValidator;
 use Omnichannel\Addons\SocialAutomation\PackageRegistry\PackageRegistryService;
 use Omnichannel\Addons\SocialAutomation\PackageRegistry\ScriptCatalogService;
@@ -97,6 +102,8 @@ final class SocialAutomationServiceProvider extends ServiceProvider
         $this->app->singleton(SessionSyncService::class);
         $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\ClientNotificationService::class);
         $this->app->singleton(JobOrchestrator::class);
+        $this->app->singleton(CampaignOrchestrator::class);
+        $this->app->singleton(CampaignService::class);
         $this->app->singleton(ScheduleDispatcher::class);
         $this->app->singleton(DashboardMetrics::class);
         $this->app->singleton(RpaClientApiKeyGenerator::class);
@@ -342,6 +349,43 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                 Route::get('/api/browsers', [SocialAutomationBrowserInventoryController::class, 'index'])
                     ->name('social-automation.browsers.index');
 
+                // CP19A: Campaign CRUD + lifecycle (Owner/Admin session + CSRF)
+                Route::prefix('api/campaigns')->group(function (): void {
+                    Route::get('/', [StaffCampaignController::class, 'index'])
+                        ->name('social-automation.campaigns.index');
+                    Route::post('/', [StaffCampaignController::class, 'store'])
+                        ->name('social-automation.campaigns.store');
+                    Route::get('/{id}', [StaffCampaignController::class, 'show'])
+                        ->whereUuid('id')
+                        ->name('social-automation.campaigns.show');
+                    Route::put('/{id}', [StaffCampaignController::class, 'update'])
+                        ->whereUuid('id')
+                        ->name('social-automation.campaigns.update');
+                    Route::post('/{id}/start', [StaffCampaignController::class, 'start'])
+                        ->whereUuid('id')
+                        ->name('social-automation.campaigns.start');
+                    Route::post('/{id}/pause', [StaffCampaignController::class, 'pause'])
+                        ->whereUuid('id')
+                        ->name('social-automation.campaigns.pause');
+                    Route::post('/{id}/resume', [StaffCampaignController::class, 'resume'])
+                        ->whereUuid('id')
+                        ->name('social-automation.campaigns.resume');
+                    Route::post('/{id}/cancel', [StaffCampaignController::class, 'cancel'])
+                        ->whereUuid('id')
+                        ->name('social-automation.campaigns.cancel');
+                });
+                Route::prefix('api/campaign-contents')->group(function (): void {
+                    Route::post('/{id}/retry', [StaffCampaignContentController::class, 'retry'])
+                        ->whereUuid('id')
+                        ->name('social-automation.campaign-contents.retry');
+                    Route::post('/{id}/skip', [StaffCampaignContentController::class, 'skip'])
+                        ->whereUuid('id')
+                        ->name('social-automation.campaign-contents.skip');
+                    Route::post('/{id}/cancel', [StaffCampaignContentController::class, 'cancel'])
+                        ->whereUuid('id')
+                        ->name('social-automation.campaign-contents.cancel');
+                });
+
                 Route::post('/api/clients/sessions/{sessionId}/notifications', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ClientManagementController::class, 'notify'])
                     ->whereNumber('sessionId')->name('social-automation.clients.notifications.store');
             });
@@ -391,6 +435,19 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     Route::post('/auth/pull', [RpaClientApiController::class, 'pullAuthScript'])
                         ->name('social-automation.client.auth.pull');
                 });
+
+                // CP19A: Client campaign job claim/ack/progress/result (Client API Key only)
+                Route::post('/jobs/claim', [ClientCampaignJobController::class, 'claim'])
+                    ->name('social-automation.client.jobs.claim');
+                Route::post('/jobs/{id}/ack', [ClientCampaignJobController::class, 'ack'])
+                    ->whereUuid('id')
+                    ->name('social-automation.client.jobs.ack');
+                Route::post('/jobs/{id}/progress', [ClientCampaignJobController::class, 'progress'])
+                    ->whereUuid('id')
+                    ->name('social-automation.client.jobs.progress');
+                Route::post('/jobs/{id}/result', [ClientCampaignJobController::class, 'result'])
+                    ->whereUuid('id')
+                    ->name('social-automation.client.jobs.result');
             });
 
         // RPA Admin user auth + Script sync (not Runner service_api_credentials).

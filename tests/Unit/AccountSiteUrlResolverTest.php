@@ -215,14 +215,46 @@ final class AccountSiteUrlResolverTest extends TestCase
         self::assertArrayNotHasKey('encrypted_password', $map['FB Seeding']);
         self::assertTrue($map['FB Seeding']['has_password']);
 
-        // Same URL on detail GET
-        $detailReq = Request::create('/api/v1/social-automation/client/accounts/'.$wp->account_uuid, 'GET');
-        $detailReq->attributes->set(EnsureRpaClientApiKey::REQUEST_CLIENT_KEY, $key);
-        // getAccount uses Eloquent authorizeAccount — force via resolve on list item instead
-        self::assertSame(
-            'https://portal.domain.com/cms',
-            $this->resolver->resolveForAccount($wp)
-        );
+        // Detail serializer matches list username/site_url; never exposes secrets.
+        $detail = $this->controller->serializeClientAccountDetail($wp);
+        self::assertSame($map['WP Subdir']['username'], $detail['username']);
+        self::assertSame($map['WP Subdir']['site_url'], $detail['site_url']);
+        self::assertSame($map['WP Subdir']['has_password'], $detail['has_password']);
+        self::assertArrayNotHasKey('password', $detail);
+        self::assertArrayNotHasKey('encrypted_password', $detail);
+        self::assertSame('not_set', $detail['password_status']);
+    }
+
+    public function test_list_and_detail_return_same_username_for_mayhopphat(): void
+    {
+        $account = $this->accountService->create([
+            'platform' => 'mayhopphat',
+            'name' => 'mayhopphat',
+            'username' => 'mayhopphat',
+            'password' => 'SecretPass!',
+        ]);
+
+        $key = new SaClientApiKey;
+        $key->id = 1;
+        $key->setAttribute('installation_id', 'ins_alpha');
+        $request = Request::create('/api/v1/social-automation/client/accounts', 'GET');
+        $request->attributes->set(EnsureRpaClientApiKey::REQUEST_CLIENT_KEY, $key);
+
+        $list = $this->controller->listBindableAccounts($request)->getData(true);
+        $listItem = collect($list['accounts'])->firstWhere('account_id', (string) $account->account_uuid);
+        self::assertIsArray($listItem);
+        self::assertSame('mayhopphat', $listItem['username']);
+
+        $detail = $this->controller->serializeClientAccountDetail($account);
+        self::assertSame($listItem['username'], $detail['username']);
+        self::assertSame($listItem['display_name'], $detail['display_name']);
+        self::assertSame($listItem['platform'], $detail['platform']);
+        self::assertSame($listItem['has_password'], $detail['has_password']);
+        self::assertTrue($detail['has_password']);
+        self::assertSame('available', $detail['password_status']);
+        self::assertNull($detail['email']);
+        self::assertArrayNotHasKey('password', $detail);
+        self::assertArrayNotHasKey('encrypted_password', $detail);
     }
 
     public function test_wrong_installation_cannot_list_foreign_accounts(): void

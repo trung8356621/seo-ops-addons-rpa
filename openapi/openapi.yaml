@@ -1,9 +1,19 @@
 openapi: 3.0.3
 info:
   title: Social Automation API
-  version: 0.2.0
+  version: 0.3.0
   description: |
     HTTP API for the Social Automation addon (RPA control plane, package registry, clients, runners, staff UI).
+
+    **CP19A/CP19B Campaign V1**
+    - Staff Owner/Admin session: `/social-automation/api/campaigns` + `/campaign-contents/{id}/retry|skip|cancel`
+    - Client API Key: `/api/v1/social-automation/client/jobs/claim|ack|progress|result`
+    - Global account execution lock (installation-scoped account_id) + lease_token fencing
+    - `execution_mode`: `one_account_one_job` | `one_account_many_jobs`
+    - `run_mode`: `test` | `live` (independent; default `live`)
+    - Test Mode requires explicitly test-compatible Scripts; not a security sandbox; screenshot ≠ publish proof
+    - Resource shortage → `waiting_resources` + durable `next_recheck_at` (default 3600s); NEVER auto job retry
+
 
     **Error envelopes**
     - Most business endpoints return `{ "ok": false, "errors": ["code"] }` with stable HTTP status (401/403/404/409/422/503).
@@ -749,6 +759,130 @@ components:
           format: date-time
           nullable: true
 
+    CampaignCreateRequest:
+      type: object
+      required: [name, platform, execution_mode, script_id, contents]
+      properties:
+        name: { type: string }
+        platform: { type: string }
+        run_mode:
+          type: string
+          enum: [test, live]
+          default: live
+          description: |
+            Independent of execution_mode. Test Mode is NOT a security sandbox.
+            Requires an explicitly test-compatible Script (manifest markers + stop-before-publish + screenshot terminal).
+            Scripts without reliable publish-stop markers are rejected (fail closed).
+        execution_mode:
+          type: string
+          enum: [one_account_one_job, one_account_many_jobs]
+        script_id: { type: string }
+        script_version: { type: string }
+        resource_recheck_seconds:
+          type: integer
+          default: 3600
+          description: Durable resource recheck interval (not job retry)
+        contents:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            properties:
+              external_ref: { type: string }
+              input:
+                type: object
+                additionalProperties: true
+                description: Placeholder-safe script input; plaintext secrets rejected
+
+    CampaignSummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        platform: { type: string }
+        run_mode:
+          type: string
+          enum: [test, live]
+        execution_mode:
+          type: string
+          enum: [one_account_one_job, one_account_many_jobs]
+        status:
+          type: string
+          enum: [draft, running, paused, cancelled, completed]
+        script_id: { type: string }
+        script_version: { type: string }
+        resource_recheck_seconds: { type: integer }
+        total_contents: { type: integer }
+        completed_contents: { type: integer }
+        failed_contents: { type: integer }
+        waiting_contents: { type: integer }
+        next_recheck_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    CampaignDetail:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        platform: { type: string }
+        status: { type: string }
+        run_mode:
+          type: string
+          enum: [test, live]
+        execution_mode: { type: string }
+        script_id: { type: string }
+        script_version: { type: string }
+        resource_recheck_seconds: { type: integer }
+        summary:
+          type: object
+          properties:
+            total: { type: integer }
+            pending: { type: integer }
+            waiting_resources: { type: integer }
+            running: { type: integer }
+            success: { type: integer }
+            failed_locked: { type: integer }
+            unknown: { type: integer }
+            skipped: { type: integer }
+            cancelled: { type: integer }
+        next_recheck_at:
+          type: string
+          format: date-time
+          nullable: true
+        contents:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+
+    CampaignJobClaim:
+      type: object
+      description: Claim payload — no plaintext credentials
+      properties:
+        job_id: { type: string }
+        attempt_id: { type: string }
+        campaign_id: { type: string }
+        content_id: { type: string }
+        browser_id: { type: string }
+        account_id: { type: string }
+        script_id: { type: string }
+        script_version: { type: string }
+        run_mode:
+          type: string
+          enum: [test, live]
+        execution_mode:
+          type: string
+          enum: [one_account_one_job, one_account_many_jobs]
+        input:
+          type: object
+          additionalProperties: true
+        lease_token: { type: string }
+        lease_expires_at:
+          type: string
+          format: date-time
+
     AccountDetailSuccess:
       allOf:
         - $ref: '#/components/schemas/OkTrue'
@@ -756,14 +890,22 @@ components:
           properties:
             account:
               type: object
+              required: [account_id, platform, display_name, username, has_password, password_status]
               properties:
                 account_id:
                   type: string
+                  description: Canonical Account UUID (same as list account_id)
                 platform:
                   type: string
                   description: Canonical platform / Site Registry site_key
                 display_name:
                   type: string
+                username:
+                  type: string
+                  nullable: true
+                  description: |
+                    Free-text Social Account login identifier.
+                    Same semantics as GET /client/accounts list `username`.
                 email:
                   type: string
                   nullable: true
@@ -774,6 +916,9 @@ components:
                     Resolved from Site Registry base_url for Account.platform (site_key).
                     Null when Site URL is not configured. Used by Electron Browser URL resolver.
                     Same resolution policy as bindable Account inventory.
+                has_password:
+                  type: boolean
+                  description: True when a password is stored encrypted; never exposes the secret
                 password_status:
                   type: string
                   enum: [available, not_set]
@@ -3932,3 +4077,444 @@ paths:
                 additionalProperties: true
         '422':
           $ref: '#/components/responses/ValidationError'
+
+  # ─── CP19A Campaign V1 ─────────────────────────────────────────────────────
+  /social-automation/api/campaigns:
+    get:
+      tags: [Staff Session]
+      summary: List campaigns (installation-scoped)
+      operationId: staffCampaignsIndex
+      security:
+        - SeoOpsSessionCookie: []
+      responses:
+        '200':
+          description: Campaign summaries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/CampaignSummary' }
+    post:
+      tags: [Staff Session]
+      summary: Create campaign (Owner/Admin only)
+      description: |
+        Creates a draft Campaign with Contents. `execution_mode` is immutable after start.
+        Content `input` may use placeholders such as `{account.username}` / `{account.password}`;
+        plaintext passwords are rejected. Credentials are never persisted resolved —
+        Electron retrieves them via the Browser-bound credential API.
+      operationId: staffCampaignsStore
+      security:
+        - SeoOpsSessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CampaignCreateRequest'
+            example:
+              name: Threads Campaign Test
+              platform: threads
+              run_mode: test
+              execution_mode: one_account_many_jobs
+              script_id: TEST_SCRIPT_ID
+              resource_recheck_seconds: 3600
+              contents:
+                - external_ref: test-001
+                  input:
+                    title: Test Content 01
+                    content: Mock content
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/CampaignSummary' }
+              example:
+                ok: true
+                data:
+                  id: CAMPAIGN_ID
+                  name: Threads Campaign Test
+                  platform: threads
+                  run_mode: test
+                  execution_mode: one_account_many_jobs
+                  status: draft
+                  script_id: TEST_SCRIPT_ID
+                  resource_recheck_seconds: 3600
+                  total_contents: 1
+                  completed_contents: 0
+                  failed_contents: 0
+                  waiting_contents: 1
+        '403':
+          description: Staff forbidden (Owner/Admin required)
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /social-automation/api/campaigns/{id}:
+    get:
+      tags: [Staff Session]
+      summary: Campaign detail with content summary
+      operationId: staffCampaignsShow
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/CampaignDetail' }
+              example:
+                ok: true
+                data:
+                  id: CAMPAIGN_ID
+                  status: running
+                  run_mode: test
+                  execution_mode: one_account_many_jobs
+                  summary:
+                    total: 10
+                    pending: 3
+                    waiting_resources: 4
+                    running: 1
+                    success: 1
+                    failed_locked: 1
+                    unknown: 0
+                  next_recheck_at: '2026-11-02T12:00:00+00:00'
+                  contents: []
+        '404':
+          description: Not found
+    put:
+      tags: [Staff Session]
+      summary: Update draft campaign (limited fields after start)
+      operationId: staffCampaignsUpdate
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Updated
+        '403':
+          description: Forbidden
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /social-automation/api/campaigns/{id}/start:
+    post:
+      tags: [Staff Session]
+      summary: Start campaign dispatch
+      operationId: staffCampaignsStart
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Running; eligible contents dispatched; shortfall → waiting_resources + next_recheck_at
+
+  /social-automation/api/campaigns/{id}/pause:
+    post:
+      tags: [Staff Session]
+      summary: Pause campaign (stops future dispatch/recheck)
+      operationId: staffCampaignsPause
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Paused
+
+  /social-automation/api/campaigns/{id}/resume:
+    post:
+      tags: [Staff Session]
+      summary: Resume paused campaign
+      operationId: staffCampaignsResume
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Resumed
+
+  /social-automation/api/campaigns/{id}/cancel:
+    post:
+      tags: [Staff Session]
+      summary: Cancel campaign (stops dispatch; pending/waiting → cancelled)
+      operationId: staffCampaignsCancel
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Cancelled
+
+  /social-automation/api/campaign-contents/{id}/retry:
+    post:
+      tags: [Staff Session]
+      summary: Admin retry failed_locked/unknown content (creates NEW attempt; no auto-retry)
+      operationId: staffCampaignContentsRetry
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: New pending content queued for dispatch under global account lock
+        '403':
+          description: Owner/Admin only
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /social-automation/api/campaign-contents/{id}/skip:
+    post:
+      tags: [Staff Session]
+      summary: Admin skip content (preserves audit history)
+      operationId: staffCampaignContentsSkip
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Skipped
+
+  /social-automation/api/campaign-contents/{id}/cancel:
+    post:
+      tags: [Staff Session]
+      summary: Admin cancel content
+      operationId: staffCampaignContentsCancel
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Cancelled
+
+  /api/v1/social-automation/client/jobs/claim:
+    post:
+      tags: [RPA Client]
+      summary: Claim next reserved campaign job for agent/browsers
+      description: |
+        Auth Bearer Client API Key only (never staff session cookies).
+        Returns `data: null` when no job. Lease fencing via lease_token + attempt_id.
+        Never returns plaintext account credentials in job input.
+      operationId: clientJobsClaim
+      security:
+        - RpaClientApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_uuid, browser_ids]
+              properties:
+                agent_uuid: { type: string, format: uuid }
+                browser_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+            example:
+              agent_uuid: AGENT_UUID
+              browser_ids: [BROWSER_UUID]
+      responses:
+        '200':
+          description: Claimed job or null
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    oneOf:
+                      - type: 'null'
+                      - $ref: '#/components/schemas/CampaignJobClaim'
+              examples:
+                empty:
+                  value: { ok: true, data: null }
+                claimed:
+                  value:
+                    ok: true
+                    data:
+                      job_id: JOB_ID
+                      attempt_id: ATTEMPT_ID
+                      campaign_id: CAMPAIGN_ID
+                      content_id: CONTENT_ID
+                      browser_id: BROWSER_UUID
+                      account_id: ACCOUNT_UUID
+                      script_id: SCRIPT_ID
+                      script_version: VERSION
+                      run_mode: test
+                      execution_mode: one_account_many_jobs
+                      input: {}
+                      lease_token: OPAQUE_LEASE_TOKEN
+                      lease_expires_at: '2026-11-02T12:05:00+00:00'
+        '403':
+          description: Agent not owned by this Client API Key / installation
+
+  /api/v1/social-automation/client/jobs/{id}/ack:
+    post:
+      tags: [RPA Client]
+      summary: Acknowledge claimed campaign job (start execution)
+      operationId: clientJobsAck
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [attempt_id, lease_token]
+              properties:
+                attempt_id: { type: string }
+                lease_token: { type: string }
+      responses:
+        '200':
+          description: Running
+        '409':
+          description: Stale lease_token / attempt fence
+
+  /api/v1/social-automation/client/jobs/{id}/progress:
+    post:
+      tags: [RPA Client]
+      summary: Progress heartbeat (extends lease)
+      operationId: clientJobsProgress
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [attempt_id, lease_token]
+              properties:
+                attempt_id: { type: string }
+                lease_token: { type: string }
+                message: { type: string }
+                percent: { type: number }
+                step: { type: string }
+      responses:
+        '200':
+          description: Progress recorded
+        '409':
+          description: Stale lease
+
+  /api/v1/social-automation/client/jobs/{id}/result:
+    post:
+      tags: [RPA Client]
+      summary: Submit terminal result (idempotent for same lease)
+      description: |
+        Confirmed failure → Content `failed_locked` (NO automatic retry).
+        Stale/late lease rejected (409). Unknown outcomes require Admin review.
+      operationId: clientJobsResult
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [attempt_id, lease_token, status]
+              properties:
+                attempt_id: { type: string }
+                lease_token: { type: string }
+                status:
+                  type: string
+                  enum: [succeeded, failed, cancelled, unknown]
+                output:
+                  type: object
+                  additionalProperties: true
+                error:
+                  type: object
+                  nullable: true
+                  additionalProperties: true
+            example:
+              attempt_id: ATTEMPT_ID
+              lease_token: OPAQUE_LEASE_TOKEN
+              status: succeeded
+              output: {}
+              error: null
+              artifacts:
+                - kind: screenshot
+                  artifact_uuid: ARTIFACT_UUID
+                  mime: image/png
+                  checksum_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+                  metadata:
+                    phase: final
+                    intent: pre_publish_stop
+      responses:
+        '200':
+          description: |
+            Terminal result accepted (or idempotent duplicate).
+            Screenshot artifact refs are linked to the attempt; they do NOT prove publication
+            or non-publication. Client `did_not_publish` flags are rejected as untrusted claims.
+        '409':
+          description: Stale lease / fence mismatch — late result cannot overwrite newer result
+
