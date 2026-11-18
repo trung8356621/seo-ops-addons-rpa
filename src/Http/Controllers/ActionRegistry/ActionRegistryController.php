@@ -82,11 +82,11 @@ final class ActionRegistryController
 
             $siteKey = $t->site_key ?: $t->platform;
             $pathKey = $t->path_key ?: $t->target;
-            $actionKey = $t->action_key ?: $t->action;
+            $actionKey = $t->resolvedActionKey();
 
             $siteName = $t->site?->name ?? ucfirst((string) $siteKey);
             $pathName = $t->path?->name ?? ucfirst((string) $pathKey);
-            $actionName = $t->actionDefinition?->name ?? ucfirst((string) $actionKey);
+            $actionName = $t->actionDefinition?->name ?? ($actionKey !== null ? ucfirst($actionKey) : null);
 
             $hasAuthCols = Schema::connection($conn)->hasColumn('sa_action_tags', 'auth_script_id');
 
@@ -314,32 +314,46 @@ final class ActionRegistryController
 
         $siteId = (int) $request->input('site_id');
         $pathId = (int) $request->input('path_id');
-        $actionKey = strtolower(trim((string) $request->input('action_key', '')));
+        $rawActionKey = $request->input('action_key');
+        $actionKey = $rawActionKey !== null ? strtolower(trim((string) $rawActionKey)) : '';
+        $hasActionKey = $actionKey !== '';
 
         // Security check: like/share not permitted in V1
-        if (in_array($actionKey, ['like', 'share'], true)) {
+        if ($hasActionKey && in_array($actionKey, ['like', 'share'], true)) {
             return response()->json(['ok' => false, 'error' => 'Hành động like/share chưa được hỗ trợ.'], 422);
         }
 
         $site = SaSite::query()->find($siteId);
         $path = SaPath::query()->find($pathId);
-        $action = SaAction::query()->where('key', $actionKey)->first();
+        $action = $hasActionKey ? SaAction::query()->where('key', $actionKey)->first() : null;
 
-        if (! $site || ! $path || ! $action) {
-            return response()->json(['ok' => false, 'error' => 'Site, Path hoặc Action không hợp lệ.'], 422);
+        if (! $site || ! $path || ($hasActionKey && ! $action)) {
+            return response()->json([
+                'ok' => false,
+                'error' => $hasActionKey
+                    ? 'Site, Path hoặc Action không hợp lệ.'
+                    : 'Site hoặc Path không hợp lệ.',
+            ], 422);
         }
 
         if ((int) $path->site_id !== (int) $site->id) {
             return response()->json(['ok' => false, 'error' => 'Path không thuộc Site đã chọn.'], 422);
         }
 
-        $tagKey = SaActionTag::buildKey($site->key, $path->key, $action->key);
+        $tagKey = $action
+            ? SaActionTag::buildKey($site->key, $path->key, $action->key)
+            : SaActionTag::buildKey($site->key, $path->key);
 
         if (SaActionTag::query()->where('tag_key', $tagKey)->exists()) {
             return response()->json(['ok' => false, 'error' => "Action Tag [{$tagKey}] đã tồn tại."], 422);
         }
 
-        $displayName = "{$site->name} {$path->name} {$action->name}";
+        $displayName = $action
+            ? "{$site->name} {$path->name} {$action->name}"
+            : "{$site->name} {$path->name}";
+        $description = $action
+            ? "Thao tác {$action->name} tại {$site->name} {$path->name}"
+            : "Thao tác tại {$site->name} {$path->name}";
         $conn = SocialAutomationServiceConfig::CONNECTION;
         $authScriptId = $request->has('auth_script_id') ? (int) $request->input('auth_script_id') : null;
         $authReleaseId = $request->has('auth_release_id') ? (int) $request->input('auth_release_id') : null;
@@ -352,6 +366,7 @@ final class ActionRegistryController
                 $path,
                 $action,
                 $displayName,
+                $description,
                 $wantsAuthPin,
                 $authScriptId,
                 $authReleaseId,
@@ -367,13 +382,13 @@ final class ActionRegistryController
                     'site_key' => $site->key,
                     'path_id' => $path->id,
                     'path_key' => $path->key,
-                    'action_id' => $action->id,
-                    'action_key' => $action->key,
+                    'action_id' => $action?->id,
+                    'action_key' => $action?->key,
                     'platform' => $site->key,
                     'target' => $path->key,
-                    'action' => $action->key,
+                    'action' => $action?->key ?? '',
                     'name' => $displayName,
-                    'description' => "Thao tác {$action->name} tại {$site->name} {$path->name}",
+                    'description' => $description,
                 ]);
 
                 if ($wantsAuthPin) {
@@ -400,7 +415,7 @@ final class ActionRegistryController
                     'path_key' => $path->key,
                     'url_pattern' => $path->url_pattern,
                     'path_inputs' => $path->path_inputs,
-                    'action_key' => $action->key,
+                    'action_key' => $action?->key,
                     'request_type' => SaScriptRequest::TYPE_CREATE,
                     'status' => SaScriptRequest::STATUS_PENDING,
                     'created_by_user_id' => is_numeric($userId) ? (int) $userId : null,
@@ -580,7 +595,7 @@ final class ActionRegistryController
                 DB::connection($conn)->transaction(function () use ($tag, &$created) {
                     $site = $tag->site;
                     $path = $tag->path;
-                    $actionKey = $tag->action_key ?: $tag->action;
+                    $actionKey = $tag->resolvedActionKey();
 
                     SaScriptRequest::query()->create([
                         'request_id' => 'req_'.bin2hex(random_bytes(6)),
@@ -640,7 +655,7 @@ final class ActionRegistryController
             'path_key' => $tag->path_key ?: $tag->target,
             'url_pattern' => $path?->url_pattern,
             'path_inputs' => $path?->path_inputs,
-            'action_key' => $tag->action_key ?: $tag->action,
+            'action_key' => $tag->resolvedActionKey(),
             'request_type' => $type,
             'status' => SaScriptRequest::STATUS_PENDING,
             'script_id' => $scriptId !== '' ? $scriptId : null,

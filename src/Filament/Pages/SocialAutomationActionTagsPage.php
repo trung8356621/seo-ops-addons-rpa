@@ -120,11 +120,11 @@ final class SocialAutomationActionTagsPage extends Page
 
             $siteKey = $t->site_key ?: $t->platform;
             $pathKey = $t->path_key ?: $t->target;
-            $actionKey = $t->action_key ?: $t->action;
+            $actionKey = $t->resolvedActionKey();
 
             $siteName = $t->site?->name ?? ucfirst((string) $siteKey);
             $pathName = $t->path?->name ?? ucfirst((string) $pathKey);
-            $actionName = $t->actionDefinition?->name ?? ucfirst((string) $actionKey);
+            $actionName = $t->actionDefinition?->name ?? ($actionKey !== null ? ucfirst($actionKey) : null);
 
             return [
                 'id' => (int) $t->id,

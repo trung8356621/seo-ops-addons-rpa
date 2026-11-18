@@ -37,26 +37,52 @@ class SaActionTag extends Model
                 $tag->path_key = $tag->target;
             }
 
-            if (! empty($tag->action_key) && empty($tag->action)) {
-                $tag->action = $tag->action_key;
-            } elseif (! empty($tag->action) && empty($tag->action_key)) {
-                $tag->action_key = $tag->action;
+            $actionKey = $tag->action_key !== null ? trim((string) $tag->action_key) : '';
+            $tag->action_key = $actionKey !== '' ? $actionKey : null;
+
+            $legacyAction = $tag->action !== null ? trim((string) $tag->action) : '';
+            if ($actionKey !== '' && $legacyAction === '') {
+                $tag->action = $actionKey;
+            } elseif ($legacyAction !== '' && $actionKey === '') {
+                $tag->action_key = $legacyAction;
+            } elseif ($tag->action === null) {
+                // sa_action_tags.action is NOT NULL in base schema; keep empty string for two-part tags.
+                $tag->action = '';
             }
 
-            if (empty($tag->tag_key) && ! empty($tag->site_key) && ! empty($tag->path_key) && ! empty($tag->action_key)) {
+            if (empty($tag->tag_key) && ! empty($tag->site_key) && ! empty($tag->path_key)) {
                 $tag->tag_key = self::buildKey($tag->site_key, $tag->path_key, $tag->action_key);
             }
         });
     }
 
     /**
-     * Build stable reference key from site, path, and action keys.
+     * Resolve effective action_key (null for two-part Site + Path tags).
      */
-    public static function buildKey(string $site, string $path, string $action): string
+    public function resolvedActionKey(): ?string
+    {
+        $actionKey = $this->action_key !== null ? trim((string) $this->action_key) : '';
+        if ($actionKey !== '') {
+            return $actionKey;
+        }
+
+        $legacyAction = $this->action !== null ? trim((string) $this->action) : '';
+
+        return $legacyAction !== '' ? $legacyAction : null;
+    }
+
+    /**
+     * Build stable reference key from site, path, and optional action keys.
+     */
+    public static function buildKey(string $site, string $path, ?string $action = null): string
     {
         $s = strtolower(trim($site));
         $p = strtolower(trim($path));
-        $a = strtolower(trim($action));
+        $a = $action !== null ? strtolower(trim($action)) : '';
+
+        if ($a === '') {
+            return "{$s}.{$p}";
+        }
 
         return "{$s}.{$p}.{$a}";
     }

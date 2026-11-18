@@ -274,7 +274,7 @@ final class RpaAdminScriptSyncController extends Controller
 
             $siteKey = $t->site_key ?: $t->platform;
             $pathKey = $t->path_key ?: $t->target;
-            $actionKey = $t->action_key ?: $t->action;
+            $actionKey = $t->resolvedActionKey();
 
             return [
                 'id' => (int) $t->id,
@@ -284,7 +284,7 @@ final class RpaAdminScriptSyncController extends Controller
                 'action_key' => $actionKey,
                 'platform' => $t->platform ?: $siteKey,
                 'target' => $t->target ?: $pathKey,
-                'action' => $t->action ?: $actionKey,
+                'action' => ($t->action !== null && $t->action !== '') ? $t->action : $actionKey,
                 'name' => $t->name,
                 'description' => $t->description,
                 'linked_scripts_count' => $linkedCount,
@@ -595,7 +595,7 @@ final class RpaAdminScriptSyncController extends Controller
             $pathKey = $r->path_key ?: ($tag?->path_key ?: $tag?->target);
             $urlPattern = $r->url_pattern ?: $tag?->path?->url_pattern;
             $pathInputs = $r->path_inputs ?: ($tag?->path?->path_inputs ?? []);
-            $actionKey = $r->action_key ?: ($tag?->action_key ?: $tag?->action);
+            $actionKey = $r->action_key ?: $tag?->resolvedActionKey();
 
             return [
                 'id' => (int) $r->id,
