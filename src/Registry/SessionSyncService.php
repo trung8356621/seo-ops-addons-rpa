@@ -6,6 +6,7 @@ namespace Omnichannel\Addons\SocialAutomation\Registry;
 
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Omnichannel\Addons\SocialAutomation\Domain\CampaignResourceRecheckNudge;
 use Omnichannel\Addons\SocialAutomation\Domain\OnlineStateCalculator;
 use Omnichannel\Addons\SocialAutomation\Domain\SessionSignalState;
 use Omnichannel\Addons\SocialAutomation\Enums\AccountIdentitySource;
@@ -26,6 +27,7 @@ final class SessionSyncService
 {
     public function __construct(
         private readonly OnlineStateCalculator $online = new OnlineStateCalculator,
+        private readonly CampaignResourceRecheckNudge $resourceNudge = new CampaignResourceRecheckNudge,
     ) {}
 
     /**
@@ -120,8 +122,9 @@ final class SessionSyncService
             return ['ok' => false, 'errors' => ['schema_unavailable']];
         }
 
+        $nudgeAccountIds = [];
         try {
-            $out = DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($agent, $browsers, $installationId): array {
+            $out = DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($agent, $browsers, $installationId, &$nudgeAccountIds): array {
                 $result = [];
                 foreach ($browsers as $item) {
                     if (! is_array($item)) {
@@ -147,6 +150,11 @@ final class SessionSyncService
                         throw new \DomainException('browser_device_mismatch');
                     }
                     $existingCaps = is_array($session->capabilities) ? $session->capabilities : [];
+                    $prevReady = $session->exists ? (string) $session->ready_status : '';
+                    $prevAccountId = $session->exists && $session->account_id !== null ? (int) $session->account_id : 0;
+                    $prevCapsStatus = strtolower(trim((string) ($existingCaps['status'] ?? '')));
+                    $prevDispatch = $session->exists ? (bool) ($session->dispatch_enabled ?? true) : true;
+                    $prevState = $session->exists ? (string) ($session->session_state ?? '') : '';
 
                     // Account ID is the business identity of a Browser. Name is not accepted as identity.
                     $rawBinding = is_array($item['account_binding'] ?? null) ? $item['account_binding'] : null;
@@ -281,6 +289,21 @@ final class SessionSyncService
                         ]
                     );
 
+                    $dispatchEnabled = (bool) ($session->dispatch_enabled ?? true);
+                    $stateOk = in_array($sessionState, ['candidate', 'verified'], true);
+                    $eligibleNow = $readyStatus === SessionReadyStatus::Ready->value
+                        && $dispatchEnabled
+                        && $stateOk
+                        && (int) $accountModel->id > 0;
+                    $changed = $prevReady !== $readyStatus
+                        || $prevAccountId !== (int) $accountModel->id
+                        || $prevCapsStatus !== $status
+                        || $prevDispatch !== $dispatchEnabled
+                        || $prevState !== $sessionState;
+                    if ($eligibleNow && $changed) {
+                        $nudgeAccountIds[] = (int) $accountModel->id;
+                    }
+
                     $result[] = [
                         'browser_id' => $session->session_uuid,
                         'account_name' => $accountDisplayName,
@@ -304,6 +327,11 @@ final class SessionSyncService
             report($e);
 
             return ['ok' => false, 'errors' => ['sync_failed']];
+        }
+
+        if ($nudgeAccountIds !== []) {
+            $install = trim((string) ($installationId ?: $agent->installation_id));
+            $this->resourceNudge->nudgeForAccounts($install, $nudgeAccountIds);
         }
 
         return [

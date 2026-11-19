@@ -5,7 +5,8 @@ declare(strict_types=1);
 namespace Omnichannel\Addons\SocialAutomation\Domain;
 
 /**
- * RPA Admin and RPA Client sessions must not count as Runner online for dispatch.
+ * Dispatch eligibility by agent kind.
+ * Runner + Client may execute when heartbeat-online; Admin never counts.
  */
 final class AgentKindPolicy
 {
@@ -20,9 +21,20 @@ final class AgentKindPolicy
         return strtolower(trim($kind)) === self::KIND_RUNNER;
     }
 
+    public function isClient(string $kind): bool
+    {
+        return $this->normalize($kind) === self::KIND_CLIENT;
+    }
+
     public function countsAsOnlineForDispatch(string $kind, bool $heartbeatOnline): bool
     {
-        return $this->isRunner($kind) && $heartbeatOnline;
+        if (! $heartbeatOnline) {
+            return false;
+        }
+
+        $normalized = $this->normalize($kind);
+
+        return $normalized === self::KIND_RUNNER || $normalized === self::KIND_CLIENT;
     }
 
     public function normalize(?string $kind): string

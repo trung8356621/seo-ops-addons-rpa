@@ -13,26 +13,27 @@ use PHPUnit\Framework\TestCase;
 final class RpaClientRegisterAndHeartbeatTest extends TestCase
 {
     private AgentKindPolicy $agentKinds;
+
     private OnlineStateCalculator $online;
 
     protected function setUp(): void
     {
         parent::setUp();
-        $this->agentKinds = new AgentKindPolicy();
-        $this->online = new OnlineStateCalculator();
+        $this->agentKinds = new AgentKindPolicy;
+        $this->online = new OnlineStateCalculator;
     }
 
-    public function test_client_kind_never_counts_as_online_for_dispatch(): void
+    public function test_client_kind_counts_as_online_for_dispatch_when_heartbeat_fresh(): void
     {
         self::assertSame(AgentKindPolicy::KIND_CLIENT, $this->agentKinds->normalize('client'));
         self::assertFalse($this->agentKinds->isRunner(AgentKindPolicy::KIND_CLIENT));
-        self::assertFalse($this->agentKinds->countsAsOnlineForDispatch(AgentKindPolicy::KIND_CLIENT, true));
+        self::assertTrue($this->agentKinds->countsAsOnlineForDispatch(AgentKindPolicy::KIND_CLIENT, true));
         self::assertFalse($this->agentKinds->countsAsOnlineForDispatch(AgentKindPolicy::KIND_CLIENT, false));
     }
 
-    public function test_eligibility_selector_skips_client_agents(): void
+    public function test_eligibility_selector_accepts_online_client_agents(): void
     {
-        $selector = new EligibilitySelector(new AccountDeduplicator(), $this->agentKinds);
+        $selector = new EligibilitySelector(new AccountDeduplicator, $this->agentKinds);
 
         $agents = [
             [
@@ -48,18 +49,28 @@ final class RpaClientRegisterAndHeartbeatTest extends TestCase
 
         $sessions = [
             [
-                'session_uuid' => 'sess_1',
+                'session_id' => 'sess_1',
                 'agent_id' => 'client_1',
                 'ready_status' => 'ready',
-                'account_id' => 10,
+                'busy' => false,
+                'account_locked' => false,
                 'platform' => 'facebook',
+                'account' => [
+                    'platform' => 'facebook',
+                    'platform_account_id' => '100012345',
+                    'verified' => true,
+                    'identity_source' => 'platform_id',
+                ],
             ],
         ];
 
-        $result = $selector->select($sessions, $agents, ['platform' => 'facebook'], 1);
+        $result = $selector->select($agents, $sessions, [
+            'platform' => 'facebook',
+            'target_count' => 1,
+        ]);
 
-        self::assertCount(0, $result['selected']);
-        self::assertContains('agent_offline', $result['skip_reasons']);
+        self::assertCount(1, $result['selected']);
+        self::assertSame(1, $result['dispatched_count']);
     }
 
     public function test_online_state_calculator(): void

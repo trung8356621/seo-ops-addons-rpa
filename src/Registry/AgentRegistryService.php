@@ -7,11 +7,14 @@ namespace Omnichannel\Addons\SocialAutomation\Registry;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Omnichannel\Addons\SocialAutomation\Domain\AgentKindPolicy;
+use Omnichannel\Addons\SocialAutomation\Domain\CampaignResourceRecheckNudge;
 use Omnichannel\Addons\SocialAutomation\Domain\ClientConnectionLease;
 use Omnichannel\Addons\SocialAutomation\Domain\DeviceOsMetadata;
 use Omnichannel\Addons\SocialAutomation\Domain\OnlineStateCalculator;
 use Omnichannel\Addons\SocialAutomation\Enums\AgentAvailability;
 use Omnichannel\Addons\SocialAutomation\Models\SaAgent;
+use Omnichannel\Addons\SocialAutomation\Models\SaBrowserSession;
+use Omnichannel\Addons\SocialAutomation\Models\SaSessionAccount;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationSchema;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
 use Throwable;
@@ -22,6 +25,7 @@ final class AgentRegistryService
         private readonly OnlineStateCalculator $online = new OnlineStateCalculator,
         private readonly AgentKindPolicy $agentKinds = new AgentKindPolicy,
         private readonly ClientConnectionLease $connectionLease = new ClientConnectionLease,
+        private readonly CampaignResourceRecheckNudge $resourceNudge = new CampaignResourceRecheckNudge,
     ) {}
 
     /**
@@ -301,6 +305,9 @@ final class AgentRegistryService
             $availability = $agent->availability;
         }
 
+        // Transition-only: offline → online may unblock waiting_resources campaigns.
+        $wasOnline = $this->online->isOnline($agent->last_heartbeat_at);
+
         $heartbeatFill = DeviceOsMetadata::applyToFill([
             'last_heartbeat_at' => now(),
             'availability' => $availability,
@@ -320,7 +327,45 @@ final class AgentRegistryService
 
         $agent->fill($heartbeatFill)->save();
 
+        if ($clientApiKeyId !== null && ! $wasOnline) {
+            $this->nudgeWaitingCampaignsForAgent($agent);
+        }
+
         return ['ok' => true, 'agent' => $this->toArray($agent->fresh() ?? $agent)];
+    }
+
+    /**
+     * Advance next_recheck_at only — never dispatch/claim jobs from heartbeat.
+     */
+    private function nudgeWaitingCampaignsForAgent(SaAgent $agent): void
+    {
+        $sessionIds = SaBrowserSession::query()
+            ->where('agent_id', $agent->id)
+            ->pluck('id')
+            ->all();
+        if ($sessionIds === []) {
+            return;
+        }
+
+        $fromBind = SaSessionAccount::query()
+            ->whereIn('browser_session_id', $sessionIds)
+            ->where('is_active', true)
+            ->pluck('account_id')
+            ->all();
+        $fromSession = SaBrowserSession::query()
+            ->whereIn('id', $sessionIds)
+            ->whereNotNull('account_id')
+            ->pluck('account_id')
+            ->all();
+        $accountIds = array_values(array_unique(array_map(
+            static fn ($id): int => (int) $id,
+            array_merge($fromBind, $fromSession)
+        )));
+        if ($accountIds === []) {
+            return;
+        }
+
+        $this->resourceNudge->nudgeForAccounts((string) $agent->installation_id, $accountIds);
     }
 
     /**

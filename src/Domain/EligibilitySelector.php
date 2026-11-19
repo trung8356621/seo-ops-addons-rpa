@@ -36,7 +36,8 @@ use Omnichannel\Addons\SocialAutomation\Enums\SessionReadyStatus;
  *     domain?: string|null,
  *     required_capabilities?: list<string>,
  *     runtime_min?: string|null,
- *     target_count: int
+ *     target_count: int,
+ *     require_strong_identity?: bool
  * }
  */
 final class EligibilitySelector
@@ -111,8 +112,10 @@ final class EligibilitySelector
             }
 
             $account = is_array($session['account'] ?? null) ? $session['account'] : [];
-            if (AccountIdentityKey::strongKey($account) === null) {
-                // Domain/platform alone is never enough to distribute work.
+            $requireStrongIdentity = ($criteria['require_strong_identity'] ?? true) !== false;
+            if ($requireStrongIdentity && AccountIdentityKey::strongKey($account) === null) {
+                // Domain/platform alone is never enough for auto-select.
+                // Hard-pinned campaigns may set require_strong_identity=false.
                 $skipReasons[] = 'identity_incomplete';
                 continue;
             }

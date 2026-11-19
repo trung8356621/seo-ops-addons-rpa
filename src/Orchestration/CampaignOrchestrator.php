@@ -903,6 +903,9 @@ final class CampaignOrchestrator
         $result = $this->eligibility->select($agents, $sessions, [
             'platform' => $campaign->platform,
             'target_count' => $target,
+            // Hard pin already enforces exact account_id + installation + platform + bind.
+            // Inventory/site accounts often lack social platform_account_id.
+            'require_strong_identity' => $requiredAccountId === null,
         ]);
 
         return [
