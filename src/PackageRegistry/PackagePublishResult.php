@@ -39,6 +39,7 @@ final class PackagePublishResult
         public readonly array $errors = [],
         public readonly ?array $release = null,
         public readonly ?string $existingDigest = null,
+        public readonly ?string $suggestedVersion = null,
     ) {}
 
     public function httpStatus(): int
@@ -58,12 +59,17 @@ final class PackagePublishResult
      */
     public function toArray(): array
     {
-        return [
+        $payload = [
             'ok' => in_array($this->outcome, [self::OUTCOME_CREATED, self::OUTCOME_IDEMPOTENT], true),
             'outcome' => $this->outcome,
             'errors' => $this->errors,
             'release' => $this->release,
             'existing_digest' => $this->existingDigest,
         ];
+        if ($this->suggestedVersion !== null && $this->suggestedVersion !== '') {
+            $payload['suggested_version'] = $this->suggestedVersion;
+        }
+
+        return $payload;
     }
 }

@@ -37,14 +37,16 @@ final class ScriptCatalogService
         }
 
         $out = [];
+        $versionPolicy = new ScriptReleaseVersionPolicy;
         $packages = SaPackage::query()->where('kind', 'script')->orderBy('package_key')->get();
         foreach ($packages as $package) {
-            $latest = SaPackageRelease::query()
+            // Creator sync must see pending_media Saves, not only fully published releases.
+            $candidates = SaPackageRelease::query()
                 ->where('package_id', $package->id)
-                ->where('status', 'published')
-                ->orderByDesc('published_at')
+                ->whereIn('status', ['published', 'pending_media'])
                 ->orderByDesc('id')
-                ->first();
+                ->get();
+            $latest = $versionPolicy->pickHighestOrdinal($candidates);
             if (! $latest instanceof SaPackageRelease) {
                 continue;
             }
@@ -90,6 +92,7 @@ final class ScriptCatalogService
                 'name' => (string) $package->name,
                 'lineage' => $lineage,
                 'incomplete' => ! $assetsComplete,
+                'status' => (string) $latest->status,
                 'demo_status' => $demoReady ? 'ready' : 'missing',
                 'action_tag_key' => $actionTagKey,
                 'result_type' => isset($manifest['result_type']) ? (string) $manifest['result_type'] : 'status',

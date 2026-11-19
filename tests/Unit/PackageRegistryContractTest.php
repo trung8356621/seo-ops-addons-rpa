@@ -79,4 +79,13 @@ final class PackageRegistryContractTest extends TestCase
         self::assertStringContainsString('linkActionTagAndRequest($package, $release, $data, $input)', $source);
         self::assertStringContainsString('report($e)', $source);
     }
+
+    public function test_script_publish_counts_pending_media_and_skips_unchanged_content_block(): void
+    {
+        $source = (string) file_get_contents($this->root.'/src/PackageRegistry/PackageRegistryService.php');
+        self::assertStringContainsString('latestScriptRevision', $source);
+        self::assertStringContainsString("whereIn('status', ['published', 'pending_media'])", $source);
+        self::assertStringContainsString('lockForUpdate', $source);
+        self::assertStringNotContainsString('script_content_unchanged', $source);
+    }
 }

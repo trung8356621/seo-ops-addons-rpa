@@ -126,6 +126,12 @@ final class PackageRegistryService
                     ],
                 );
 
+                // Serialize concurrent Saves for the same package (idempotent retry + unique version).
+                $locked = SaPackage::query()->where('id', $package->id)->lockForUpdate()->first();
+                if ($locked instanceof SaPackage) {
+                    $package = $locked;
+                }
+
                 if ((string) $package->kind !== (string) $data['kind']) {
                     return new PackagePublishResult(
                         PackagePublishResult::OUTCOME_CONFLICT,
@@ -164,45 +170,33 @@ final class PackageRegistryService
                         PackagePublishResult::OUTCOME_CONFLICT,
                         errors: ['version_digest_conflict'],
                         existingDigest: (string) $existing->content_digest,
+                        suggestedVersion: $this->scriptVersionPolicy->nextVersionAfter(
+                            $this->latestScriptRevisionVersion((int) $package->id)
+                        ),
                     );
                 }
 
-                $previous = SaPackageRelease::query()
-                    ->where('package_id', $package->id)
-                    ->where('status', 'published')
-                    ->orderByDesc('published_at')
-                    ->orderByDesc('id')
-                    ->first();
+                // Include pending_media so in-flight Saves count toward revision history.
+                $previous = $this->latestScriptRevision((int) $package->id);
 
                 $executionDigest = null;
                 if ((string) $data['kind'] === 'script') {
                     $executionDigest = ScriptExecutionDigest::fromManifest(
                         is_array($data['manifest']) ? $data['manifest'] : []
                     );
+                    $previousVersion = $previous instanceof SaPackageRelease ? (string) $previous->version : null;
                     $versionErrors = $this->scriptVersionPolicy->validateNext(
-                        $previous instanceof SaPackageRelease ? (string) $previous->version : null,
+                        $previousVersion,
                         (string) $data['version'],
                     );
                     if ($versionErrors !== []) {
                         return new PackagePublishResult(
                             PackagePublishResult::OUTCOME_CONFLICT,
                             errors: $versionErrors,
+                            suggestedVersion: $this->scriptVersionPolicy->nextVersionAfter($previousVersion),
                         );
                     }
-                    $changeErrors = $this->scriptVersionPolicy->validateCanonicalChange(
-                        $previous instanceof SaPackageRelease
-                            ? ((string) ($previous->execution_digest ?: ScriptExecutionDigest::fromManifest(
-                                is_array($previous->manifest) ? $previous->manifest : []
-                            )))
-                            : null,
-                        $executionDigest,
-                    );
-                    if ($changeErrors !== []) {
-                        return new PackagePublishResult(
-                            PackagePublishResult::OUTCOME_CONFLICT,
-                            errors: $changeErrors,
-                        );
-                    }
+                    // Metadata / demo-only Saves are allowed when execution digest is unchanged.
                 }
 
                 $depCheck = $this->validatePublishedDependencies($data['dependencies']);
@@ -298,13 +292,17 @@ final class PackageRegistryService
         return SaPackage::query()
             ->orderBy('package_key')
             ->get()
-            ->map(static function (SaPackage $package): array {
-                $latest = SaPackageRelease::query()
-                    ->where('package_id', $package->id)
-                    ->where('status', 'published')
-                    ->orderByDesc('published_at')
-                    ->orderByDesc('id')
-                    ->first();
+            ->map(function (SaPackage $package): array {
+                if ((string) $package->kind === 'script') {
+                    $latest = $this->latestScriptRevision((int) $package->id);
+                } else {
+                    $latest = SaPackageRelease::query()
+                        ->where('package_id', $package->id)
+                        ->where('status', 'published')
+                        ->orderByDesc('published_at')
+                        ->orderByDesc('id')
+                        ->first();
+                }
 
                 return [
                     'package_key' => $package->package_key,
@@ -439,6 +437,29 @@ final class PackageRegistryService
                 ]);
             }
         }
+    }
+
+    /**
+     * Latest Save revision for sequencing — published and pending_media both count.
+     */
+    private function latestScriptRevision(int $packageId): ?SaPackageRelease
+    {
+        $rows = SaPackageRelease::query()
+            ->where('package_id', $packageId)
+            ->whereIn('status', ['published', 'pending_media'])
+            ->orderByDesc('id')
+            ->get();
+
+        $best = $this->scriptVersionPolicy->pickHighestOrdinal($rows);
+
+        return $best instanceof SaPackageRelease ? $best : null;
+    }
+
+    private function latestScriptRevisionVersion(int $packageId): ?string
+    {
+        $latest = $this->latestScriptRevision($packageId);
+
+        return $latest instanceof SaPackageRelease ? (string) $latest->version : null;
     }
 
     private function tablesReady(): bool
