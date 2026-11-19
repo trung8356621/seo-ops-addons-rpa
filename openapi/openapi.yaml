@@ -3780,7 +3780,10 @@ paths:
         Flattened Browser rows (primary identity = browser_id / session_uuid).
         Client/PC fields are metadata only (client_api_key_id, machine_name).
         Online policy reuses OnlineStateCalculator agent heartbeat TTL.
-        Device offline → runtime_status=unknown_stale and is_online=null (not invented offline).
+        Browser is_online=true when owning Client/device heartbeat is within TTL;
+        is_online=false when Client offline/heartbeat expired (or no owning agent).
+        Presence is independent of runtime_status (running/stopped). Runtime stays in runtime_status.
+        Device offline → runtime_status=unknown_stale (do not invent running/stopped).
         Never returns raw Client API keys, passwords, cookies, connection tokens, or filesystem paths.
       operationId: staffBrowsersIndex
       security:
@@ -3845,7 +3848,7 @@ paths:
                           type: string
                         is_online:
                           type: boolean
-                          nullable: true
+                          description: Presence only — true when Client heartbeat valid; false when offline/expired
                         device_online:
                           type: boolean
                         last_seen_at:
@@ -3875,7 +3878,7 @@ paths:
                         description: Count of browsers with is_online=true
                       offline_browsers:
                         type: integer
-                        description: Count of browsers with is_online=false (excludes unknown/null)
+                        description: Count of browsers with is_online=false
                       total_clients:
                         type: integer
                         description: Distinct non-null client_api_key_id in the same browser list

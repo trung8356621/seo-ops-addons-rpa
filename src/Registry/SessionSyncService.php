@@ -381,7 +381,8 @@ final class SessionSyncService
 
     /**
      * Staff Session Browser-first inventory (read-only).
-     * Reuses OnlineStateCalculator TTL for device presence; does not invent browser online from row presence.
+     * Reuses OnlineStateCalculator TTL for device presence; browser online follows owning Client heartbeat,
+     * independent of runtime_status. Does not invent online from row presence alone.
      *
      * @return array{
      *   ok: bool,
@@ -396,8 +397,10 @@ final class SessionSyncService
             'source' => 'backend',
             'heartbeat_ttl_seconds' => $this->online->ttlSeconds(),
             'notes' => 'Device online = agent.last_heartbeat_at within heartbeat_ttl_seconds. '
-                .'Browser is_online=true only when device online AND runtime reported running. '
-                .'Device offline → runtime_status=unknown_stale and is_online=null (not fake offline).',
+                .'Browser is_online=true when owning Client/device heartbeat is valid; '
+                .'is_online=false when Client offline/heartbeat expired (or no owning agent). '
+                .'Presence is independent of runtime_status (running/stopped). '
+                .'Device offline → runtime_status=unknown_stale (do not invent running/stopped).',
         ];
 
         if (! SocialAutomationSchema::agentsReady()) {
@@ -483,10 +486,9 @@ final class SessionSyncService
             ? 'unknown_stale'
             : $reportedStatus;
 
-        $isOnline = null;
-        if ($deviceOnline) {
-            $isOnline = $reportedStatus === 'running';
-        }
+        // Presence ≠ runtime: Online = Client heartbeat valid for this owned browser;
+        // Offline = Client offline/expired (or unbound). Runtime stays in runtime_status only.
+        $isOnline = $deviceOnline;
 
         $lastReported = $capabilities['last_reported_at'] ?? null;
         $lastSeenAt = is_string($lastReported) && trim($lastReported) !== ''

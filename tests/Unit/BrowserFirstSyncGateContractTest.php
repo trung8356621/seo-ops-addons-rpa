@@ -211,10 +211,13 @@ final class BrowserFirstSyncGateContractTest extends TestCase
 
         self::assertTrue($a['device_online']);
         self::assertTrue($a['is_online']);
+        self::assertSame('running', $a['runtime_status']);
         self::assertSame('absent', $a['signal_status']);
 
+        // Presence follows Client heartbeat; runtime/signal stay independent.
         self::assertTrue($b['device_online']);
-        self::assertFalse($b['is_online']);
+        self::assertTrue($b['is_online']);
+        self::assertSame('stopped', $b['runtime_status']);
         self::assertSame('present', $b['signal_status']);
 
         // OnlineStateCalculator remains heartbeat-only (no login coupling).

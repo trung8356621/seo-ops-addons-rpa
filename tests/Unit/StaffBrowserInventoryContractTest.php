@@ -114,7 +114,7 @@ final class StaffBrowserInventoryContractTest extends TestCase
         }
     }
 
-    public function test_device_offline_yields_unknown_stale_and_null_is_online(): void
+    public function test_device_offline_yields_unknown_stale_runtime_and_offline_presence(): void
     {
         $now = new \DateTimeImmutable('2026-10-29 12:00:00');
 
@@ -134,12 +134,12 @@ final class StaffBrowserInventoryContractTest extends TestCase
 
         self::assertFalse($row['device_online']);
         self::assertSame('unknown_stale', $row['runtime_status']);
-        self::assertNull($row['is_online']);
+        self::assertFalse($row['is_online']);
         self::assertNull($row['username']);
         self::assertNull($row['account_name']);
     }
 
-    public function test_device_online_stopped_browser_is_offline_false(): void
+    public function test_device_online_stopped_browser_is_still_online(): void
     {
         $now = new \DateTimeImmutable('2026-10-29 12:00:00');
 
@@ -158,10 +158,73 @@ final class StaffBrowserInventoryContractTest extends TestCase
 
         self::assertTrue($row['device_online']);
         self::assertSame('stopped', $row['runtime_status']);
-        self::assertFalse($row['is_online']);
+        self::assertTrue($row['is_online']);
     }
 
-    public function test_summary_consistency_excludes_unknown_from_offline_bucket(): void
+    public function test_one_online_client_with_three_stopped_browsers_all_online(): void
+    {
+        $now = new \DateTimeImmutable('2026-10-29 12:00:00');
+        $agent = $this->agent([
+            'client_api_key_id' => 11,
+            'last_heartbeat_at' => new \DateTimeImmutable('2026-10-29 11:59:50'),
+        ]);
+
+        $rows = [];
+        foreach (['brw-a', 'brw-b', 'brw-c'] as $id) {
+            $session = $this->session([
+                'session_uuid' => $id,
+                'ready_status' => 'pending',
+                'capabilities' => ['status' => 'stopped', 'name' => $id],
+            ]);
+            $rows[] = $this->service->mapStaffBrowserRow($session, $agent, null, $now);
+        }
+
+        foreach ($rows as $row) {
+            self::assertTrue($row['device_online']);
+            self::assertTrue($row['is_online']);
+            self::assertSame('stopped', $row['runtime_status']);
+            self::assertSame(11, $row['client_api_key_id']);
+        }
+
+        $payload = $this->service->assembleStaffBrowserInventoryResponse($rows, [
+            'source' => 'backend',
+            'heartbeat_ttl_seconds' => 90,
+            'notes' => 'test',
+        ]);
+        self::assertSame(3, $payload['summary']['online_browsers']);
+        self::assertSame(0, $payload['summary']['offline_browsers']);
+        self::assertSame(1, $payload['summary']['total_clients']);
+    }
+
+    public function test_heartbeat_expired_browsers_count_as_offline(): void
+    {
+        $now = new \DateTimeImmutable('2026-10-29 12:00:00');
+        $agent = $this->agent([
+            'client_api_key_id' => 5,
+            // > OnlineStateCalculator TTL (90s) → lease/presence expired
+            'last_heartbeat_at' => new \DateTimeImmutable('2026-10-29 11:50:00'),
+        ]);
+
+        $session = $this->session([
+            'session_uuid' => 'brw-lease-expired',
+            'capabilities' => ['status' => 'running'],
+        ]);
+        $row = $this->service->mapStaffBrowserRow($session, $agent, null, $now);
+
+        self::assertFalse($row['device_online']);
+        self::assertFalse($row['is_online']);
+        self::assertSame('unknown_stale', $row['runtime_status']);
+
+        $payload = $this->service->assembleStaffBrowserInventoryResponse([$row], [
+            'source' => 'backend',
+            'heartbeat_ttl_seconds' => 90,
+            'notes' => 'test',
+        ]);
+        self::assertSame(0, $payload['summary']['online_browsers']);
+        self::assertSame(1, $payload['summary']['offline_browsers']);
+    }
+
+    public function test_summary_partitions_online_and_offline(): void
     {
         $policy = [
             'source' => 'backend',
@@ -172,7 +235,7 @@ final class StaffBrowserInventoryContractTest extends TestCase
         $browsers = [
             ['browser_id' => 'a', 'is_online' => true, 'client_api_key_id' => 1],
             ['browser_id' => 'b', 'is_online' => false, 'client_api_key_id' => 1],
-            ['browser_id' => 'c', 'is_online' => null, 'client_api_key_id' => 2],
+            ['browser_id' => 'c', 'is_online' => false, 'client_api_key_id' => 2],
             ['browser_id' => 'd', 'is_online' => true, 'client_api_key_id' => null],
         ];
 
@@ -180,10 +243,10 @@ final class StaffBrowserInventoryContractTest extends TestCase
 
         self::assertSame(4, $payload['summary']['total_browsers']);
         self::assertSame(2, $payload['summary']['online_browsers']);
-        self::assertSame(1, $payload['summary']['offline_browsers']);
+        self::assertSame(2, $payload['summary']['offline_browsers']);
         self::assertSame(2, $payload['summary']['total_clients']);
         self::assertSame(
-            $payload['summary']['online_browsers'] + $payload['summary']['offline_browsers'] + 1,
+            $payload['summary']['online_browsers'] + $payload['summary']['offline_browsers'],
             $payload['summary']['total_browsers']
         );
     }
@@ -200,7 +263,7 @@ final class StaffBrowserInventoryContractTest extends TestCase
 
         self::assertFalse($row['device_online']);
         self::assertSame('unknown_stale', $row['runtime_status']);
-        self::assertNull($row['is_online']);
+        self::assertFalse($row['is_online']);
         self::assertNull($row['client_api_key_id']);
     }
 

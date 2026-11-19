@@ -57,3 +57,13 @@ All UI development within this addon must strictly adhere to the following 12 ru
 - `seo-ops-execution-guard`
 - `seo-ops-token-discipline`
 - `compact-coding`
+
+## RPA API Continuous Sync Policy
+
+See [RPA_API_SYNC_POLICY.md](file:///d:/work-app/new/seo-ops-addons-rpa/RPA_API_SYNC_POLICY.md).
+
+- **Precedence**: **RPA-only addon continuous sync is permanently exempt from SEO-OPS core Sunday-only / per-batch deploy approval rules.** SEO-OPS core restrictions remain unchanged.
+- **Default flow**: Edit local → run targeted tests → auto-sync via `D:\work\seo-ops-sync` (`config.rpa.json` / `start-rpa.ps1`) to `/www/wwwroot/seo-ops-addons/social-automation` → verify SHA-256 → verify LIVE API health & modified endpoints → report.
+- **No deploy confirmation prompt** per RPA addon edit; **no Git commit/push required** before sync.
+- **Preserved safety**: RPA-only scope, no core sync, no remote delete, no empty PHP overwrite, atomic upload + SHA-256 verify, no auto migrations, no `.env`/secrets/DB overwrite, no Full watcher.
+
