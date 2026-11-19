@@ -147,6 +147,8 @@ Route::middleware([
         ->name('api.v1.services.social-automation.client.account-password');
 
     Route::middleware([EnsureClientConnectionLease::class])->group(function (): void {
+        Route::post('{service}/social-automation/client/auth/context', [RpaClientApiController::class, 'authContext'])
+            ->name('api.v1.services.social-automation.client.auth.context');
         Route::post('{service}/social-automation/client/auth/resolve', [RpaClientApiController::class, 'resolveAuthScript'])
             ->name('api.v1.services.social-automation.client.auth.resolve');
         Route::post('{service}/social-automation/client/auth/pull', [RpaClientApiController::class, 'pullAuthScript'])

@@ -333,6 +333,50 @@ components:
           type: string
           description: Explicit Tag context (required if action_tag_id omitted)
 
+    ClientAuthContextRequest:
+      type: object
+      required: [connection_token, account_id]
+      properties:
+        connection_token:
+          type: string
+          description: Active Client connection lease token
+        account_id:
+          type: string
+          description: Account UUID or numeric id (installation-scoped)
+
+    ClientAuthContextCandidate:
+      type: object
+      required: [action_tag_id, action_tag_key]
+      properties:
+        action_tag_id:
+          type: integer
+        action_tag_key:
+          type: string
+
+    ClientAuthContextSuccess:
+      allOf:
+        - $ref: '#/components/schemas/OkTrue'
+        - type: object
+          required: [match, count]
+          properties:
+            match:
+              type: string
+              enum: [none, unique, ambiguous]
+            count:
+              type: integer
+              minimum: 0
+            action_tag_id:
+              type: integer
+              description: Present when match=unique
+            action_tag_key:
+              type: string
+              description: Present when match=unique
+            candidates:
+              type: array
+              description: Present when match=ambiguous
+              items:
+                $ref: '#/components/schemas/ClientAuthContextCandidate'
+
     ClientAuthScriptRelease:
       type: object
       properties:
@@ -2251,13 +2295,52 @@ paths:
         '422':
           $ref: '#/components/responses/ValidationError'
 
+  /api/v1/social-automation/client/auth/context:
+    post:
+      tags: [RPA Client]
+      summary: Discover eligible Auth Action Tag(s) for an Account
+      description: |
+        Requires Client API Key + active connection lease (`connection_token`).
+        Returns match=none|unique|ambiguous based on Account Site (platform) match to Authentication
+        Action Tags with Path.is_authentication=true, valid Auth pin, and published/enabled release.
+        Authentication Script does not require sa_account_action_tags (that entitlement remains for
+        ordinary Action Scripts). Does not invent tags from account name. No credentials or secrets.
+      operationId: clientAuthContext
+      security:
+        - RpaClientApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClientAuthContextRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientAuthContextSuccess'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: CLIENT_KEY_IN_USE / lease invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientErrorEnvelope'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
   /api/v1/social-automation/client/auth/resolve:
     post:
       tags: [RPA Client]
       summary: Resolve explicit Action Tag to pinned Auth Script release
       description: |
         Requires Client API Key + active connection lease (`connection_token`).
-        Verifies Account↔Tag entitlement and returns the Tag's pinned published Auth release metadata only.
+        Verifies Account Site match + Authentication Path + valid Auth pin; returns pinned published Auth release metadata.
+        Eligibility aligns with `/client/auth/context` (no sa_account_action_tags required for Auth Scripts).
         Browser Open without Action Tag remains allowed elsewhere; missing Tag/auth pin → fail closed (manual login).
         No credentials or secrets.
       operationId: clientAuthResolve
@@ -2293,7 +2376,7 @@ paths:
       tags: [RPA Client]
       summary: Pull authorized pinned published Auth Script release
       description: |
-        Same gates as resolve; includes manifest. Does not expose unrelated packages/releases.
+        Same Site-scoped Auth gates as resolve/context; includes manifest. Does not expose unrelated packages/releases.
       operationId: clientAuthPull
       security:
         - RpaClientApiKey: []

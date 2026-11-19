@@ -11,6 +11,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaPackageDependency;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTag;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTagScript;
+use Omnichannel\Addons\SocialAutomation\Models\SaPath;
 use Omnichannel\Addons\SocialAutomation\Models\SaScriptRequest;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
 use Throwable;
@@ -111,7 +112,12 @@ final class PackageRegistryService
 
         try {
             $result = DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($data, $userId, $syncSource, $input): PackagePublishResult {
-                $isAuthentication = (bool) ($data['is_authentication'] ?? false);
+                $manifestForAuth = is_array($data['manifest'] ?? null) ? $data['manifest'] : [];
+                $actionTagKeyForAuth = trim((string) ($manifestForAuth['action_tag_key'] ?? $input['action_tag_key'] ?? ''));
+                // Authentication Path is source of truth when Admin omits is_authentication.
+                $isAuthentication = (bool) ($data['is_authentication'] ?? false)
+                    || $this->resolveIsAuthenticationFromActionTagKey($actionTagKeyForAuth);
+                $data['is_authentication'] = $isAuthentication;
 
                 $package = SaPackage::query()->firstOrCreate(
                     ['package_key' => $data['package_key']],
@@ -470,6 +476,37 @@ final class PackageRegistryService
         } catch (Throwable) {
             return false;
         }
+    }
+
+    /**
+     * Derive package auth flag from Action Tag → Path.is_authentication.
+     */
+    private function resolveIsAuthenticationFromActionTagKey(string $actionTagKey): bool
+    {
+        $actionTagKey = trim($actionTagKey);
+        if ($actionTagKey === '') {
+            return false;
+        }
+
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+        try {
+            if (! Schema::connection($conn)->hasTable('sa_action_tags')
+                || ! Schema::connection($conn)->hasTable('sa_paths')
+                || ! Schema::connection($conn)->hasColumn('sa_paths', 'is_authentication')) {
+                return false;
+            }
+        } catch (Throwable) {
+            return false;
+        }
+
+        $tag = SaActionTag::query()->where('tag_key', $actionTagKey)->first();
+        if (! $tag instanceof SaActionTag || $tag->path_id === null) {
+            return false;
+        }
+
+        $path = SaPath::query()->find((int) $tag->path_id);
+
+        return $path instanceof SaPath && (bool) ($path->is_authentication ?? false);
     }
 
     /**

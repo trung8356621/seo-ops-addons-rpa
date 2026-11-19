@@ -10,8 +10,10 @@ use Omnichannel\Addons\SocialAutomation\Domain\AuthScriptPinPolicy;
 use Omnichannel\Addons\SocialAutomation\Models\SaAccount;
 use Omnichannel\Addons\SocialAutomation\Models\SaAccountActionTag;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTag;
+use Omnichannel\Addons\SocialAutomation\Models\SaActionTagScript;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackage;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
+use Omnichannel\Addons\SocialAutomation\Models\SaPath;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
 
 /**
@@ -49,9 +51,14 @@ final class AuthScriptService
             return [];
         }
 
+        $packageIds = $this->authenticationPackageIds();
+        if ($packageIds === []) {
+            return [];
+        }
+
         return SaPackage::query()
             ->where('kind', 'script')
-            ->where('is_authentication', true)
+            ->whereIn('id', $packageIds)
             ->orderBy('package_key')
             ->get()
             ->map(function (SaPackage $package): array {
@@ -81,6 +88,113 @@ final class AuthScriptService
                 ];
             })
             ->all();
+    }
+
+    /**
+     * Package ids eligible for Auth Script pin: explicit flag OR linked to an Authentication Path.
+     *
+     * @return list<int>
+     */
+    public function authenticationPackageIds(): array
+    {
+        if (! $this->schemaReady()) {
+            return [];
+        }
+
+        $ids = SaPackage::query()
+            ->where('kind', 'script')
+            ->where('is_authentication', true)
+            ->pluck('id')
+            ->map(static fn ($id): int => (int) $id)
+            ->all();
+
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+        try {
+            if (! Schema::connection($conn)->hasColumn('sa_paths', 'is_authentication')
+                || ! Schema::connection($conn)->hasTable('sa_action_tag_scripts')) {
+                return array_values(array_unique($ids));
+            }
+        } catch (\Throwable) {
+            return array_values(array_unique($ids));
+        }
+
+        $authPathIds = SaPath::query()
+            ->where('is_authentication', true)
+            ->pluck('id')
+            ->map(static fn ($id): int => (int) $id)
+            ->all();
+        if ($authPathIds === []) {
+            return array_values(array_unique($ids));
+        }
+
+        $tagIds = SaActionTag::query()
+            ->whereIn('path_id', $authPathIds)
+            ->pluck('id')
+            ->map(static fn ($id): int => (int) $id)
+            ->all();
+        if ($tagIds === []) {
+            return array_values(array_unique($ids));
+        }
+
+        $linked = SaActionTagScript::query()
+            ->whereIn('action_tag_id', $tagIds)
+            ->whereNotNull('package_id')
+            ->pluck('package_id')
+            ->map(static fn ($id): int => (int) $id)
+            ->all();
+
+        return array_values(array_unique([...$ids, ...$linked]));
+    }
+
+    /**
+     * Persist package.is_authentication for scripts linked to the given path (denormalized cache).
+     *
+     * @return int Number of packages updated
+     */
+    public function syncPackageAuthFlagsForPath(SaPath $path): int
+    {
+        if (! $this->schemaReady()) {
+            return 0;
+        }
+
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+        if (! Schema::connection($conn)->hasTable('sa_action_tag_scripts')) {
+            return 0;
+        }
+
+        $tagIds = SaActionTag::query()
+            ->where('path_id', $path->id)
+            ->pluck('id')
+            ->map(static fn ($id): int => (int) $id)
+            ->all();
+        if ($tagIds === []) {
+            return 0;
+        }
+
+        $packageIds = SaActionTagScript::query()
+            ->whereIn('action_tag_id', $tagIds)
+            ->whereNotNull('package_id')
+            ->pluck('package_id')
+            ->map(static fn ($id): int => (int) $id)
+            ->unique()
+            ->values()
+            ->all();
+        if ($packageIds === []) {
+            return 0;
+        }
+
+        $wantAuth = (bool) ($path->is_authentication ?? false);
+        $updated = 0;
+        foreach (SaPackage::query()->whereIn('id', $packageIds)->where('kind', 'script')->get() as $package) {
+            if ((bool) ($package->is_authentication ?? false) === $wantAuth) {
+                continue;
+            }
+            $package->is_authentication = $wantAuth;
+            $package->save();
+            $updated++;
+        }
+
+        return $updated;
     }
 
     /**
@@ -198,7 +312,69 @@ final class AuthScriptService
     }
 
     /**
-     * Resolve explicit Tag → pinned Auth release for an entitled Account.
+     * Discover Auth Action Tags eligible for an Account by Site (0 / 1 / N).
+     * Site = Account.platform matched to Tag site_key/platform.
+     * Authentication Script does NOT require sa_account_action_tags (that entitlement
+     * remains for ordinary Action Scripts: Post/Comment/Collect).
+     * Requires Authentication Path + valid published Auth pin.
+     * Does not invent tags from account name or "{platform}.login".
+     *
+     * @return array{
+     *   match: 'none'|'unique'|'ambiguous',
+     *   count: int,
+     *   action_tag_id?: int,
+     *   action_tag_key?: string,
+     *   candidates?: list<array{action_tag_id: int, action_tag_key: string}>
+     * }
+     */
+    public function findEligibleAuthContextForAccount(SaAccount $account): array
+    {
+        if (! $this->schemaReady()) {
+            return ['match' => 'none', 'count' => 0];
+        }
+
+        $accountPlatform = strtolower(trim((string) $account->platform));
+        if ($accountPlatform === '') {
+            return ['match' => 'none', 'count' => 0];
+        }
+
+        $eligible = [];
+        foreach ($this->candidateAuthTagsForSite($accountPlatform) as $tag) {
+            $check = $this->assertAuthTagEligibleForAccount($account, $tag);
+            if (! ($check['ok'] ?? false)) {
+                continue;
+            }
+
+            $eligible[] = [
+                'action_tag_id' => (int) $tag->id,
+                'action_tag_key' => (string) $tag->tag_key,
+            ];
+        }
+
+        $count = count($eligible);
+        if ($count === 0) {
+            return ['match' => 'none', 'count' => 0];
+        }
+        if ($count === 1) {
+            return [
+                'match' => 'unique',
+                'count' => 1,
+                'action_tag_id' => $eligible[0]['action_tag_id'],
+                'action_tag_key' => $eligible[0]['action_tag_key'],
+            ];
+        }
+
+        return [
+            'match' => 'ambiguous',
+            'count' => $count,
+            'candidates' => $eligible,
+        ];
+    }
+
+    /**
+     * Resolve explicit Tag → pinned Auth release for an Account on the same Site.
+     * Eligibility aligns with findEligibleAuthContextForAccount (Site + Auth Path + pin).
+     * Does not require sa_account_action_tags for Authentication Scripts.
      *
      * @return array{ok: true, release: array<string, mixed>}|array{ok: false, errors: list<string>, http?: int}
      */
@@ -208,30 +384,22 @@ final class AuthScriptService
             return ['ok' => false, 'errors' => ['auth_schema_unavailable'], 'http' => 503];
         }
 
-        if (! $this->isEntitled((int) $account->id, (int) $tag->id)) {
-            return ['ok' => false, 'errors' => ['account_tag_unauthorized'], 'http' => 403];
-        }
-
-        $pinnedPackageId = $tag->auth_script_id !== null ? (int) $tag->auth_script_id : null;
-        $pinnedReleaseId = $tag->auth_release_id !== null ? (int) $tag->auth_release_id : null;
-        if ($pinnedPackageId === null || $pinnedReleaseId === null) {
-            return ['ok' => false, 'errors' => ['auth_pin_missing'], 'http' => 404];
-        }
-
-        $package = SaPackage::query()->find($pinnedPackageId);
-        $release = SaPackageRelease::query()->find($pinnedReleaseId);
-        $check = $this->pinPolicy->assertPinnedAuthRelease(
-            $package instanceof SaPackage ? $this->packageRow($package) : null,
-            $release instanceof SaPackageRelease ? $this->releaseRow($release) : null,
-            $pinnedPackageId,
-            $pinnedReleaseId,
-        );
+        $check = $this->assertAuthTagEligibleForAccount($account, $tag);
         if (! ($check['ok'] ?? false)) {
-            return ['ok' => false, 'errors' => $check['errors'] ?? ['auth_pin_invalid'], 'http' => 404];
+            return [
+                'ok' => false,
+                'errors' => $check['errors'] ?? ['auth_pin_invalid'],
+                'http' => (int) ($check['http'] ?? 404),
+            ];
         }
 
-        /** @var SaPackage $package */
-        /** @var SaPackageRelease $release */
+        $pinnedPackageId = (int) $tag->auth_script_id;
+        $package = SaPackage::query()->find($pinnedPackageId);
+        $release = SaPackageRelease::query()->find((int) $tag->auth_release_id);
+        if (! $package instanceof SaPackage || ! $release instanceof SaPackageRelease) {
+            return ['ok' => false, 'errors' => ['auth_pin_target_missing'], 'http' => 404];
+        }
+
         return [
             'ok' => true,
             'release' => $this->clientReleasePayload($package, $release, $tag, $includeManifest),
@@ -282,15 +450,133 @@ final class AuthScriptService
         return $payload;
     }
 
+    private function platformsMatch(string $accountPlatform, SaActionTag $tag): bool
+    {
+        $tagSite = strtolower(trim((string) ($tag->site_key ?? $tag->platform ?? '')));
+
+        return $accountPlatform !== '' && $tagSite !== '' && $tagSite === $accountPlatform;
+    }
+
+    /**
+     * Candidate Auth-pinned tags for a Site. No account-grant filter.
+     *
+     * @return \Illuminate\Support\Collection<int, SaActionTag>
+     */
+    private function candidateAuthTagsForSite(string $accountPlatform)
+    {
+        return SaActionTag::query()
+            ->where(function ($query) use ($accountPlatform): void {
+                $query->whereRaw('LOWER(site_key) = ?', [$accountPlatform])
+                    ->orWhereRaw('LOWER(platform) = ?', [$accountPlatform]);
+            })
+            ->whereNotNull('auth_script_id')
+            ->whereNotNull('auth_release_id')
+            ->orderBy('id')
+            ->get();
+    }
+
+    /**
+     * Shared Auth eligibility: Site match + Authentication Path + valid published pin.
+     * Intentionally ignores sa_account_action_tags (Auth is Site-scoped).
+     *
+     * @return array{ok: true}|array{ok: false, errors: list<string>, http?: int}
+     */
+    private function assertAuthTagEligibleForAccount(SaAccount $account, SaActionTag $tag): array
+    {
+        $accountPlatform = strtolower(trim((string) $account->platform));
+        if (! $this->platformsMatch($accountPlatform, $tag)) {
+            return ['ok' => false, 'errors' => ['account_tag_platform_mismatch'], 'http' => 403];
+        }
+
+        if (! $this->tagPathIsAuthentication($tag)) {
+            return ['ok' => false, 'errors' => ['auth_path_required'], 'http' => 404];
+        }
+
+        $pinnedPackageId = $tag->auth_script_id !== null ? (int) $tag->auth_script_id : null;
+        $pinnedReleaseId = $tag->auth_release_id !== null ? (int) $tag->auth_release_id : null;
+        if ($pinnedPackageId === null || $pinnedReleaseId === null) {
+            return ['ok' => false, 'errors' => ['auth_pin_missing'], 'http' => 404];
+        }
+
+        $package = SaPackage::query()->find($pinnedPackageId);
+        $release = SaPackageRelease::query()->find($pinnedReleaseId);
+        $packageRow = $this->packageRowForAuthPin(
+            $package instanceof SaPackage ? $package : null,
+            $tag,
+        );
+
+        $check = $this->pinPolicy->assertPinnedAuthRelease(
+            $packageRow,
+            $release instanceof SaPackageRelease ? $this->releaseRow($release) : null,
+            $pinnedPackageId,
+            $pinnedReleaseId,
+        );
+        if (! ($check['ok'] ?? false)) {
+            return [
+                'ok' => false,
+                'errors' => $check['errors'] ?? ['auth_pin_invalid'],
+                'http' => 404,
+            ];
+        }
+
+        return ['ok' => true];
+    }
+
+    private function tagPathIsAuthentication(SaActionTag $tag): bool
+    {
+        if (! $tag->path_id) {
+            return false;
+        }
+
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+        try {
+            if (! Schema::connection($conn)->hasColumn('sa_paths', 'is_authentication')) {
+                return false;
+            }
+        } catch (\Throwable) {
+            return false;
+        }
+
+        $path = SaPath::query()->find((int) $tag->path_id);
+
+        return $path instanceof SaPath && (bool) ($path->is_authentication ?? false);
+    }
+
+    /**
+     * Build package row for Auth pin checks. Agreement: Path.is_authentication=true
+     * counts as Auth-eligible even if denormalized package flag is still false.
+     * Does not rewrite DB package flag.
+     *
+     * @return array{id: int, kind: string, is_authentication: bool, is_enabled: bool, package_key: string}|null
+     */
+    private function packageRowForAuthPin(?SaPackage $package, SaActionTag $tag): ?array
+    {
+        if (! $package instanceof SaPackage) {
+            return null;
+        }
+
+        $row = $this->packageRow($package);
+        if ($this->tagPathIsAuthentication($tag) && ! ($row['is_authentication'] ?? false)) {
+            $row['is_authentication'] = true;
+        }
+
+        return $row;
+    }
+
     /**
      * @return array{id: int, kind: string, is_authentication: bool, is_enabled: bool, package_key: string}
      */
     private function packageRow(SaPackage $package): array
     {
+        $isAuth = (bool) ($package->is_authentication ?? false);
+        if (! $isAuth) {
+            $isAuth = in_array((int) $package->id, $this->authenticationPackageIds(), true);
+        }
+
         return [
             'id' => (int) $package->id,
             'kind' => (string) $package->kind,
-            'is_authentication' => (bool) ($package->is_authentication ?? false),
+            'is_authentication' => $isAuth,
             'is_enabled' => (bool) ($package->is_enabled ?? true),
             'package_key' => (string) $package->package_key,
         ];

@@ -275,6 +275,9 @@ final class ActionRegistryController
         }
 
         $path = SaPath::query()->create($payload);
+        if ($this->pathAuthenticationColumnReady()) {
+            app(AuthScriptService::class)->syncPackageAuthFlagsForPath($path);
+        }
 
         return response()->json(['ok' => true, 'path' => $this->serializePath($path)]);
     }
@@ -306,6 +309,7 @@ final class ActionRegistryController
             $path->description = $description !== '' ? $description : null;
         }
 
+        $authFlagTouched = false;
         if ($request->exists('is_authentication')) {
             if (! $this->pathAuthenticationColumnReady()) {
                 return response()->json([
@@ -315,9 +319,14 @@ final class ActionRegistryController
                 ], 503);
             }
             $path->is_authentication = filter_var($request->input('is_authentication'), FILTER_VALIDATE_BOOLEAN);
+            $authFlagTouched = true;
         }
 
         $path->save();
+
+        if ($authFlagTouched) {
+            app(AuthScriptService::class)->syncPackageAuthFlagsForPath($path);
+        }
 
         return response()->json(['ok' => true, 'path' => $this->serializePath($path->fresh() ?? $path)]);
     }

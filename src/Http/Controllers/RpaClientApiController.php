@@ -637,6 +637,47 @@ final class RpaClientApiController extends Controller
     }
 
     /**
+     * Discover eligible Auth Action Tag(s) for an Account (none / unique / ambiguous).
+     * Requires API key middleware + EnsureClientConnectionLease.
+     * No credentials/secrets in response.
+     */
+    public function authContext(Request $request): JsonResponse
+    {
+        $clientKey = $this->resolveClientKey($request);
+        if (! $clientKey instanceof SaClientApiKey) {
+            return new JsonResponse(['ok' => false, 'error' => 'unauthenticated', 'errors' => ['unauthenticated']], 401);
+        }
+
+        $accountId = trim((string) ($request->input('account_id') ?? ''));
+        if ($accountId === '') {
+            return new JsonResponse([
+                'ok' => false,
+                'error' => 'account_id_required',
+                'errors' => ['account_id_required'],
+            ], 422);
+        }
+
+        $installationId = (string) $clientKey->installation_id;
+        $account = SaAccount::query()->where(function ($query) use ($accountId): void {
+            $query->where('account_uuid', $accountId);
+            if (ctype_digit($accountId)) {
+                $query->orWhere('id', (int) $accountId);
+            }
+        })->first();
+
+        if (! $account instanceof SaAccount) {
+            return new JsonResponse(['ok' => false, 'error' => 'account_not_found', 'errors' => ['account_not_found']], 404);
+        }
+        if ((string) $account->installation_id !== $installationId) {
+            return new JsonResponse(['ok' => false, 'error' => 'installation_forbidden', 'errors' => ['installation_forbidden']], 403);
+        }
+
+        $result = app(AuthScriptService::class)->findEligibleAuthContextForAccount($account);
+
+        return new JsonResponse(array_merge(['ok' => true], $result), 200);
+    }
+
+    /**
      * CP8 SB2/SB3 — resolve explicit Action Tag to pinned Auth release.
      * Requires API key middleware + EnsureClientConnectionLease.
      * No credentials/secrets in response.

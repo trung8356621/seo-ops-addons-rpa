@@ -428,8 +428,10 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                 Route::post('/session-confirm-login', [RpaClientApiController::class, 'confirmLogin'])
                     ->name('social-automation.client.session-confirm-login');
 
-                // CP8 Auth Script resolve/pull — API key + active connection lease
+                // CP8 Auth Script context/resolve/pull — API key + active connection lease
                 Route::middleware([EnsureClientConnectionLease::class])->group(function (): void {
+                    Route::post('/auth/context', [RpaClientApiController::class, 'authContext'])
+                        ->name('social-automation.client.auth.context');
                     Route::post('/auth/resolve', [RpaClientApiController::class, 'resolveAuthScript'])
                         ->name('social-automation.client.auth.resolve');
                     Route::post('/auth/pull', [RpaClientApiController::class, 'pullAuthScript'])

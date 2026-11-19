@@ -41,8 +41,12 @@ final class AuthScriptCp8ContractTest extends TestCase
         $svc = (string) file_get_contents($this->root.'/src/Services/AuthScriptService.php');
         self::assertStringContainsString('auth_script_id', $svc);
         self::assertStringContainsString('auth_release_id', $svc);
-        self::assertStringNotContainsString('SaActionTagScript', $svc);
+        // Catalog may discover packages via sa_action_tag_scripts → Auth Path,
+        // but pin columns remain on sa_action_tags.auth_* (never written via tag-scripts).
         self::assertStringContainsString('sa_account_action_tags', $svc);
+        self::assertStringContainsString('auth_script_id = null', $svc);
+        self::assertStringContainsString('authenticationPackageIds', $svc);
+        self::assertStringContainsString('syncPackageAuthFlagsForPath', $svc);
     }
 
     public function test_publish_persists_is_authentication_without_upgrading_pins(): void
