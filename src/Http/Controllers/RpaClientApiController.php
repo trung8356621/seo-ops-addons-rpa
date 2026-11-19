@@ -21,6 +21,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaBrowserSession;
 use Omnichannel\Addons\SocialAutomation\Models\SaClientApiKey;
 use Omnichannel\Addons\SocialAutomation\Registry\AgentRegistryService;
 use Omnichannel\Addons\SocialAutomation\Registry\SessionSyncService;
+use Omnichannel\Addons\SocialAutomation\Services\ActionScriptDistributionService;
 use Omnichannel\Addons\SocialAutomation\Services\AuthScriptService;
 use Omnichannel\Addons\SocialAutomation\Services\ClientNotificationService;
 use Omnichannel\Addons\SocialAutomation\Services\RpaClientApiKeyService;
@@ -693,6 +694,177 @@ final class RpaClientApiController extends Controller
     public function pullAuthScript(Request $request): JsonResponse
     {
         return $this->authScriptClientResponse($request, includeManifest: true);
+    }
+
+    /**
+     * Download one asset binary from the Account's exact pinned published Auth release.
+     * Requires API key middleware + EnsureClientConnectionLease.
+     * Same eligibility as context/resolve/pull. No credentials/storage paths in response.
+     */
+    public function downloadAuthAsset(Request $request): JsonResponse|\Illuminate\Http\Response
+    {
+        $clientKey = $this->resolveClientKey($request);
+        if (! $clientKey instanceof SaClientApiKey) {
+            return new JsonResponse(['ok' => false, 'error' => 'unauthenticated', 'errors' => ['unauthenticated']], 401);
+        }
+
+        $accountId = trim((string) ($request->input('account_id') ?? ''));
+        $packageKey = trim((string) ($request->input('package_key') ?? ''));
+        $version = trim((string) ($request->input('version') ?? ''));
+        $releaseId = (int) $request->input('release_id', 0);
+        $assetPath = trim((string) ($request->input('asset_path') ?? ''));
+        $expectedSha = strtolower(trim((string) ($request->input('expected_sha256') ?? $request->input('sha256') ?? '')));
+
+        if ($accountId === '' || $packageKey === '' || $version === '' || $releaseId < 1 || $assetPath === '' || $expectedSha === '') {
+            return new JsonResponse([
+                'ok' => false,
+                'error' => 'asset_request_invalid',
+                'errors' => ['asset_request_invalid'],
+            ], 422);
+        }
+
+        $installationId = (string) $clientKey->installation_id;
+        $account = SaAccount::query()->where(function ($query) use ($accountId): void {
+            $query->where('account_uuid', $accountId);
+            if (ctype_digit($accountId)) {
+                $query->orWhere('id', (int) $accountId);
+            }
+        })->first();
+        if (! $account instanceof SaAccount) {
+            return new JsonResponse(['ok' => false, 'error' => 'account_not_found', 'errors' => ['account_not_found']], 404);
+        }
+        if ((string) $account->installation_id !== $installationId) {
+            return new JsonResponse(['ok' => false, 'error' => 'installation_forbidden', 'errors' => ['installation_forbidden']], 403);
+        }
+
+        $result = app(AuthScriptService::class)->downloadAssetForClient(
+            $account,
+            $packageKey,
+            $version,
+            $releaseId,
+            $assetPath,
+            $expectedSha,
+        );
+        if (! ($result['ok'] ?? false)) {
+            $status = (int) ($result['http'] ?? 404);
+
+            return new JsonResponse([
+                'ok' => false,
+                'error' => ($result['errors'][0] ?? 'asset_download_failed'),
+                'errors' => $result['errors'] ?? ['asset_download_failed'],
+            ], $status);
+        }
+
+        $format = strtolower(trim((string) ($request->input('format') ?? $request->query('format', ''))));
+        if ($format === 'binary') {
+            return response($result['bytes'], 200, [
+                'Content-Type' => (string) $result['mime'],
+                'Content-Length' => (string) strlen($result['bytes']),
+                'Cache-Control' => 'private, no-cache',
+                'X-Checksum-Sha256' => (string) $result['sha256'],
+                'X-Asset-Path' => (string) $result['asset_path'],
+            ]);
+        }
+
+        // Desktop contract default: JSON + base64 (mirrors Admin getAsset).
+        return new JsonResponse([
+            'ok' => true,
+            'asset_path' => $result['asset_path'],
+            'sha256' => $result['sha256'],
+            'mime' => $result['mime'],
+            'asset_base64' => base64_encode($result['bytes']),
+        ], 200);
+    }
+
+    /**
+     * Campaign Action Script pull — exact Job-pinned published release + manifest.
+     * Requires API key + EnsureClientConnectionLease. Not Auth Script endpoints.
+     */
+    public function pullActionScript(Request $request): JsonResponse
+    {
+        $clientKey = $this->resolveClientKey($request);
+        if (! $clientKey instanceof SaClientApiKey) {
+            return new JsonResponse(['ok' => false, 'error' => 'unauthenticated', 'errors' => ['unauthenticated']], 401);
+        }
+
+        $result = app(ActionScriptDistributionService::class)->pullForJob(
+            (string) $clientKey->installation_id,
+            trim((string) ($request->input('job_id') ?? '')),
+            trim((string) ($request->input('attempt_id') ?? '')),
+            trim((string) ($request->input('lease_token') ?? '')),
+            trim((string) ($request->input('account_id') ?? '')),
+            trim((string) ($request->input('package_key') ?? $request->input('script_id') ?? '')),
+            trim((string) ($request->input('version') ?? $request->input('script_version') ?? '')),
+            (int) $request->input('release_id', 0),
+        );
+        if (! ($result['ok'] ?? false)) {
+            $status = (int) ($result['http'] ?? 403);
+
+            return new JsonResponse([
+                'ok' => false,
+                'error' => ($result['errors'][0] ?? 'action_script_pull_failed'),
+                'errors' => $result['errors'] ?? ['action_script_pull_failed'],
+            ], $status);
+        }
+
+        $release = $result['release'];
+        unset($release['encrypted_password'], $release['password'], $release['cookies'], $release['credentials']);
+
+        return new JsonResponse(['ok' => true, 'release' => $release], 200);
+    }
+
+    /**
+     * Campaign Action Script asset download — exact Job-pinned published release only.
+     * Shared storage/hash verification via ScriptReleaseAssetReader (same as Auth asset).
+     */
+    public function downloadActionAsset(Request $request): JsonResponse|\Illuminate\Http\Response
+    {
+        $clientKey = $this->resolveClientKey($request);
+        if (! $clientKey instanceof SaClientApiKey) {
+            return new JsonResponse(['ok' => false, 'error' => 'unauthenticated', 'errors' => ['unauthenticated']], 401);
+        }
+
+        $expectedSha = strtolower(trim((string) ($request->input('expected_sha256') ?? $request->input('sha256') ?? '')));
+        $result = app(ActionScriptDistributionService::class)->downloadAssetForJob(
+            (string) $clientKey->installation_id,
+            trim((string) ($request->input('job_id') ?? '')),
+            trim((string) ($request->input('attempt_id') ?? '')),
+            trim((string) ($request->input('lease_token') ?? '')),
+            trim((string) ($request->input('account_id') ?? '')),
+            trim((string) ($request->input('package_key') ?? $request->input('script_id') ?? '')),
+            trim((string) ($request->input('version') ?? $request->input('script_version') ?? '')),
+            (int) $request->input('release_id', 0),
+            trim((string) ($request->input('asset_path') ?? '')),
+            $expectedSha,
+        );
+        if (! ($result['ok'] ?? false)) {
+            $status = (int) ($result['http'] ?? 404);
+
+            return new JsonResponse([
+                'ok' => false,
+                'error' => ($result['errors'][0] ?? 'asset_download_failed'),
+                'errors' => $result['errors'] ?? ['asset_download_failed'],
+            ], $status);
+        }
+
+        $format = strtolower(trim((string) ($request->input('format') ?? $request->query('format', ''))));
+        if ($format === 'binary') {
+            return response($result['bytes'], 200, [
+                'Content-Type' => (string) $result['mime'],
+                'Content-Length' => (string) strlen($result['bytes']),
+                'Cache-Control' => 'private, no-cache',
+                'X-Checksum-Sha256' => (string) $result['sha256'],
+                'X-Asset-Path' => (string) $result['asset_path'],
+            ]);
+        }
+
+        return new JsonResponse([
+            'ok' => true,
+            'asset_path' => $result['asset_path'],
+            'sha256' => $result['sha256'],
+            'mime' => $result['mime'],
+            'asset_base64' => base64_encode($result['bytes']),
+        ], 200);
     }
 
     private function authScriptClientResponse(Request $request, bool $includeManifest): JsonResponse

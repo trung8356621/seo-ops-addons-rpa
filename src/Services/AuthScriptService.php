@@ -14,6 +14,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaActionTagScript;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackage;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
 use Omnichannel\Addons\SocialAutomation\Models\SaPath;
+use Omnichannel\Addons\SocialAutomation\Support\ScriptReleaseAssetReader;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
 
 /**
@@ -25,6 +26,7 @@ final class AuthScriptService
     public function __construct(
         private readonly AuthScriptPinPolicy $pinPolicy = new AuthScriptPinPolicy,
         private readonly AccountTagEntitlementPolicy $entitlement = new AccountTagEntitlementPolicy,
+        private readonly ScriptReleaseAssetReader $assets = new ScriptReleaseAssetReader,
     ) {}
 
     public function schemaReady(): bool
@@ -404,6 +406,136 @@ final class AuthScriptService
             'ok' => true,
             'release' => $this->clientReleasePayload($package, $release, $tag, $includeManifest),
         ];
+    }
+
+    /**
+     * Download one ROI/asset binary from the Account's exact pinned published Auth release.
+     * Same Site/Auth-Path/pin eligibility as context/resolve/pull (no sa_account_action_tags).
+     * Fail-closed on path traversal, undeclared asset, missing bytes, or SHA-256 mismatch.
+     * Never returns filesystem paths, secrets, or unrelated package assets.
+     *
+     * @return array{
+     *   ok: true,
+     *   asset_path: string,
+     *   sha256: string,
+     *   mime: string,
+     *   bytes: string
+     * }|array{ok: false, errors: list<string>, http?: int}
+     */
+    public function downloadAssetForClient(
+        SaAccount $account,
+        string $packageKey,
+        string $version,
+        int $releaseId,
+        string $assetPath,
+        string $expectedSha256,
+    ): array {
+        if (! $this->schemaReady()) {
+            return ['ok' => false, 'errors' => ['auth_schema_unavailable'], 'http' => 503];
+        }
+
+        $packageKey = trim($packageKey);
+        $version = trim($version);
+        $assetPath = trim($assetPath);
+        $expectedSha256 = strtolower(trim($expectedSha256));
+
+        if ($packageKey === '' || $version === '' || $releaseId < 1 || $assetPath === '' || $expectedSha256 === '') {
+            return ['ok' => false, 'errors' => ['asset_request_invalid'], 'http' => 422];
+        }
+        if (! preg_match('/^[a-f0-9]{64}$/', $expectedSha256)) {
+            return ['ok' => false, 'errors' => ['asset_sha256_invalid'], 'http' => 422];
+        }
+        if (! $this->isSafeAssetPath($assetPath)) {
+            return ['ok' => false, 'errors' => ['asset_not_found'], 'http' => 404];
+        }
+
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+        try {
+            if (! Schema::connection($conn)->hasTable('sa_script_release_assets')) {
+                return ['ok' => false, 'errors' => ['auth_schema_unavailable'], 'http' => 503];
+            }
+        } catch (\Throwable) {
+            return ['ok' => false, 'errors' => ['auth_schema_unavailable'], 'http' => 503];
+        }
+
+        $matched = $this->findEligiblePinnedAuthRelease($account, $packageKey, $version, $releaseId);
+        if (! ($matched['ok'] ?? false)) {
+            return [
+                'ok' => false,
+                'errors' => $matched['errors'] ?? ['auth_release_not_found'],
+                'http' => (int) ($matched['http'] ?? 404),
+            ];
+        }
+
+        /** @var SaPackageRelease $release */
+        $release = $matched['release'];
+        $manifest = is_array($release->manifest) ? $release->manifest : [];
+        $manifestAssets = is_array($manifest['assets'] ?? null) ? $manifest['assets'] : [];
+
+        // Shared storage/hash verification (also used by Action Script distribution).
+        return $this->assets->loadVerified(
+            (int) $release->id,
+            $assetPath,
+            $expectedSha256,
+            $manifestAssets,
+        );
+    }
+
+    /**
+     * @return array{ok: true, tag: SaActionTag, package: SaPackage, release: SaPackageRelease}|array{ok: false, errors: list<string>, http?: int}
+     */
+    private function findEligiblePinnedAuthRelease(
+        SaAccount $account,
+        string $packageKey,
+        string $version,
+        int $releaseId,
+    ): array {
+        $accountPlatform = strtolower(trim((string) $account->platform));
+        if ($accountPlatform === '') {
+            return ['ok' => false, 'errors' => ['auth_release_not_found'], 'http' => 404];
+        }
+
+        foreach ($this->candidateAuthTagsForSite($accountPlatform) as $tag) {
+            $check = $this->assertAuthTagEligibleForAccount($account, $tag);
+            if (! ($check['ok'] ?? false)) {
+                continue;
+            }
+            if ((int) $tag->auth_release_id !== $releaseId) {
+                continue;
+            }
+
+            $package = SaPackage::query()->find((int) $tag->auth_script_id);
+            $release = SaPackageRelease::query()->find($releaseId);
+            if (! $package instanceof SaPackage || ! $release instanceof SaPackageRelease) {
+                continue;
+            }
+            if ((string) $package->package_key !== $packageKey) {
+                continue;
+            }
+            if ((string) $release->version !== $version) {
+                continue;
+            }
+            if ((int) $release->package_id !== (int) $package->id) {
+                continue;
+            }
+            if ((string) $release->status !== 'published') {
+                continue;
+            }
+
+            return [
+                'ok' => true,
+                'tag' => $tag,
+                'package' => $package,
+                'release' => $release,
+            ];
+        }
+
+        return ['ok' => false, 'errors' => ['auth_release_not_found'], 'http' => 404];
+    }
+
+    private function isSafeAssetPath(string $assetPath): bool
+    {
+        return $this->assets->isSafeAssetPath($assetPath);
     }
 
     /**

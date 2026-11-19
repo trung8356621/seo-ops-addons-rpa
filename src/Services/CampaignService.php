@@ -13,6 +13,8 @@ use Omnichannel\Addons\SocialAutomation\Enums\CampaignContentStatus;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignExecutionMode;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignRunMode;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignStatus;
+use Omnichannel\Addons\SocialAutomation\Models\SaAccount;
+use Omnichannel\Addons\SocialAutomation\Models\SaActionTagScript;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaign;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaignContent;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackage;
@@ -61,6 +63,15 @@ final class CampaignService
             return ['ok' => false, 'errors' => ['script_not_found']];
         }
 
+        $pinnedAccount = null;
+        $accountUuid = trim((string) ($input['account_id'] ?? ''));
+        if ($accountUuid !== '') {
+            $pinnedAccount = $this->resolvePinnedAccount($accountUuid, $installationId, $platform);
+            if ($pinnedAccount === null) {
+                return ['ok' => false, 'errors' => ['account_not_found_or_platform_mismatch']];
+            }
+        }
+
         $manifest = is_array($script['manifest'] ?? null) ? $script['manifest'] : [];
         $testGate = null;
         if ($runMode->requiresTestCompatibleScript()) {
@@ -86,16 +97,26 @@ final class CampaignService
             if (! ($sanitized['ok'] ?? false)) {
                 return ['ok' => false, 'errors' => $sanitized['errors'] ?? ['content_input_invalid']];
             }
+            $rowAccountId = $pinnedAccount?->id;
+            $rowAccountUuid = trim((string) ($row['account_id'] ?? ''));
+            if ($rowAccountUuid !== '') {
+                $rowAccount = $this->resolvePinnedAccount($rowAccountUuid, $installationId, $platform);
+                if ($rowAccount === null) {
+                    return ['ok' => false, 'errors' => ['content_account_invalid:'.$i]];
+                }
+                $rowAccountId = $rowAccount->id;
+            }
             $prepared[] = [
                 'external_ref' => $externalRef !== '' ? $externalRef : null,
                 'input' => $sanitized['input'] ?? [],
                 'sort_order' => $i,
+                'assigned_account_id' => $rowAccountId,
             ];
         }
 
         try {
             return DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use (
-                $name, $platform, $mode, $runMode, $script, $recheckSeconds, $prepared, $installationId, $userId, $testGate, $manifest
+                $name, $platform, $mode, $runMode, $script, $recheckSeconds, $prepared, $installationId, $userId, $testGate, $manifest, $pinnedAccount
             ): array {
                 $meta = [];
                 if (is_array($testGate)) {
@@ -104,6 +125,9 @@ final class CampaignService
                         'stops_before_publish' => (bool) ($testGate['stops_before_publish'] ?? false),
                         'limitations' => $testGate['limitations'] ?? [],
                     ];
+                }
+                if ($pinnedAccount instanceof SaAccount) {
+                    $meta['pinned_account_id'] = $pinnedAccount->account_uuid;
                 }
                 $campaign = SaCampaign::query()->create([
                     'campaign_uuid' => (string) Str::uuid(),
@@ -129,6 +153,7 @@ final class CampaignService
                         'sort_order' => $row['sort_order'],
                         'status' => CampaignContentStatus::Pending->value,
                         'input' => $row['input'],
+                        'assigned_account_id' => $row['assigned_account_id'],
                     ]);
                 }
 
@@ -362,50 +387,114 @@ final class CampaignService
     }
 
     /**
+     * Resolve and pin an exact published Script release.
+     * Accepts package_key, Action Tag key (e.g. mayhopphat.create_post), or manifest script_id.
+     *
      * @return array{script_id: string, version: string, content_digest: string|null, manifest: array<string, mixed>}|null
      */
     private function resolveScriptPin(string $scriptId, ?string $version): ?array
     {
+        $wantedVersion = ($version !== null && $version !== '') ? $version : null;
         $package = SaPackage::query()->where('package_key', $scriptId)->first();
+        $preferredReleaseId = null;
+
         if (! $package instanceof SaPackage) {
-            // Fallback: scan manifests for script_id
-            $releases = SaPackageRelease::query()->orderByDesc('id')->limit(200)->get();
-            foreach ($releases as $release) {
-                $manifest = is_array($release->manifest) ? $release->manifest : [];
-                $mid = trim((string) ($manifest['script_id'] ?? ''));
-                if ($mid !== '' && $mid === $scriptId) {
-                    $package = SaPackage::query()->find($release->package_id);
-                    if ($package instanceof SaPackage && ($version === null || $version === '' || (string) $release->version === $version)) {
-                        return [
-                            'script_id' => $package->package_key,
-                            'version' => (string) $release->version,
-                            'content_digest' => $release->content_digest,
-                            'manifest' => $manifest,
-                        ];
-                    }
+            $link = SaActionTagScript::query()
+                ->where('action_tag_key', $scriptId)
+                ->orderByDesc('id')
+                ->first();
+            if ($link instanceof SaActionTagScript && $link->package_id) {
+                $package = SaPackage::query()->find($link->package_id);
+                if ($wantedVersion === null && is_string($link->script_version) && $link->script_version !== '') {
+                    $wantedVersion = (string) $link->script_version;
                 }
+                if ($link->release_id) {
+                    $preferredReleaseId = (int) $link->release_id;
+                }
+            }
+        }
+
+        if ($package instanceof SaPackage) {
+            if ($preferredReleaseId !== null && $wantedVersion === null) {
+                $preferred = SaPackageRelease::query()
+                    ->where('id', $preferredReleaseId)
+                    ->where('package_id', $package->id)
+                    ->where('status', 'published')
+                    ->first();
+                if ($preferred instanceof SaPackageRelease) {
+                    return $this->scriptPinDto($package, $preferred);
+                }
+            }
+
+            $q = SaPackageRelease::query()
+                ->where('package_id', $package->id)
+                ->where('status', 'published');
+            if ($wantedVersion !== null) {
+                $q->where('version', $wantedVersion);
+            } else {
+                $q->orderByDesc('published_at')->orderByDesc('id');
+            }
+            $release = $q->first();
+            if ($release instanceof SaPackageRelease) {
+                return $this->scriptPinDto($package, $release);
             }
 
             return null;
         }
 
-        $q = SaPackageRelease::query()->where('package_id', $package->id);
-        if ($version !== null && $version !== '') {
-            $q->where('version', $version);
-        } else {
-            $q->orderByDesc('id');
-        }
-        $release = $q->first();
-        if (! $release instanceof SaPackageRelease) {
-            return null;
+        // Fallback: scan published manifests for script_id / action_tag_key.
+        $releases = SaPackageRelease::query()
+            ->where('status', 'published')
+            ->orderByDesc('published_at')
+            ->orderByDesc('id')
+            ->limit(200)
+            ->get();
+        foreach ($releases as $release) {
+            $manifest = is_array($release->manifest) ? $release->manifest : [];
+            $mid = trim((string) ($manifest['script_id'] ?? ''));
+            $tag = trim((string) ($manifest['action_tag_key'] ?? ''));
+            if (($mid !== '' && $mid === $scriptId) || ($tag !== '' && $tag === $scriptId)) {
+                if ($wantedVersion !== null && (string) $release->version !== $wantedVersion) {
+                    continue;
+                }
+                $pkg = SaPackage::query()->find($release->package_id);
+                if ($pkg instanceof SaPackage) {
+                    return $this->scriptPinDto($pkg, $release, $manifest);
+                }
+            }
         }
 
+        return null;
+    }
+
+    /**
+     * @param  array<string, mixed>|null  $manifest
+     * @return array{script_id: string, version: string, content_digest: string|null, manifest: array<string, mixed>}
+     */
+    private function scriptPinDto(SaPackage $package, SaPackageRelease $release, ?array $manifest = null): array
+    {
         return [
             'script_id' => $package->package_key,
             'version' => (string) $release->version,
             'content_digest' => $release->content_digest,
-            'manifest' => is_array($release->manifest) ? $release->manifest : [],
+            'manifest' => $manifest ?? (is_array($release->manifest) ? $release->manifest : []),
         ];
+    }
+
+    private function resolvePinnedAccount(string $accountUuid, string $installationId, string $platform): ?SaAccount
+    {
+        $account = SaAccount::query()
+            ->where('account_uuid', $accountUuid)
+            ->where('installation_id', $installationId)
+            ->first();
+        if (! $account instanceof SaAccount) {
+            return null;
+        }
+        if (strcasecmp((string) $account->platform, $platform) !== 0) {
+            return null;
+        }
+
+        return $account;
     }
 
     /**
@@ -441,6 +530,7 @@ final class CampaignService
     public function summaryDto(SaCampaign $campaign): array
     {
         $counts = $this->contentCounts($campaign);
+        $meta = is_array($campaign->meta) ? $campaign->meta : [];
 
         return [
             'id' => $campaign->campaign_uuid,
@@ -451,6 +541,8 @@ final class CampaignService
             'status' => $campaign->status,
             'script_id' => $campaign->script_id,
             'script_version' => $campaign->script_version,
+            'script_content_digest' => $campaign->script_content_digest,
+            'account_id' => isset($meta['pinned_account_id']) ? (string) $meta['pinned_account_id'] : null,
             'resource_recheck_seconds' => (int) $campaign->resource_recheck_seconds,
             'total_contents' => $counts['total'],
             'completed_contents' => $counts['success'],
@@ -466,17 +558,34 @@ final class CampaignService
     public function detailDto(SaCampaign $campaign): array
     {
         $counts = $this->contentCounts($campaign);
+        $meta = is_array($campaign->meta) ? $campaign->meta : [];
+        $accountUuids = [];
+        $accountIds = SaCampaignContent::query()
+            ->where('campaign_id', $campaign->id)
+            ->whereNotNull('assigned_account_id')
+            ->pluck('assigned_account_id')
+            ->unique()
+            ->filter()
+            ->all();
+        if ($accountIds !== []) {
+            $accountUuids = SaAccount::query()
+                ->whereIn('id', $accountIds)
+                ->pluck('account_uuid', 'id')
+                ->all();
+        }
         $contents = SaCampaignContent::query()
             ->where('campaign_id', $campaign->id)
             ->orderBy('sort_order')
             ->orderBy('id')
             ->get()
-            ->map(static function (SaCampaignContent $c): array {
+            ->map(static function (SaCampaignContent $c) use ($accountUuids): array {
+                $aid = $c->assigned_account_id ? (int) $c->assigned_account_id : null;
+
                 return [
                     'id' => $c->content_uuid,
                     'external_ref' => $c->external_ref,
                     'status' => $c->status,
-                    'assigned_account_id' => $c->assigned_account_id,
+                    'assigned_account_id' => $aid !== null ? (string) ($accountUuids[$aid] ?? '') : null,
                     'last_error_code' => $c->last_error_code,
                     'last_error_message' => $c->last_error_message,
                     'input' => is_array($c->input) ? $c->input : [],
@@ -492,6 +601,8 @@ final class CampaignService
             'run_mode' => $campaign->run_mode ?: CampaignRunMode::Live->value,
             'script_id' => $campaign->script_id,
             'script_version' => $campaign->script_version,
+            'script_content_digest' => $campaign->script_content_digest,
+            'account_id' => isset($meta['pinned_account_id']) ? (string) $meta['pinned_account_id'] : null,
             'resource_recheck_seconds' => (int) $campaign->resource_recheck_seconds,
             'summary' => [
                 'total' => $counts['total'],

@@ -153,5 +153,11 @@ Route::middleware([
             ->name('api.v1.services.social-automation.client.auth.resolve');
         Route::post('{service}/social-automation/client/auth/pull', [RpaClientApiController::class, 'pullAuthScript'])
             ->name('api.v1.services.social-automation.client.auth.pull');
+        Route::post('{service}/social-automation/client/auth/asset', [RpaClientApiController::class, 'downloadAuthAsset'])
+            ->name('api.v1.services.social-automation.client.auth.asset');
+        Route::post('{service}/social-automation/client/scripts/pull', [RpaClientApiController::class, 'pullActionScript'])
+            ->name('api.v1.services.social-automation.client.scripts.pull');
+        Route::post('{service}/social-automation/client/scripts/asset', [RpaClientApiController::class, 'downloadActionAsset'])
+            ->name('api.v1.services.social-automation.client.scripts.asset');
     });
 });

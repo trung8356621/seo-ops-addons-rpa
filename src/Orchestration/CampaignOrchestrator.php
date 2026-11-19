@@ -35,6 +35,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaJob;
 use Omnichannel\Addons\SocialAutomation\Models\SaJobAttempt;
 use Omnichannel\Addons\SocialAutomation\Models\SaJobEvent;
 use Omnichannel\Addons\SocialAutomation\Models\SaSessionAccount;
+use Omnichannel\Addons\SocialAutomation\Services\ActionScriptDistributionService;
 use Omnichannel\Addons\SocialAutomation\Support\JobObservability;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationSchema;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
@@ -60,6 +61,7 @@ final class CampaignOrchestrator
         private readonly JobObservability $observability = new JobObservability,
         private readonly CampaignTestScriptPolicy $testScripts = new CampaignTestScriptPolicy,
         private readonly ArtifactAcceptPolicy $artifacts = new ArtifactAcceptPolicy,
+        private readonly ActionScriptDistributionService $actionScripts = new ActionScriptDistributionService,
     ) {}
 
     /**
@@ -122,12 +124,16 @@ final class CampaignOrchestrator
                 $stillWaiting = 0;
 
                 foreach ($contents as $content) {
+                    // Hard Account pin (create account_id / content.assigned_account_id / campaign.meta).
+                    // NEVER silently fall back to another eligible account when pin is set.
+                    $requiredAccountId = $this->resolveRequiredAccountId($locked, $content);
+
                     // Mode A: durable assignment blocks OTHER contents; retry may reuse own assigned account.
                     $blockedAssigned = $assignedIds;
-                    if ($mode === CampaignExecutionMode::OneAccountOneJob && $content->assigned_account_id) {
+                    if ($mode === CampaignExecutionMode::OneAccountOneJob && $requiredAccountId !== null) {
                         $blockedAssigned = array_values(array_filter(
                             $assignedIds,
-                            static fn ($id): bool => (int) $id !== (int) $content->assigned_account_id
+                            static fn ($id): bool => (int) $id !== $requiredAccountId
                         ));
                     }
                     $selection = $this->selectEligibleForCampaign(
@@ -136,16 +142,33 @@ final class CampaignOrchestrator
                         $blockedAssigned,
                         $busyInCampaign,
                         1,
-                        $content->assigned_account_id ? (int) $content->assigned_account_id : null,
+                        $requiredAccountId,
                     );
                     if ($selection['selected'] === []) {
                         $content->status = CampaignContentStatus::WaitingResources->value;
+                        $content->last_error_code = $requiredAccountId !== null
+                            ? 'pinned_account_unavailable'
+                            : 'waiting_resources';
+                        $content->last_error_message = $requiredAccountId !== null
+                            ? 'Pinned account is offline or not eligible; no fallback'
+                            : null;
                         $content->save();
                         $stillWaiting++;
                         continue;
                     }
 
                     $row = $selection['selected'][0];
+                    $selectedAccountId = (int) ($row['account_id'] ?? 0);
+                    if ($requiredAccountId !== null && $selectedAccountId !== $requiredAccountId) {
+                        // Defense-in-depth: refuse wrong account even if selector regresses.
+                        $content->status = CampaignContentStatus::WaitingResources->value;
+                        $content->last_error_code = 'pinned_account_mismatch';
+                        $content->last_error_message = 'Dispatch refused non-pinned account (no silent fallback)';
+                        $content->save();
+                        $stillWaiting++;
+                        continue;
+                    }
+
                     $job = $this->reserveCampaignJob($locked, $content, $row, $mode);
                     if ($job === null) {
                         $content->status = CampaignContentStatus::WaitingResources->value;
@@ -741,8 +764,37 @@ final class CampaignOrchestrator
     }
 
     /**
+     * Resolve hard Account pin for a content row.
+     * Precedence: content.assigned_account_id → campaign.meta.pinned_account_id (UUID→id).
+     */
+    private function resolveRequiredAccountId(SaCampaign $campaign, SaCampaignContent $content): ?int
+    {
+        if ($content->assigned_account_id) {
+            return (int) $content->assigned_account_id;
+        }
+        $meta = is_array($campaign->meta) ? $campaign->meta : [];
+        $pinnedUuid = trim((string) ($meta['pinned_account_id'] ?? ''));
+        if ($pinnedUuid === '') {
+            return null;
+        }
+        $account = SaAccount::query()
+            ->where('account_uuid', $pinnedUuid)
+            ->where('installation_id', (string) $campaign->installation_id)
+            ->first();
+        if (! $account instanceof SaAccount) {
+            return null;
+        }
+        // Persist onto content so retries stay pinned without re-resolving meta.
+        $content->assigned_account_id = (int) $account->id;
+        $content->save();
+
+        return (int) $account->id;
+    }
+
+    /**
      * @param  list<int|string>  $assignedIds
      * @param  list<int|string>  $busyInCampaign
+     * @param  int|null  $requiredAccountId  Hard pin: only this account; null = auto-select by platform
      * @return array{selected: list<array<string, mixed>>, skip_reasons: list<string>}
      */
     private function selectEligibleForCampaign(
@@ -751,7 +803,7 @@ final class CampaignOrchestrator
         array $assignedIds,
         array $busyInCampaign,
         int $target,
-        ?int $preferAccountId = null,
+        ?int $requiredAccountId = null,
     ): array {
         $agents = SaAgent::query()
             ->where('installation_id', $campaign->installation_id)
@@ -812,7 +864,7 @@ final class CampaignOrchestrator
             if (strcasecmp((string) $account->platform, (string) $campaign->platform) !== 0) {
                 continue;
             }
-            if ($preferAccountId !== null && (int) $accountId !== $preferAccountId) {
+            if ($requiredAccountId !== null && (int) $accountId !== $requiredAccountId) {
                 continue;
             }
             if (! $this->modePolicy->canAssignAccount($mode, (int) $accountId, $assignedIds, $busyInCampaign)) {
@@ -915,6 +967,14 @@ final class CampaignOrchestrator
         $leaseToken = Str::random(40);
         $fencing = 1;
         $input = is_array($content->input) ? $content->input : [];
+        $scriptPin = $this->actionScripts->resolvePublishedPin(
+            (string) $campaign->script_id,
+            (string) $campaign->script_version,
+            $campaign->script_content_digest !== null ? (string) $campaign->script_content_digest : null,
+        );
+        if ($scriptPin === null) {
+            return null;
+        }
 
         $job = SaJob::query()->create([
             'job_uuid' => (string) Str::uuid(),
@@ -924,9 +984,9 @@ final class CampaignOrchestrator
             'agent_id' => $agent->id,
             'browser_session_id' => $session->id,
             'account_id' => $accountId,
-            'package_key' => $campaign->script_id,
-            'package_version' => $campaign->script_version,
-            'content_digest' => $campaign->script_content_digest,
+            'package_key' => $scriptPin['package_key'],
+            'package_version' => $scriptPin['version'],
+            'content_digest' => $scriptPin['content_digest'],
             'status' => JobStatus::Reserved->value,
             'idempotency_key' => $idem,
             'lease_token' => $leaseToken,
@@ -937,6 +997,8 @@ final class CampaignOrchestrator
                 'content_uuid' => $content->content_uuid,
                 'run_mode' => (string) ($campaign->run_mode ?: CampaignRunMode::Live->value),
                 'execution_mode' => (string) $campaign->execution_mode,
+                'installation_id' => (string) $campaign->installation_id,
+                'script_pin' => $scriptPin,
             ],
             'reserved_at' => now(),
             'lease_expires_at' => now()->addSeconds(self::DEFAULT_LEASE_SECONDS),
@@ -1359,6 +1421,13 @@ final class CampaignOrchestrator
             $runMode = CampaignRunMode::Live->value;
         }
 
+        $scriptPin = $this->actionScripts->jobScriptPin($job);
+        $packageKey = $scriptPin['package_key'] ?? (string) $job->package_key;
+        $version = $scriptPin['version'] ?? (string) $job->package_version;
+        // content_digest = package content integrity pin (not execution_digest).
+        $contentDigest = $scriptPin['content_digest'] ?? ($job->content_digest !== null ? (string) $job->content_digest : null);
+        $executionDigest = $scriptPin['execution_digest'] ?? null;
+
         return [
             'job_id' => $job->job_uuid,
             'attempt_id' => $attempt?->attempt_uuid,
@@ -1366,8 +1435,16 @@ final class CampaignOrchestrator
             'content_id' => $content?->content_uuid,
             'browser_id' => $session?->session_uuid,
             'account_id' => $account?->account_uuid,
-            'script_id' => $job->package_key,
-            'script_version' => $job->package_version,
+            // Legacy aliases kept for older clients.
+            'script_id' => $packageKey,
+            'script_version' => $version,
+            // Exact Action Script pin for pull/asset (no latest inference).
+            'package_key' => $packageKey,
+            'package_id' => $scriptPin['package_id'] ?? null,
+            'release_id' => $scriptPin['release_id'] ?? null,
+            'version' => $version,
+            'content_digest' => $contentDigest,
+            'execution_digest' => $executionDigest,
             'run_mode' => $runMode,
             'execution_mode' => (string) ($payload['execution_mode'] ?? $campaign?->execution_mode),
             'input' => $input,

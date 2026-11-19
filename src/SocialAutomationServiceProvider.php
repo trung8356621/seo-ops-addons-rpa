@@ -111,6 +111,7 @@ final class SocialAutomationServiceProvider extends ServiceProvider
         $this->app->singleton(EnsureRpaClientApiKey::class);
         $this->app->singleton(EnsureClientConnectionLease::class);
         $this->app->singleton(AuthScriptService::class);
+        $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\ActionScriptDistributionService::class);
         $this->app->singleton(
             \Omnichannel\Addons\SocialAutomation\Contracts\SaAccountRepositoryContract::class,
             \Omnichannel\Addons\SocialAutomation\Repositories\EloquentSaAccountRepository::class
@@ -428,7 +429,7 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                 Route::post('/session-confirm-login', [RpaClientApiController::class, 'confirmLogin'])
                     ->name('social-automation.client.session-confirm-login');
 
-                // CP8 Auth Script context/resolve/pull — API key + active connection lease
+                // CP8 Auth Script + Action Script pull/asset — API key + active connection lease
                 Route::middleware([EnsureClientConnectionLease::class])->group(function (): void {
                     Route::post('/auth/context', [RpaClientApiController::class, 'authContext'])
                         ->name('social-automation.client.auth.context');
@@ -436,6 +437,13 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                         ->name('social-automation.client.auth.resolve');
                     Route::post('/auth/pull', [RpaClientApiController::class, 'pullAuthScript'])
                         ->name('social-automation.client.auth.pull');
+                    Route::post('/auth/asset', [RpaClientApiController::class, 'downloadAuthAsset'])
+                        ->name('social-automation.client.auth.asset');
+                    // Action Scripts (Campaign Jobs) — distinct from Auth; Job attempt lease + exact pin
+                    Route::post('/scripts/pull', [RpaClientApiController::class, 'pullActionScript'])
+                        ->name('social-automation.client.scripts.pull');
+                    Route::post('/scripts/asset', [RpaClientApiController::class, 'downloadActionAsset'])
+                        ->name('social-automation.client.scripts.asset');
                 });
 
                 // CP19A: Client campaign job claim/ack/progress/result (Client API Key only)

@@ -441,6 +441,55 @@ components:
                       type: object
                       additionalProperties: true
 
+    ClientAuthAssetRequest:
+      type: object
+      required: [connection_token, account_id, package_key, version, release_id, asset_path, expected_sha256]
+      properties:
+        connection_token:
+          type: string
+          description: Active Client connection lease token
+        account_id:
+          type: string
+          description: Account UUID or numeric id (installation-scoped)
+        package_key:
+          type: string
+          description: Exact Auth package_key from pinned published release
+        version:
+          type: string
+          description: Exact release version (no latest fallback)
+        release_id:
+          type: integer
+          minimum: 1
+          description: Exact pinned Auth release id
+        asset_path:
+          type: string
+          description: Manifest asset path (ROI/PNG). Path traversal rejected.
+        expected_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          description: Expected SHA-256 digest from auth/pull manifest
+        format:
+          type: string
+          enum: [json, binary]
+          description: Optional. Default json (asset_base64). `binary` returns raw bytes with Content-Type.
+
+    ClientAuthAssetSuccess:
+      allOf:
+        - $ref: '#/components/schemas/OkTrue'
+        - type: object
+          required: [asset_path, sha256, asset_base64]
+          properties:
+            asset_path:
+              type: string
+            sha256:
+              type: string
+              pattern: '^[a-f0-9]{64}$'
+            mime:
+              type: string
+            asset_base64:
+              type: string
+              description: Base64-encoded asset bytes. Never includes storage_path or credentials.
+
     ServiceApiCoreError:
       type: object
       required: [error]
@@ -817,11 +866,31 @@ components:
             Independent of execution_mode. Test Mode is NOT a security sandbox.
             Requires an explicitly test-compatible Script (manifest markers + stop-before-publish + screenshot terminal).
             Scripts without reliable publish-stop markers are rejected (fail closed).
+            WordPress Save-Draft scripts (e.g. mayhopphat.create_post) typically use `live` —
+            they are not Test Mode compatible unless the published manifest declares test markers.
         execution_mode:
           type: string
           enum: [one_account_one_job, one_account_many_jobs]
-        script_id: { type: string }
-        script_version: { type: string }
+        script_id:
+          type: string
+          description: |
+            Package key, Action Tag key (e.g. `mayhopphat.create_post`), or manifest `script_id`.
+            Backend pins the exact published release (`status=published`) and stores script_version + content_digest.
+        script_version:
+          type: string
+          description: Optional exact published version pin; omit to use latest published (or Action Tag linked release).
+        account_id:
+          type: string
+          format: uuid
+          description: |
+            Hard Account UUID pin for 1 Campaign → 1 Account → 1 Job.
+            When set:
+            - Stored on campaign.meta.pinned_account_id
+            - Contents are pre-assigned (assigned_account_id)
+            - Dispatch selects ONLY this account (platform must match)
+            - If pinned account is offline / not eligible → content stays `waiting_resources`
+              with error `pinned_account_unavailable` — NEVER silently falls back to another account.
+            Omit only when auto platform-based selection is intentional.
         resource_recheck_seconds:
           type: integer
           default: 3600
@@ -833,10 +902,16 @@ components:
             type: object
             properties:
               external_ref: { type: string }
+              account_id:
+                type: string
+                format: uuid
+                description: |
+                  Optional per-content hard Account UUID override (must match campaign platform).
+                  Same no-fallback semantics as campaign-level account_id.
               input:
                 type: object
                 additionalProperties: true
-                description: Placeholder-safe script input; plaintext secrets rejected
+                description: Placeholder-safe script input; plaintext secrets rejected. Title-only scripts use `{ title: "..." }`.
 
     CampaignSummary:
       type: object
@@ -855,6 +930,14 @@ components:
           enum: [draft, running, paused, cancelled, completed]
         script_id: { type: string }
         script_version: { type: string }
+        script_content_digest:
+          type: string
+          nullable: true
+        account_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Pinned Account UUID when provided at create
         resource_recheck_seconds: { type: integer }
         total_contents: { type: integer }
         completed_contents: { type: integer }
@@ -878,6 +961,13 @@ components:
         execution_mode: { type: string }
         script_id: { type: string }
         script_version: { type: string }
+        script_content_digest:
+          type: string
+          nullable: true
+        account_id:
+          type: string
+          format: uuid
+          nullable: true
         resource_recheck_seconds: { type: integer }
         summary:
           type: object
@@ -899,20 +989,69 @@ components:
           type: array
           items:
             type: object
-            additionalProperties: true
+            properties:
+              id: { type: string, format: uuid }
+              external_ref: { type: string, nullable: true }
+              status: { type: string }
+              assigned_account_id:
+                type: string
+                format: uuid
+                nullable: true
+              last_error_code: { type: string, nullable: true }
+              last_error_message: { type: string, nullable: true }
+              input:
+                type: object
+                additionalProperties: true
 
     CampaignJobClaim:
       type: object
-      description: Claim payload — no plaintext credentials
+      description: |
+        Claim payload — no plaintext credentials.
+        Exact Action Script pin fields are required for `/client/scripts/pull` + `/client/scripts/asset`.
+        `content_digest` is the package content integrity hash; do NOT treat it as `execution_digest`.
+      required:
+        - job_id
+        - attempt_id
+        - account_id
+        - package_key
+        - release_id
+        - version
+        - lease_token
       properties:
         job_id: { type: string }
         attempt_id: { type: string }
         campaign_id: { type: string }
         content_id: { type: string }
         browser_id: { type: string }
-        account_id: { type: string }
-        script_id: { type: string }
-        script_version: { type: string }
+        account_id: { type: string, format: uuid }
+        script_id:
+          type: string
+          description: Legacy alias of package_key
+        script_version:
+          type: string
+          description: Legacy alias of version
+        package_key:
+          type: string
+          description: Exact pinned package_key (no latest fallback)
+        package_id:
+          type: integer
+          nullable: true
+        release_id:
+          type: integer
+          description: Exact published sa_package_releases.id pinned at job reserve
+        version:
+          type: string
+          description: Exact published release version
+        content_digest:
+          type: string
+          nullable: true
+          description: Package content digest pin (integrity of package bytes/manifest content)
+        execution_digest:
+          type: string
+          nullable: true
+          description: |
+            Optional execution digest from the published release.
+            Distinct from content_digest — Client must not equate the two.
         run_mode:
           type: string
           enum: [test, live]
@@ -926,6 +1065,109 @@ components:
         lease_expires_at:
           type: string
           format: date-time
+
+    ClientActionScriptPullRequest:
+      type: object
+      required: [connection_token, job_id, attempt_id, lease_token, account_id, package_key, version, release_id]
+      properties:
+        connection_token:
+          type: string
+          description: Active Client connection lease token
+        job_id:
+          type: string
+          format: uuid
+        attempt_id:
+          type: string
+          description: Active claim attempt UUID (fence)
+        lease_token:
+          type: string
+          description: Job claim lease_token
+        account_id:
+          type: string
+          format: uuid
+          description: Must match Job account binding
+        package_key:
+          type: string
+          description: Exact package_key from CampaignJobClaim (aliases script_id accepted)
+        version:
+          type: string
+          description: Exact version from claim (aliases script_version accepted)
+        release_id:
+          type: integer
+          minimum: 1
+          description: Exact published release_id from claim — never latest
+
+    ClientActionScriptRelease:
+      type: object
+      required: [package_key, package_id, version, release_id, content_digest, status, manifest]
+      properties:
+        package_key: { type: string }
+        package_id: { type: integer }
+        kind: { type: string }
+        is_authentication: { type: boolean }
+        version: { type: string }
+        release_id: { type: integer }
+        content_digest:
+          type: string
+          description: Package content digest (not execution_digest)
+        execution_digest:
+          type: string
+          nullable: true
+          description: Distinct from content_digest when present
+        schema_version: { type: integer }
+        status:
+          type: string
+          enum: [published]
+        runtime_compatibility:
+          type: object
+          additionalProperties: true
+          nullable: true
+        assets_complete: { type: boolean }
+        ready_to_execute: { type: boolean }
+        assets:
+          type: array
+          items:
+            type: object
+            required: [path, sha256]
+            properties:
+              path: { type: string }
+              sha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+              kind: { type: string, nullable: true }
+        manifest:
+          type: object
+          additionalProperties: true
+
+    ClientActionScriptPullSuccess:
+      allOf:
+        - $ref: '#/components/schemas/OkTrue'
+        - type: object
+          required: [release]
+          properties:
+            release:
+              $ref: '#/components/schemas/ClientActionScriptRelease'
+
+    ClientActionScriptAssetRequest:
+      type: object
+      required: [connection_token, job_id, attempt_id, lease_token, account_id, package_key, version, release_id, asset_path, expected_sha256]
+      properties:
+        connection_token: { type: string }
+        job_id: { type: string, format: uuid }
+        attempt_id: { type: string }
+        lease_token: { type: string }
+        account_id: { type: string, format: uuid }
+        package_key: { type: string }
+        version: { type: string }
+        release_id: { type: integer, minimum: 1 }
+        asset_path:
+          type: string
+          description: Manifest asset path. Path traversal rejected.
+        expected_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+        format:
+          type: string
+          enum: [json, binary]
+          description: Default json (asset_base64). binary returns raw bytes.
 
     AccountDetailSuccess:
       allOf:
@@ -2398,6 +2640,138 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           description: CLIENT_KEY_IN_USE / lease invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientErrorEnvelope'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/social-automation/client/auth/asset:
+    post:
+      tags: [RPA Client]
+      summary: Download one asset from the pinned published Auth Script release
+      description: |
+        Requires Client API Key + active connection lease (`connection_token`).
+        Allows download only for an asset declared on the exact Auth-pinned published release
+        for the Account Site (same eligibility as `/client/auth/context`, `/resolve`, `/pull`).
+        Verifies installation ownership, package_key, version, release_id, manifest declaration,
+        and SHA-256 (DB + bytes). Path traversal and unrelated packages fail closed.
+        Default response is JSON + `asset_base64`. Optional `format=binary` returns raw bytes
+        with `Content-Type` / `X-Checksum-Sha256`. Never returns credentials or storage paths.
+      operationId: clientAuthAsset
+      security:
+        - RpaClientApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClientAuthAssetRequest'
+      responses:
+        '200':
+          description: Asset bytes (JSON base64 by default, or raw binary when format=binary)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientAuthAssetSuccess'
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: CLIENT_KEY_IN_USE / lease invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientErrorEnvelope'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/social-automation/client/scripts/pull:
+    post:
+      tags: [RPA Client]
+      summary: Pull exact Job-pinned published Action Script release
+      description: |
+        Distinct from `/client/auth/pull`. Requires Client API Key + active connection lease,
+        valid Job attempt fence (`attempt_id` + `lease_token`), and Account binding match.
+        Only the exact published release pinned on the Campaign Job is returned (no latest).
+        `content_digest` and `execution_digest` are separate fields.
+      operationId: clientActionScriptsPull
+      security:
+        - RpaClientApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClientActionScriptPullRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientActionScriptPullSuccess'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Stale attempt / expired lease / connection lease invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientErrorEnvelope'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/social-automation/client/scripts/asset:
+    post:
+      tags: [RPA Client]
+      summary: Download one asset from the Job-pinned published Action Script release
+      description: |
+        Distinct from `/client/auth/asset`. Same Job attempt + Account + exact release pin gates as
+        `/client/scripts/pull`. Reuses shared ScriptReleaseAssetReader for path-traversal rejection
+        and SHA-256 verification (DB row + bytes). Fail-closed on missing asset.
+        Default JSON + `asset_base64` (compatible with Client Asset Store).
+      operationId: clientActionScriptsAsset
+      security:
+        - RpaClientApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClientActionScriptAssetRequest'
+      responses:
+        '200':
+          description: Asset bytes (JSON base64 by default, or raw binary when format=binary)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientAuthAssetSuccess'
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Stale attempt / expired lease / connection lease invalid
           content:
             application/json:
               schema:
@@ -4229,18 +4603,36 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/CampaignCreateRequest'
-            example:
-              name: Threads Campaign Test
-              platform: threads
-              run_mode: test
-              execution_mode: one_account_many_jobs
-              script_id: TEST_SCRIPT_ID
-              resource_recheck_seconds: 3600
-              contents:
-                - external_ref: test-001
-                  input:
-                    title: Test Content 01
-                    content: Mock content
+            examples:
+              wordpress_draft_poc:
+                summary: 1 Campaign → 1 Account → 1 Job → WordPress Save Draft
+                value:
+                  name: WP Draft POC
+                  platform: mayhopphat
+                  run_mode: live
+                  execution_mode: one_account_one_job
+                  script_id: mayhopphat.create_post
+                  script_version: "1"
+                  account_id: ff0035e0-a6d8-42af-8370-f5be9e453f2d
+                  resource_recheck_seconds: 3600
+                  contents:
+                    - external_ref: poc-draft-001
+                      input:
+                        title: POC Draft Title
+              threads_test_mode:
+                summary: Test Mode requires test-compatible script markers
+                value:
+                  name: Threads Campaign Test
+                  platform: threads
+                  run_mode: test
+                  execution_mode: one_account_many_jobs
+                  script_id: TEST_SCRIPT_ID
+                  resource_recheck_seconds: 3600
+                  contents:
+                    - external_ref: test-001
+                      input:
+                        title: Test Content 01
+                        content: Mock content
       responses:
         '201':
           description: Created
@@ -4255,12 +4647,14 @@ paths:
                 ok: true
                 data:
                   id: CAMPAIGN_ID
-                  name: Threads Campaign Test
-                  platform: threads
-                  run_mode: test
-                  execution_mode: one_account_many_jobs
+                  name: WP Draft POC
+                  platform: mayhopphat
+                  run_mode: live
+                  execution_mode: one_account_one_job
                   status: draft
-                  script_id: TEST_SCRIPT_ID
+                  script_id: 00c6ca04-3d37-4dbf-a4a3-5fc83e9b17a5
+                  script_version: "1"
+                  account_id: ff0035e0-a6d8-42af-8370-f5be9e453f2d
                   resource_recheck_seconds: 3600
                   total_contents: 1
                   completed_contents: 0
@@ -4508,11 +4902,17 @@ paths:
                       content_id: CONTENT_ID
                       browser_id: BROWSER_UUID
                       account_id: ACCOUNT_UUID
-                      script_id: SCRIPT_ID
-                      script_version: VERSION
-                      run_mode: test
-                      execution_mode: one_account_many_jobs
-                      input: {}
+                      script_id: 00c6ca04-3d37-4dbf-a4a3-5fc83e9b17a5
+                      script_version: "1"
+                      package_key: 00c6ca04-3d37-4dbf-a4a3-5fc83e9b17a5
+                      package_id: 5
+                      release_id: 4
+                      version: "1"
+                      content_digest: 5e0f3aafc2e1687359f4c9e64835160493d980122bfc185207671d18e53b8c9d
+                      execution_digest: null
+                      run_mode: live
+                      execution_mode: one_account_one_job
+                      input: { title: POC Draft Title }
                       lease_token: OPAQUE_LEASE_TOKEN
                       lease_expires_at: '2026-11-02T12:05:00+00:00'
         '403':
