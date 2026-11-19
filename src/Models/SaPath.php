@@ -23,6 +23,7 @@ class SaPath extends Model
 
     protected $casts = [
         'path_inputs' => 'array',
+        'is_authentication' => 'boolean',
     ];
 
     protected static function booted(): void

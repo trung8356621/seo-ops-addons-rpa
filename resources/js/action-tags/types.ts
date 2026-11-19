@@ -26,6 +26,7 @@ export type PathItem = {
   url_pattern: string;
   path_inputs: PathInput[];
   description?: string | null;
+  is_authentication?: boolean;
 };
 
 export type ActionItem = {

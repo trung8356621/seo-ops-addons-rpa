@@ -42,19 +42,9 @@ final class ActionRegistryController
             ];
         })->all();
 
-        $paths = SaPath::query()->orderBy('site_id')->orderBy('name')->get()->map(function (SaPath $p) {
-            $inputs = is_array($p->path_inputs) ? $p->path_inputs : PathPatternResolver::parseInputs($p->url_pattern ?? '');
-            return [
-                'id' => (int) $p->id,
-                'site_id' => (int) $p->site_id,
-                'site_key' => $p->site_key,
-                'key' => $p->key,
-                'name' => $p->name,
-                'url_pattern' => $p->url_pattern,
-                'path_inputs' => $inputs,
-                'description' => $p->description,
-            ];
-        })->all();
+        $paths = SaPath::query()->orderBy('site_id')->orderBy('name')->get()->map(
+            fn (SaPath $p) => $this->serializePath($p)
+        )->all();
 
         // V1 Actions: Post, Comment, Collect (explicitly filter out any unapproved like/share)
         $actions = SaAction::query()
@@ -262,8 +252,16 @@ final class ActionRegistryController
         }
 
         $detectedInputs = PathPatternResolver::parseInputs($urlPattern);
+        $wantsAuth = filter_var($request->input('is_authentication', false), FILTER_VALIDATE_BOOLEAN);
+        if ($wantsAuth && ! $this->pathAuthenticationColumnReady()) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'schema_unavailable',
+                'message' => 'Migration/schema Authentication Path chưa sẵn sàng (sa_paths.is_authentication).',
+            ], 503);
+        }
 
-        $path = SaPath::query()->create([
+        $payload = [
             'site_id' => $site->id,
             'site_key' => $site->key,
             'key' => $key,
@@ -271,9 +269,14 @@ final class ActionRegistryController
             'url_pattern' => $urlPattern,
             'path_inputs' => $detectedInputs,
             'description' => $description !== '' ? $description : null,
-        ]);
+        ];
+        if ($this->pathAuthenticationColumnReady()) {
+            $payload['is_authentication'] = $wantsAuth;
+        }
 
-        return response()->json(['ok' => true, 'path' => $path]);
+        $path = SaPath::query()->create($payload);
+
+        return response()->json(['ok' => true, 'path' => $this->serializePath($path)]);
     }
 
     public function updatePath(Request $request, int $id): JsonResponse
@@ -303,9 +306,20 @@ final class ActionRegistryController
             $path->description = $description !== '' ? $description : null;
         }
 
+        if ($request->exists('is_authentication')) {
+            if (! $this->pathAuthenticationColumnReady()) {
+                return response()->json([
+                    'ok' => false,
+                    'error' => 'schema_unavailable',
+                    'message' => 'Migration/schema Authentication Path chưa sẵn sàng (sa_paths.is_authentication).',
+                ], 503);
+            }
+            $path->is_authentication = filter_var($request->input('is_authentication'), FILTER_VALIDATE_BOOLEAN);
+        }
+
         $path->save();
 
-        return response()->json(['ok' => true, 'path' => $path]);
+        return response()->json(['ok' => true, 'path' => $this->serializePath($path->fresh() ?? $path)]);
     }
 
     public function storeTag(Request $request): JsonResponse
@@ -622,6 +636,56 @@ final class ActionRegistryController
             'dry_run' => $dryRun,
             'tags' => $tagKeys,
         ];
+    }
+
+    /**
+     * @return array{
+     *   id: int,
+     *   site_id: int,
+     *   site_key: string|null,
+     *   key: string,
+     *   name: string,
+     *   url_pattern: string|null,
+     *   path_inputs: list<array{key: string, type: string, required: bool}>,
+     *   description: string|null,
+     *   is_authentication?: bool
+     * }
+     */
+    private function serializePath(SaPath $p): array
+    {
+        $inputs = is_array($p->path_inputs)
+            ? $p->path_inputs
+            : PathPatternResolver::parseInputs($p->url_pattern ?? '');
+
+        $row = [
+            'id' => (int) $p->id,
+            'site_id' => (int) $p->site_id,
+            'site_key' => $p->site_key,
+            'key' => $p->key,
+            'name' => $p->name,
+            'url_pattern' => $p->url_pattern,
+            'path_inputs' => $inputs,
+            'description' => $p->description,
+        ];
+
+        // Omit key when schema is missing so clients can detect unreadiness.
+        if ($this->pathAuthenticationColumnReady()) {
+            $row['is_authentication'] = (bool) ($p->is_authentication ?? false);
+        }
+
+        return $row;
+    }
+
+    private function pathAuthenticationColumnReady(): bool
+    {
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+
+        try {
+            return Schema::connection($conn)->hasTable('sa_paths')
+                && Schema::connection($conn)->hasColumn('sa_paths', 'is_authentication');
+        } catch (\Throwable) {
+            return false;
+        }
     }
 
     public function createRequest(Request $request, int $tagId): JsonResponse

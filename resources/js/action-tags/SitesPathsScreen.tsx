@@ -20,6 +20,7 @@ interface SitesPathsScreenProps {
     name: string;
     url_pattern: string;
     description?: string;
+    is_authentication?: boolean;
   }) => Promise<void>;
 }
 
@@ -52,6 +53,7 @@ export const SitesPathsScreen: React.FC<SitesPathsScreenProps> = ({
   // Form states for Edit / Add Path
   const [pathNameInput, setPathNameInput] = useState('');
   const [pathPatternInput, setPathPatternInput] = useState('');
+  const [pathIsAuthentication, setPathIsAuthentication] = useState(false);
   const [testValues, setTestValues] = useState<Record<string, string>>({});
   const [isSavingPath, setIsSavingPath] = useState(false);
   const [pathError, setPathError] = useState('');
@@ -78,6 +80,7 @@ export const SitesPathsScreen: React.FC<SitesPathsScreenProps> = ({
       setSelectedPathId('new');
       setPathNameInput('');
       setPathPatternInput('/');
+      setPathIsAuthentication(false);
       setTestValues({});
     }
   }, [activeSitePaths]);
@@ -86,6 +89,7 @@ export const SitesPathsScreen: React.FC<SitesPathsScreenProps> = ({
     setSelectedPathId(p.id);
     setPathNameInput(p.name);
     setPathPatternInput(p.url_pattern);
+    setPathIsAuthentication(Boolean(p.is_authentication));
     setPathError('');
 
     // Prepopulate test values
@@ -109,6 +113,7 @@ export const SitesPathsScreen: React.FC<SitesPathsScreenProps> = ({
     setSelectedPathId('new');
     setPathNameInput('');
     setPathPatternInput('/wp-admin/post-new.php');
+    setPathIsAuthentication(false);
     setPathError('');
     setTestValues({});
   };
@@ -139,6 +144,7 @@ export const SitesPathsScreen: React.FC<SitesPathsScreenProps> = ({
         site_id: activeSite.id,
         name: pathNameInput.trim(),
         url_pattern: pathPatternInput.trim(),
+        is_authentication: pathIsAuthentication,
       });
     } catch (err: any) {
       setPathError(err.message || 'Lỗi khi lưu Path');
@@ -495,6 +501,16 @@ export const SitesPathsScreen: React.FC<SitesPathsScreenProps> = ({
                 />
               </div>
             </div>
+
+            <label className="inline-flex items-center gap-2 text-sm text-gray-800 select-none">
+              <input
+                type="checkbox"
+                checked={pathIsAuthentication}
+                onChange={(e) => setPathIsAuthentication(e.target.checked)}
+                className="h-4 w-4 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+              />
+              <span className="font-medium">Authentication Path</span>
+            </label>
 
             {/* Detected Path Inputs */}
             <div>

@@ -3222,6 +3222,20 @@ paths:
             schema:
               type: object
               additionalProperties: true
+              properties:
+                site_id:
+                  type: integer
+                name:
+                  type: string
+                key:
+                  type: string
+                url_pattern:
+                  type: string
+                description:
+                  type: string
+                is_authentication:
+                  type: boolean
+                  description: Authentication Path flag (sa_paths.is_authentication)
       responses:
         '200':
           description: Created
@@ -3237,6 +3251,8 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+        '503':
+          description: sa_paths.is_authentication schema unavailable
 
   /social-automation/api/action-registry/paths/{id}:
     put:
@@ -3253,6 +3269,16 @@ paths:
             schema:
               type: object
               additionalProperties: true
+              properties:
+                name:
+                  type: string
+                url_pattern:
+                  type: string
+                description:
+                  type: string
+                is_authentication:
+                  type: boolean
+                  description: Authentication Path flag (sa_paths.is_authentication)
       responses:
         '200':
           content:
@@ -3260,6 +3286,8 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+        '503':
+          description: sa_paths.is_authentication schema unavailable
 
   /social-automation/api/action-registry/tags:
     post:

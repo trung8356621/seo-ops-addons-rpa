@@ -137,6 +137,7 @@ export const App: React.FC<AppProps> = ({ initialData, apiBase, csrfToken }) => 
     name: string;
     url_pattern: string;
     description?: string;
+    is_authentication?: boolean;
   }) => {
     const isEdit = typeof pathData.id === 'number';
     const url = isEdit ? `${apiBase}/paths/${pathData.id}` : `${apiBase}/paths`;
