@@ -44,6 +44,7 @@ use Omnichannel\Addons\SocialAutomation\Services\AuthScriptService;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureSocialAutomationDocsAccess;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\RenderRpaAdminRateLimitJson;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ClientCampaignJobController;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\ClientKeepAliveController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\StaffCampaignContentController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\StaffCampaignController;
 use Omnichannel\Addons\SocialAutomation\Orchestration\CampaignOrchestrator;
@@ -118,6 +119,11 @@ final class SocialAutomationServiceProvider extends ServiceProvider
             \Omnichannel\Addons\SocialAutomation\Contracts\SaAccountRepositoryContract::class,
             \Omnichannel\Addons\SocialAutomation\Repositories\EloquentSaAccountRepository::class
         );
+        $this->app->singleton(
+            \Omnichannel\Addons\SocialAutomation\Contracts\KeepAliveStoreContract::class,
+            \Omnichannel\Addons\SocialAutomation\Repositories\EloquentKeepAliveStore::class
+        );
+        $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\KeepAliveNodeService::class);
         $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\SaAccountService::class);
 
         try {
@@ -476,6 +482,12 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     Route::post('/scripts/asset', [RpaClientApiController::class, 'downloadActionAsset'])
                         ->name('social-automation.client.scripts.asset');
                 });
+
+                // Keep Alive Phase 3B.1 — Node register + explicit Campaign assignments
+                Route::post('/keepalive/register', [ClientKeepAliveController::class, 'register'])
+                    ->name('social-automation.client.keepalive.register');
+                Route::get('/keepalive/assignments', [ClientKeepAliveController::class, 'assignments'])
+                    ->name('social-automation.client.keepalive.assignments');
 
                 // CP19A: Client campaign job claim/ack/progress/result (Client API Key only)
                 Route::post('/jobs/claim', [ClientCampaignJobController::class, 'claim'])

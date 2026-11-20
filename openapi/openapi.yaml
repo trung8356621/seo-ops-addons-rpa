@@ -14,6 +14,12 @@ info:
     - Test Mode requires explicitly test-compatible Scripts; not a security sandbox; screenshot ≠ publish proof
     - Resource shortage → `waiting_resources` + durable `next_recheck_at` (default 3600s); NEVER auto job retry
 
+    **Keep Alive (keepalive.v1 / schema 2)**
+    - `POST /api/v1/social-automation/client/keepalive/register` — idempotent Node registration (Client API Key).
+    - `GET /api/v1/social-automation/client/keepalive/assignments?node_id=` — explicit Campaign assignments only.
+    - Server tenant = Client API Key `installation_id` (exposed as `tenant_id`); client-supplied `tenant_id` must match or is rejected.
+    - Registration does **not** authorize Campaign access; no Browser Profile required; no Job claim side effects.
+    - Multi-Node per Campaign and multi-Campaign per Node supported via explicit assignment rows + `assignment_generation`.
 
     **Error envelopes**
     - Most business endpoints return `{ "ok": false, "errors": ["code"] }` with stable HTTP status (401/403/404/409/422/503).
@@ -664,6 +670,118 @@ components:
           properties:
             installation_id:
               type: string
+
+    KeepAliveRegisterRequest:
+      type: object
+      required: [node_id, agent_uuid, protocol_version, schema_version, capabilities]
+      properties:
+        node_id:
+          type: string
+          description: Stable Keep Alive Node identity
+        agent_uuid:
+          type: string
+          description: Must match the Client agent owned by the authenticated API key
+        tenant_id:
+          type: string
+          description: Optional; must equal server tenant (installation_id) when provided
+        protocol_version:
+          type: string
+          enum: [keepalive.v1]
+        schema_version:
+          type: integer
+          enum: [2]
+        capabilities:
+          type: array
+          minItems: 3
+          items:
+            type: string
+            enum: [observe, store, recover]
+          example: [observe, store, recover]
+
+    KeepAliveRegisterSuccess:
+      type: object
+      required: [ok, protocol_version, schema_version, campaign_access_authorized, node]
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+        protocol_version:
+          type: string
+          enum: [keepalive.v1]
+        schema_version:
+          type: integer
+          enum: [2]
+        campaign_access_authorized:
+          type: boolean
+          enum: [false]
+          description: Registration alone never authorizes Campaign access
+        node:
+          type: object
+          required: [node_id, agent_uuid, tenant_id, capabilities, assignment_generation]
+          properties:
+            node_id:
+              type: string
+            agent_uuid:
+              type: string
+            tenant_id:
+              type: string
+              description: Server-owned installation_id
+            capabilities:
+              type: array
+              items:
+                type: string
+            assignment_generation:
+              type: integer
+            registered_at:
+              type: string
+              format: date-time
+            last_seen_at:
+              type: string
+              format: date-time
+
+    KeepAliveAssignmentsSuccess:
+      type: object
+      required: [ok, protocol_version, schema_version, node_id, tenant_id, assignment_generation, assignments]
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+        protocol_version:
+          type: string
+          enum: [keepalive.v1]
+        schema_version:
+          type: integer
+          enum: [2]
+        node_id:
+          type: string
+        tenant_id:
+          type: string
+        assignment_generation:
+          type: integer
+        assignments:
+          type: array
+          description: Explicit assignments only; empty when none
+          items:
+            type: object
+            required: [campaign_id, campaign_uuid, version]
+            properties:
+              campaign_id:
+                type: string
+                description: Campaign UUID (client-facing id)
+              campaign_uuid:
+                type: string
+              name:
+                type: string
+              status:
+                type: string
+              platform:
+                type: string
+              version:
+                type: integer
+              assigned_at:
+                type: string
+                format: date-time
+          # Never cookies, credentials, or secrets
 
     ClientRegisterRequest:
       type: object
@@ -2400,6 +2518,97 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '422':
           $ref: '#/components/responses/ValidationError'
+
+  /api/v1/social-automation/client/keepalive/register:
+    post:
+      tags: [RPA Client]
+      summary: Register Keep Alive Node (idempotent)
+      description: |
+        Authenticated by Client API Key. Validates server-owned tenant + agent identity.
+        Does not grant Campaign access. Does not require Browser Profile. No Job claim side effects.
+      operationId: clientKeepAliveRegister
+      security:
+        - RpaClientApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KeepAliveRegisterRequest'
+      responses:
+        '200':
+          description: Node registered or refreshed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KeepAliveRegisterSuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: tenant_mismatch / agent_mismatch / cross_tenant_forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientErrorEnvelope'
+        '404':
+          description: agent_not_found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientErrorEnvelope'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          description: schema_unavailable
+
+  /api/v1/social-automation/client/keepalive/assignments:
+    get:
+      tags: [RPA Client]
+      summary: List explicit Keep Alive Campaign assignments for a Node
+      description: |
+        Returns only explicitly assigned Campaigns for the Node (empty list when none).
+        Tenant-scoped. Includes assignment_generation and per-assignment version.
+        Never returns cookies, credentials, or secrets.
+      operationId: clientKeepAliveAssignments
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - name: node_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: tenant_id
+          in: query
+          required: false
+          description: Optional; must match server tenant (installation_id) when provided
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Assignment list (possibly empty)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KeepAliveAssignmentsSuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: tenant_mismatch / cross_tenant_forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientErrorEnvelope'
+        '404':
+          description: node_not_registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientErrorEnvelope'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          description: schema_unavailable
 
   /api/v1/social-automation/client/heartbeat:
     post:

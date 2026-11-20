@@ -61,4 +61,15 @@ final class SocialAutomationSchema
             return false;
         }
     }
+
+    /**
+     * Keep Alive Node registration + explicit Campaign assignment tables.
+     */
+    public static function keepaliveReady(): bool
+    {
+        return self::has('sa_keepalive_nodes')
+            && self::has('sa_keepalive_campaign_assignments')
+            && self::has('sa_agents')
+            && self::has('sa_campaigns');
+    }
 }
