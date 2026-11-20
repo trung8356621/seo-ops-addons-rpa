@@ -1,7 +1,7 @@
 # Keep Alive 3B.6A — Socket.IO Data Routing Architecture
 
-**Status:** Design / audit only (no implementation, no LIVE deploy)  
-**Server baseline:** `a0bb175` (`seo-ops-addons-rpa` @ LAPTOP)  
+**Status:** Design complete; **3B.6B ticket/route_generation implemented** (see `KEEPALIVE_SOCKET_TICKET_3B6B.md`). No Socket.IO gateway deploy yet.  
+**Server baseline:** `a0bb175` (`seo-ops-addons-rpa` @ LAPTOP); 3B.6B follows on same line  
 **Client baseline (DESKTOP):** `7e69014` — **not present on LAPTOP**; Electron details below are contract-level assumptions for handoff  
 **Protocol:** `keepalive.v1` / schema v2
 

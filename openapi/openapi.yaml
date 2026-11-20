@@ -21,6 +21,8 @@ info:
     - `GET /api/v1/social-automation/client/keepalive/campaigns/{id}/events` — durable incremental Job event feed (`from_sequence`/`cursor`, optional `to_sequence`, bounded `limit`).
     - `POST /api/v1/social-automation/client/keepalive/events/ack` — contiguous durable event delivery ACK (not Job execution ACK).
     - `POST /api/v1/social-automation/client/keepalive/artifacts/ack` — verified Final Screenshot delivery ACK (server evidence required).
+    - `POST /api/v1/social-automation/client/keepalive/socket/ticket` — mint short-lived Socket.IO route ticket (TTL ≤120s; Client API Key).
+    - `POST /api/v1/social-automation/keepalive-gateway/socket/verify` — gateway ticket verify (shared gateway secret; never Client API Key).
     - Server tenant = Client API Key `installation_id` (exposed as `tenant_id`); client-supplied `tenant_id` must match or is rejected.
     - Assignment row: canonical `row_version` (+ `version` alias). Node: `assignment_generation`.
     - Registration does **not** authorize Campaign access; no Browser Profile required; no Job claim side effects.
@@ -905,6 +907,101 @@ components:
         verified: { type: boolean, enum: [true] }
         idempotent: { type: boolean }
         assignment_generation: { type: integer }
+
+    KeepAliveSocketTicketRequest:
+      type: object
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [recovery, executor]
+        node_id:
+          type: string
+          description: Required for role=recovery
+        assignment_generation:
+          type: integer
+          description: Required for role=recovery; must match node assignment_generation
+        campaign_ids:
+          type: array
+          items: { type: string }
+          description: Required for executor; optional subset for recovery (defaults to all assigned)
+        agent_uuid: { type: string, nullable: true }
+        tenant_id: { type: string }
+        ttl_seconds:
+          type: integer
+          minimum: 1
+          maximum: 120
+          default: 120
+
+    KeepAliveSocketTicketSuccess:
+      type: object
+      required: [ok, protocol_version, ticket, expires_at, rooms, route_generation, role, tenant_id]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        protocol_version: { type: string, enum: [keepalive.v1] }
+        schema_version: { type: integer, enum: [2] }
+        ticket:
+          type: string
+          description: ka_sock_{base64url(json)}.{hmac_sha256_hex}; never embeds Client API Key
+        jti: { type: string }
+        expires_at: { type: string, format: date-time }
+        expires_at_unix: { type: integer }
+        ttl_seconds: { type: integer, maximum: 120 }
+        role: { type: string, enum: [recovery, executor] }
+        tenant_id: { type: string }
+        node_id: { type: string, nullable: true }
+        campaign_ids:
+          type: array
+          items: { type: string }
+        rooms:
+          type: array
+          items: { type: string }
+          description: tenant:{tid}:campaign:{uuid}:node:{nid}
+        assignment_generation: { type: integer }
+        route_generation: { type: integer }
+        gateway_url: { type: string }
+        audience: { type: string, enum: [keepalive-gateway] }
+        renewal:
+          type: object
+          properties:
+            re_mint_path: { type: string }
+            max_ttl_seconds: { type: integer }
+            on_route_generation_stale: { type: string }
+            on_reconnect: { type: string }
+
+    KeepAliveSocketVerifyRequest:
+      type: object
+      required: [ticket]
+      properties:
+        ticket: { type: string }
+        consume:
+          type: boolean
+          default: true
+          description: Single-use jti consume (gateway connect)
+
+    KeepAliveSocketVerifySuccess:
+      type: object
+      required: [ok, tenant_id, role, authorized_rooms, route_generation]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        protocol_version: { type: string, enum: [keepalive.v1] }
+        schema_version: { type: integer, enum: [2] }
+        tenant_id: { type: string }
+        role: { type: string, enum: [recovery, executor] }
+        node_id: { type: string, nullable: true }
+        campaign_ids:
+          type: array
+          items: { type: string }
+        rooms:
+          type: array
+          items: { type: string }
+        authorized_rooms:
+          type: array
+          items: { type: string }
+        assignment_generation: { type: integer }
+        route_generation: { type: integer }
+        jti: { type: string }
+        consumed: { type: boolean }
 
     KeepAliveEventsSuccess:
       type: object
@@ -2949,6 +3046,77 @@ paths:
           description: assignment_generation_stale or artifact_not_ready
         '422':
           description: checksum/storage mismatch or artifact_unsupported
+        '503':
+          description: schema_unavailable
+
+  /api/v1/social-automation/client/keepalive/socket/ticket:
+    post:
+      tags: [RPA Client]
+      summary: Mint short-lived Keep Alive Socket.IO route ticket
+      description: |
+        Client API Key auth. Server-owned tenant. Ticket is HMAC-signed, audience-bound
+        (`keepalive-gateway`), TTL ≤ 120s. Never embeds Client API Key plaintext.
+        Recovery requires node_id + matching assignment_generation.
+        Executor requires campaign_ids and receives multi-node rooms for active assignments.
+        On reconnect / route_generation stale → re-mint (do not reuse consumed tickets).
+      operationId: clientKeepAliveSocketTicket
+      security:
+        - RpaClientApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KeepAliveSocketTicketRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KeepAliveSocketTicketSuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: campaign_unauthorized / node_revoked / tenant_mismatch / assignment_required
+        '409':
+          description: assignment_generation_stale
+        '422':
+          description: role/node/campaign validation errors
+        '503':
+          description: schema_unavailable
+
+  /api/v1/social-automation/keepalive-gateway/socket/verify:
+    post:
+      tags: [Keep Alive Gateway]
+      summary: Verify Socket.IO route ticket (gateway secret only)
+      description: |
+        Authenticate with header `X-KeepAlive-Gateway-Secret`. Never accepts Client API Keys.
+        Validates HMAC, audience, expiry, route_generation, live assignments, and optional jti consume.
+        Gateway must join only `authorized_rooms` from the response.
+      operationId: keepaliveGatewaySocketVerify
+      parameters:
+        - in: header
+          name: X-KeepAlive-Gateway-Secret
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KeepAliveSocketVerifyRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KeepAliveSocketVerifySuccess'
+        '401':
+          description: gateway_unauthorized / ticket invalid/expired/replay
+        '403':
+          description: revoked / campaign_unauthorized / node_revoked
+        '409':
+          description: route_generation_stale / assignment_generation_stale
         '503':
           description: schema_unavailable
 

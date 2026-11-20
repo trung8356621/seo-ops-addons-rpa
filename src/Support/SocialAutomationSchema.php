@@ -92,4 +92,14 @@ final class SocialAutomationSchema
             && self::has('sa_keepalive_event_ack_cursors')
             && self::has('sa_keepalive_artifact_acks');
     }
+
+    /**
+     * Keep Alive Socket ticket route_generation + jti tables (Phase 3B.6B).
+     */
+    public static function keepaliveSocketReady(): bool
+    {
+        return self::keepaliveReady()
+            && self::has('sa_keepalive_route_states')
+            && self::has('sa_keepalive_socket_ticket_jtis');
+    }
 }

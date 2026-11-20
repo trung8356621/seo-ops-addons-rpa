@@ -131,9 +131,14 @@ final class SocialAutomationServiceProvider extends ServiceProvider
             \Omnichannel\Addons\SocialAutomation\Contracts\KeepAliveAckStoreContract::class,
             \Omnichannel\Addons\SocialAutomation\Repositories\EloquentKeepAliveAckStore::class
         );
+        $this->app->singleton(
+            \Omnichannel\Addons\SocialAutomation\Contracts\KeepAliveRouteStoreContract::class,
+            \Omnichannel\Addons\SocialAutomation\Repositories\EloquentKeepAliveRouteStore::class
+        );
         $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\KeepAliveNodeService::class);
         $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\KeepAliveCampaignFeedService::class);
         $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\KeepAliveAckService::class);
+        $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\KeepAliveSocketTicketService::class);
         $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\SaAccountService::class);
 
         try {
@@ -508,6 +513,8 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     ->name('social-automation.client.keepalive.events-ack');
                 Route::post('/keepalive/artifacts/ack', [ClientKeepAliveController::class, 'ackArtifacts'])
                     ->name('social-automation.client.keepalive.artifacts-ack');
+                Route::post('/keepalive/socket/ticket', [ClientKeepAliveController::class, 'socketTicket'])
+                    ->name('social-automation.client.keepalive.socket-ticket');
 
                 // CP19A: Client campaign job claim/ack/progress/result (Client API Key only)
                 Route::post('/jobs/claim', [ClientCampaignJobController::class, 'claim'])
@@ -518,9 +525,16 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                 Route::post('/jobs/{id}/progress', [ClientCampaignJobController::class, 'progress'])
                     ->whereUuid('id')
                     ->name('social-automation.client.jobs.progress');
-                Route::post('/jobs/{id}/result', [ClientCampaignJobController::class, 'result'])
-                    ->whereUuid('id')
-                    ->name('social-automation.client.jobs.result');
+                    Route::post('/jobs/{id}/result', [ClientCampaignJobController::class, 'result'])
+                        ->whereUuid('id')
+                        ->name('social-automation.client.jobs.result');
+            });
+
+        // Keep Alive Socket gateway verify — shared gateway secret only (never Client API Key).
+        Route::prefix('api/v1/social-automation/keepalive-gateway')
+            ->group(function (): void {
+                Route::post('/socket/verify', [ClientKeepAliveController::class, 'socketVerify'])
+                    ->name('social-automation.keepalive-gateway.socket-verify');
             });
 
         // RPA Admin user auth + Script sync (not Runner service_api_credentials).

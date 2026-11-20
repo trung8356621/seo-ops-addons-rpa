@@ -12,11 +12,13 @@ use Omnichannel\Addons\SocialAutomation\Models\SaClientApiKey;
 use Omnichannel\Addons\SocialAutomation\Services\KeepAliveAckService;
 use Omnichannel\Addons\SocialAutomation\Services\KeepAliveCampaignFeedService;
 use Omnichannel\Addons\SocialAutomation\Services\KeepAliveNodeService;
+use Omnichannel\Addons\SocialAutomation\Services\KeepAliveSocketTicketService;
 
 /**
  * Keep Alive Node HTTP surface (Client API Key only).
  * Registration does not grant Campaign access. Assignments are explicit-only.
  * Event/artifact ACKs are delivery confirmations — not Job execution ACKs.
+ * Socket ticket mint uses Client API Key; gateway verify uses shared gateway secret.
  */
 final class ClientKeepAliveController extends Controller
 {
@@ -24,6 +26,7 @@ final class ClientKeepAliveController extends Controller
         private readonly KeepAliveNodeService $keepalive,
         private readonly KeepAliveCampaignFeedService $feed,
         private readonly KeepAliveAckService $acks,
+        private readonly KeepAliveSocketTicketService $socketTickets,
     ) {}
 
     public function register(Request $request): JsonResponse
@@ -183,6 +186,51 @@ final class ClientKeepAliveController extends Controller
                 'error' => $result['error'] ?? ($result['errors'][0] ?? 'artifact_ack_failed'),
                 'errors' => $result['errors'] ?? ['artifact_ack_failed'],
             ], (int) ($result['http'] ?? 422));
+        }
+
+        return new JsonResponse(array_merge(['ok' => true], $result['data'] ?? []), 200);
+    }
+
+    public function socketTicket(Request $request): JsonResponse
+    {
+        $key = $this->clientKey($request);
+        if ($key === null) {
+            return new JsonResponse([
+                'ok' => false,
+                'error' => 'unauthorized',
+                'errors' => ['unauthorized'],
+            ], 401);
+        }
+
+        $result = $this->socketTickets->mint($key, $request->all());
+        if (! ($result['ok'] ?? false)) {
+            return new JsonResponse([
+                'ok' => false,
+                'error' => $result['error'] ?? ($result['errors'][0] ?? 'socket_ticket_failed'),
+                'errors' => $result['errors'] ?? ['socket_ticket_failed'],
+            ], (int) ($result['http'] ?? 422));
+        }
+
+        return new JsonResponse(array_merge(['ok' => true], $result['data'] ?? []), 200);
+    }
+
+    /**
+     * Gateway-only ticket verification. Auth: X-KeepAlive-Gateway-Secret (not Client API Key).
+     */
+    public function socketVerify(Request $request): JsonResponse
+    {
+        $secret = (string) ($request->header('X-KeepAlive-Gateway-Secret')
+            ?? $request->header('X-KA-Gateway-Secret')
+            ?? $request->input('gateway_secret')
+            ?? '');
+
+        $result = $this->socketTickets->verifyForGateway($secret, $request->all());
+        if (! ($result['ok'] ?? false)) {
+            return new JsonResponse([
+                'ok' => false,
+                'error' => $result['error'] ?? ($result['errors'][0] ?? 'socket_verify_failed'),
+                'errors' => $result['errors'] ?? ['socket_verify_failed'],
+            ], (int) ($result['http'] ?? 401));
         }
 
         return new JsonResponse(array_merge(['ok' => true], $result['data'] ?? []), 200);

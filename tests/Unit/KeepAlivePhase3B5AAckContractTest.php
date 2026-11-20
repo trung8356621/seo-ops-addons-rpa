@@ -53,7 +53,13 @@ final class KeepAlivePhase3B5AAckContractTest extends TestCase
         $this->nodeService = new KeepAliveNodeService($this->nodes);
         $feed = new KeepAliveCampaignFeedService($this->nodes, $this->feedStore);
         $this->acks = new KeepAliveAckService($this->nodes, $this->feedStore, $this->ackStore);
-        $this->controller = new ClientKeepAliveController($this->nodeService, $feed, $this->acks);
+        $routes = new \Omnichannel\Addons\SocialAutomation\Repositories\InMemoryKeepAliveRouteStore($this->nodes, $this->feedStore);
+        $this->controller = new ClientKeepAliveController(
+            $this->nodeService,
+            $feed,
+            $this->acks,
+            new \Omnichannel\Addons\SocialAutomation\Services\KeepAliveSocketTicketService($this->nodes, $routes),
+        );
 
         $this->nodes->seedAgent([
             'id' => 10,

@@ -1,6 +1,6 @@
 # Keep Alive Wire Contract (keepalive.v1 / schema 2)
 
-Canonical Client ↔ Server contract for Phases 3B.1–3B.3.
+Canonical Client ↔ Server contract for Phases 3B.1–3B.6B.
 
 ## Identity
 
@@ -65,3 +65,20 @@ Rules:
 - Missing/unverifiable artifact → `artifact_not_ready` (409) or `artifact_unsupported` (422).
 - Idempotent; never changes Job completion status.
 - No binary upload in this phase.
+
+## Socket ticket (3B.6B)
+
+See [KEEPALIVE_SOCKET_TICKET_3B6B.md](KEEPALIVE_SOCKET_TICKET_3B6B.md).
+
+### Mint — `POST /client/keepalive/socket/ticket`
+
+- Auth: Client API Key. Tenant server-owned.
+- Roles: `recovery` (node_id + assignment_generation) | `executor` (campaign_ids; multi-node rooms).
+- Returns HMAC ticket `ka_sock_…`, `rooms[]`, `route_generation`, `gateway_url`, TTL ≤ 120s.
+- Never embeds Client API Key. Renewal / reconnect = re-mint.
+
+### Gateway verify — `POST /keepalive-gateway/socket/verify`
+
+- Auth: `X-KeepAlive-Gateway-Secret` only.
+- Validates signature, audience, expiry, route_generation, live assignments, optional jti consume.
+- Gateway joins only `authorized_rooms`.

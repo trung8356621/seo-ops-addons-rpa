@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Omnichannel\Addons\SocialAutomation\Services;
 
+use Omnichannel\Addons\SocialAutomation\Contracts\KeepAliveRouteStoreContract;
 use Omnichannel\Addons\SocialAutomation\Contracts\KeepAliveStoreContract;
 use Omnichannel\Addons\SocialAutomation\Domain\KeepAliveProtocol;
 use Omnichannel\Addons\SocialAutomation\Domain\KeepAliveRegistrationPolicy;
@@ -18,6 +19,7 @@ final class KeepAliveNodeService
     public function __construct(
         private readonly KeepAliveStoreContract $store,
         private readonly KeepAliveRegistrationPolicy $policy = new KeepAliveRegistrationPolicy,
+        private readonly ?KeepAliveRouteStoreContract $routes = null,
     ) {}
 
     /**
@@ -227,11 +229,68 @@ final class KeepAliveNodeService
             (string) $campaign['platform'],
         );
         $fresh = $this->store->findNode($tenantId, $nodeId);
+        $routeGeneration = $this->bumpRoutesAfterAssignmentChange($tenantId, $nodeId, (int) $clientKey->id);
 
         return [
             'ok' => true,
             'assignment' => $assignment,
             'assignment_generation' => (int) ($fresh['assignment_generation'] ?? 0),
+            'route_generation' => $routeGeneration,
         ];
+    }
+
+    /**
+     * Explicit revoke helper — bumps assignment_generation + route_generation.
+     *
+     * @return array{ok: bool, errors?: list<string>, assignment_generation?: int, route_generation?: int}
+     */
+    public function revokeCampaignExplicitly(
+        SaClientApiKey $clientKey,
+        string $nodeId,
+        string $campaignUuid,
+    ): array {
+        if (! $this->store->isReady()) {
+            return ['ok' => false, 'errors' => ['schema_unavailable']];
+        }
+
+        $tenantId = (string) $clientKey->installation_id;
+        if (! method_exists($this->store, 'revokeAssignment')) {
+            return ['ok' => false, 'errors' => ['revoke_unsupported']];
+        }
+
+        /** @var callable $revoke */
+        $revoke = [$this->store, 'revokeAssignment'];
+        $ok = (bool) $revoke($tenantId, $nodeId, $campaignUuid);
+        if (! $ok) {
+            return ['ok' => false, 'errors' => ['assignment_not_found']];
+        }
+        $this->store->bumpAssignmentGeneration($tenantId, $nodeId);
+        $fresh = $this->store->findNode($tenantId, $nodeId);
+        $routeGeneration = $this->bumpRoutesAfterAssignmentChange($tenantId, $nodeId, (int) $clientKey->id);
+
+        return [
+            'ok' => true,
+            'assignment_generation' => (int) ($fresh['assignment_generation'] ?? 0),
+            'route_generation' => $routeGeneration,
+        ];
+    }
+
+    private function bumpRoutesAfterAssignmentChange(string $tenantId, string $nodeId, int $clientApiKeyId): ?int
+    {
+        if ($this->routes === null || ! $this->routes->isReady()) {
+            return null;
+        }
+        $routeGeneration = $this->routes->bumpRouteGeneration(
+            $tenantId,
+            KeepAliveRouteStoreContract::SUBJECT_NODE,
+            $nodeId,
+        );
+        $this->routes->bumpRouteGeneration(
+            $tenantId,
+            KeepAliveRouteStoreContract::SUBJECT_EXECUTOR,
+            'key:'.$clientApiKeyId,
+        );
+
+        return $routeGeneration;
     }
 }
