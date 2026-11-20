@@ -15,6 +15,7 @@ use Illuminate\Foundation\Http\Middleware\VerifyCsrfToken;
 use Illuminate\Routing\Middleware\SubstituteBindings;
 use Illuminate\Session\Middleware\AuthenticateSession;
 use Illuminate\Session\Middleware\StartSession;
+use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\View\Middleware\ShareErrorsFromSession;
@@ -61,6 +62,7 @@ use Omnichannel\Addons\SocialAutomation\PackageRegistry\WidgetWorkflowComposerSe
 use Omnichannel\Addons\SocialAutomation\Registry\AgentRegistryService;
 use Omnichannel\Addons\SocialAutomation\Registry\SessionSyncService;
 use Omnichannel\Addons\SocialAutomation\Scheduling\ScheduleDispatcher;
+use Omnichannel\Addons\SocialAutomation\Scheduling\ScheduleTickRegistrar;
 use Omnichannel\Addons\SocialAutomation\Services\RpaClientApiKeyService;
 use Omnichannel\Addons\SocialAutomation\Services\SocialAutomationDatabaseConnectionService;
 use Omnichannel\Addons\SocialAutomation\Support\DashboardMetrics;
@@ -150,6 +152,8 @@ final class SocialAutomationServiceProvider extends ServiceProvider
             ]);
         }
 
+        $this->registerScheduleTick();
+
         try {
             $this->registerWorkspaceDestination();
         } catch (Throwable) {
@@ -157,6 +161,17 @@ final class SocialAutomationServiceProvider extends ServiceProvider
         }
         $this->registerRoutes();
         $this->registerSeoPanelTopLevelNav();
+    }
+
+    /**
+     * Wire social-automation:schedule-tick into the host Laravel scheduler (every minute).
+     * Idempotent — safe if host also registers the same command later.
+     */
+    private function registerScheduleTick(): void
+    {
+        $this->callAfterResolving(Schedule::class, function (Schedule $schedule): void {
+            (new ScheduleTickRegistrar)->register($schedule);
+        });
     }
 
     private function registerWorkspaceDestination(): void
@@ -374,6 +389,16 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     Route::post('/{id}/cancel', [StaffCampaignController::class, 'cancel'])
                         ->whereUuid('id')
                         ->name('social-automation.campaigns.cancel');
+                    Route::get('/{id}/contents', [StaffCampaignContentController::class, 'index'])
+                        ->whereUuid('id')
+                        ->name('social-automation.campaigns.contents.index');
+                    Route::post('/{id}/contents', [StaffCampaignContentController::class, 'store'])
+                        ->whereUuid('id')
+                        ->name('social-automation.campaigns.contents.store');
+                    Route::put('/{id}/contents/{contentId}', [StaffCampaignContentController::class, 'update'])
+                        ->whereUuid('id')
+                        ->whereUuid('contentId')
+                        ->name('social-automation.campaigns.contents.update');
                 });
                 Route::prefix('api/campaign-contents')->group(function (): void {
                     Route::post('/{id}/retry', [StaffCampaignContentController::class, 'retry'])

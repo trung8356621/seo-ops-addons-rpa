@@ -373,6 +373,285 @@ final class CampaignService
         return $content;
     }
 
+    /**
+     * List contents for a campaign (installation-scoped).
+     *
+     * @return array{ok: bool, data?: list<array<string, mixed>>, errors?: list<string>}
+     */
+    public function listContents(string $campaignUuid, string $installationId): array
+    {
+        $campaign = $this->findOwned($campaignUuid, $installationId);
+        if ($campaign === null) {
+            return ['ok' => false, 'errors' => ['campaign_not_found']];
+        }
+
+        $accountUuids = $this->accountUuidMapForCampaign($campaign);
+        $rows = SaCampaignContent::query()
+            ->where('campaign_id', $campaign->id)
+            ->orderBy('sort_order')
+            ->orderBy('id')
+            ->get()
+            ->map(fn (SaCampaignContent $c): array => $this->contentDto($c, $accountUuids))
+            ->all();
+
+        return ['ok' => true, 'data' => $rows];
+    }
+
+    /**
+     * Create one content under an existing campaign. Does not create Jobs.
+     *
+     * @param  array<string, mixed>  $input
+     * @return array{ok: bool, data?: array<string, mixed>, errors?: list<string>}
+     */
+    public function createContent(string $campaignUuid, string $installationId, array $input): array
+    {
+        $campaign = $this->findOwned($campaignUuid, $installationId);
+        if ($campaign === null) {
+            return ['ok' => false, 'errors' => ['campaign_not_found']];
+        }
+        $status = CampaignStatus::tryFrom((string) $campaign->status);
+        if ($status === null || $status->isTerminal()) {
+            return ['ok' => false, 'errors' => ['campaign_terminal']];
+        }
+
+        $prepared = $this->prepareContentRow($campaign, $installationId, $input, null);
+        if (! ($prepared['ok'] ?? false)) {
+            return ['ok' => false, 'errors' => $prepared['errors'] ?? ['content_invalid']];
+        }
+
+        try {
+            return DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($campaign, $prepared): array {
+                $locked = SaCampaign::query()->where('id', $campaign->id)->lockForUpdate()->first();
+                if (! $locked instanceof SaCampaign) {
+                    return ['ok' => false, 'errors' => ['campaign_not_found']];
+                }
+                $status = CampaignStatus::tryFrom((string) $locked->status);
+                if ($status === null || $status->isTerminal()) {
+                    return ['ok' => false, 'errors' => ['campaign_terminal']];
+                }
+
+                $externalRef = $prepared['external_ref'] ?? null;
+                if (is_string($externalRef) && $externalRef !== '') {
+                    $dup = SaCampaignContent::query()
+                        ->where('campaign_id', $locked->id)
+                        ->where('external_ref', $externalRef)
+                        ->exists();
+                    if ($dup) {
+                        return ['ok' => false, 'errors' => ['external_ref_duplicate']];
+                    }
+                }
+
+                $maxSort = (int) SaCampaignContent::query()->where('campaign_id', $locked->id)->max('sort_order');
+                $content = SaCampaignContent::query()->create([
+                    'content_uuid' => (string) Str::uuid(),
+                    'campaign_id' => $locked->id,
+                    'external_ref' => $externalRef,
+                    'sort_order' => $maxSort + 1,
+                    'status' => CampaignContentStatus::Pending->value,
+                    'input' => $prepared['input'] ?? [],
+                    'assigned_account_id' => $prepared['assigned_account_id'] ?? null,
+                    'last_error_code' => null,
+                    'last_error_message' => null,
+                    'last_error_meta' => null,
+                ]);
+
+                // Running campaigns: nudge scheduler only — never dispatch/create Job from CRUD.
+                if ($status === CampaignStatus::Running) {
+                    $locked->next_recheck_at = now();
+                    $locked->save();
+                }
+
+                $accountUuids = $this->accountUuidMapForCampaign($locked);
+
+                return ['ok' => true, 'data' => $this->contentDto($content, $accountUuids)];
+            });
+        } catch (Throwable) {
+            return ['ok' => false, 'errors' => ['content_create_failed']];
+        }
+    }
+
+    /**
+     * Update content only before execution (pending / waiting_resources).
+     *
+     * @param  array<string, mixed>  $input
+     * @return array{ok: bool, data?: array<string, mixed>, errors?: list<string>}
+     */
+    public function updateContent(string $campaignUuid, string $contentUuid, string $installationId, array $input): array
+    {
+        $campaign = $this->findOwned($campaignUuid, $installationId);
+        if ($campaign === null) {
+            return ['ok' => false, 'errors' => ['campaign_not_found']];
+        }
+        $content = SaCampaignContent::query()
+            ->where('content_uuid', $contentUuid)
+            ->where('campaign_id', $campaign->id)
+            ->first();
+        if (! $content instanceof SaCampaignContent) {
+            return ['ok' => false, 'errors' => ['content_not_found']];
+        }
+
+        $contentStatus = CampaignContentStatus::tryFrom((string) $content->status);
+        if ($contentStatus === null || ! $contentStatus->isDispatchable() || $content->current_job_id) {
+            return ['ok' => false, 'errors' => ['content_not_editable']];
+        }
+
+        $prepared = $this->prepareContentRow($campaign, $installationId, $input, $content);
+        if (! ($prepared['ok'] ?? false)) {
+            return ['ok' => false, 'errors' => $prepared['errors'] ?? ['content_invalid']];
+        }
+
+        try {
+            return DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($campaign, $content, $prepared): array {
+                $locked = SaCampaignContent::query()->where('id', $content->id)->lockForUpdate()->first();
+                if (! $locked instanceof SaCampaignContent) {
+                    return ['ok' => false, 'errors' => ['content_not_found']];
+                }
+                $contentStatus = CampaignContentStatus::tryFrom((string) $locked->status);
+                if ($contentStatus === null || ! $contentStatus->isDispatchable() || $locked->current_job_id) {
+                    return ['ok' => false, 'errors' => ['content_not_editable']];
+                }
+
+                $externalRef = $prepared['external_ref'] ?? null;
+                if (is_string($externalRef) && $externalRef !== '') {
+                    $dup = SaCampaignContent::query()
+                        ->where('campaign_id', $campaign->id)
+                        ->where('external_ref', $externalRef)
+                        ->where('id', '!=', $locked->id)
+                        ->exists();
+                    if ($dup) {
+                        return ['ok' => false, 'errors' => ['external_ref_duplicate']];
+                    }
+                }
+
+                $locked->external_ref = $externalRef;
+                $locked->input = $prepared['input'] ?? [];
+                $locked->assigned_account_id = $prepared['assigned_account_id'] ?? null;
+                // Re-queue for normal scheduler evaluation after edit.
+                $locked->status = CampaignContentStatus::Pending->value;
+                $locked->last_error_code = null;
+                $locked->last_error_message = null;
+                $locked->last_error_meta = null;
+                $locked->save();
+
+                $camp = SaCampaign::query()->where('id', $campaign->id)->lockForUpdate()->first();
+                if ($camp instanceof SaCampaign && (string) $camp->status === CampaignStatus::Running->value) {
+                    $camp->next_recheck_at = now();
+                    $camp->save();
+                }
+
+                $accountUuids = $this->accountUuidMapForCampaign($campaign);
+
+                return ['ok' => true, 'data' => $this->contentDto($locked, $accountUuids)];
+            });
+        } catch (Throwable) {
+            return ['ok' => false, 'errors' => ['content_update_failed']];
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $input
+     * @return array{ok: bool, external_ref?: string|null, input?: array<string, mixed>, assigned_account_id?: int|null, errors?: list<string>}
+     */
+    private function prepareContentRow(SaCampaign $campaign, string $installationId, array $input, ?SaCampaignContent $existing): array
+    {
+        $script = $this->resolveScriptPin((string) $campaign->script_id, (string) $campaign->script_version);
+        if ($script === null) {
+            return ['ok' => false, 'errors' => ['script_not_found']];
+        }
+        $manifest = is_array($script['manifest'] ?? null) ? $script['manifest'] : [];
+        $variableNames = $this->scriptVariableNames($manifest);
+
+        $hasInputKey = array_key_exists('input', $input);
+        $rawInput = $hasInputKey
+            ? (is_array($input['input'] ?? null) ? $input['input'] : [])
+            : (is_array($existing?->input) ? $existing->input : []);
+        $sanitized = $this->sanitizer->sanitize($rawInput, $variableNames);
+        if (! ($sanitized['ok'] ?? false)) {
+            return ['ok' => false, 'errors' => $sanitized['errors'] ?? ['content_input_invalid']];
+        }
+
+        $meta = is_array($campaign->meta) ? $campaign->meta : [];
+        $pinnedUuid = trim((string) ($meta['pinned_account_id'] ?? ''));
+        $assignedAccountId = $existing?->assigned_account_id ? (int) $existing->assigned_account_id : null;
+
+        if ($pinnedUuid !== '') {
+            $pinned = $this->resolvePinnedAccount($pinnedUuid, $installationId, (string) $campaign->platform);
+            if ($pinned === null) {
+                return ['ok' => false, 'errors' => ['pinned_account_unavailable']];
+            }
+            $rowAccountUuid = trim((string) ($input['account_id'] ?? ''));
+            if ($rowAccountUuid !== '' && strcasecmp($rowAccountUuid, $pinnedUuid) !== 0) {
+                return ['ok' => false, 'errors' => ['account_pin_mismatch']];
+            }
+            $assignedAccountId = (int) $pinned->id;
+        } elseif (array_key_exists('account_id', $input)) {
+            $rowAccountUuid = trim((string) ($input['account_id'] ?? ''));
+            if ($rowAccountUuid === '') {
+                $assignedAccountId = null;
+            } else {
+                $rowAccount = $this->resolvePinnedAccount($rowAccountUuid, $installationId, (string) $campaign->platform);
+                if ($rowAccount === null) {
+                    return ['ok' => false, 'errors' => ['account_not_found_or_platform_mismatch']];
+                }
+                $assignedAccountId = (int) $rowAccount->id;
+            }
+        }
+
+        $externalRef = array_key_exists('external_ref', $input)
+            ? trim((string) ($input['external_ref'] ?? ''))
+            : (string) ($existing?->external_ref ?? '');
+        $externalRef = $externalRef !== '' ? $externalRef : null;
+
+        return [
+            'ok' => true,
+            'external_ref' => $externalRef,
+            'input' => $sanitized['input'] ?? [],
+            'assigned_account_id' => $assignedAccountId,
+        ];
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function accountUuidMapForCampaign(SaCampaign $campaign): array
+    {
+        $accountIds = SaCampaignContent::query()
+            ->where('campaign_id', $campaign->id)
+            ->whereNotNull('assigned_account_id')
+            ->pluck('assigned_account_id')
+            ->unique()
+            ->filter()
+            ->all();
+        if ($accountIds === []) {
+            return [];
+        }
+
+        return SaAccount::query()
+            ->whereIn('id', $accountIds)
+            ->pluck('account_uuid', 'id')
+            ->all();
+    }
+
+    /**
+     * @param  array<int, string>  $accountUuids
+     * @return array<string, mixed>
+     */
+    public function contentDto(SaCampaignContent $content, array $accountUuids = []): array
+    {
+        $aid = $content->assigned_account_id ? (int) $content->assigned_account_id : null;
+
+        return [
+            'id' => $content->content_uuid,
+            'external_ref' => $content->external_ref,
+            'status' => $content->status,
+            'sort_order' => (int) $content->sort_order,
+            'assigned_account_id' => $aid !== null ? (string) ($accountUuids[$aid] ?? '') : null,
+            'last_error_code' => $content->last_error_code,
+            'last_error_message' => $content->last_error_message,
+            'input' => is_array($content->input) ? $content->input : [],
+        ];
+    }
+
     private function findOwned(string $campaignUuid, string $installationId): ?SaCampaign
     {
         if (! SocialAutomationSchema::campaignsReady()) {
@@ -559,38 +838,14 @@ final class CampaignService
     {
         $counts = $this->contentCounts($campaign);
         $meta = is_array($campaign->meta) ? $campaign->meta : [];
-        $accountUuids = [];
-        $accountIds = SaCampaignContent::query()
-            ->where('campaign_id', $campaign->id)
-            ->whereNotNull('assigned_account_id')
-            ->pluck('assigned_account_id')
-            ->unique()
-            ->filter()
-            ->all();
-        if ($accountIds !== []) {
-            $accountUuids = SaAccount::query()
-                ->whereIn('id', $accountIds)
-                ->pluck('account_uuid', 'id')
-                ->all();
-        }
+        $accountUuids = $this->accountUuidMapForCampaign($campaign);
         $contents = SaCampaignContent::query()
             ->where('campaign_id', $campaign->id)
             ->orderBy('sort_order')
             ->orderBy('id')
             ->get()
-            ->map(static function (SaCampaignContent $c) use ($accountUuids): array {
-                $aid = $c->assigned_account_id ? (int) $c->assigned_account_id : null;
-
-                return [
-                    'id' => $c->content_uuid,
-                    'external_ref' => $c->external_ref,
-                    'status' => $c->status,
-                    'assigned_account_id' => $aid !== null ? (string) ($accountUuids[$aid] ?? '') : null,
-                    'last_error_code' => $c->last_error_code,
-                    'last_error_message' => $c->last_error_message,
-                    'input' => is_array($c->input) ? $c->input : [],
-                ];
-            })->all();
+            ->map(fn (SaCampaignContent $c): array => $this->contentDto($c, $accountUuids))
+            ->all();
 
         return [
             'id' => $campaign->campaign_uuid,

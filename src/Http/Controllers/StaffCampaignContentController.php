@@ -12,6 +12,7 @@ use Omnichannel\Addons\SocialAutomation\Orchestration\CampaignOrchestrator;
 use Omnichannel\Addons\SocialAutomation\Services\CampaignService;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationAccess;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationInstallationResolver;
+use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationSchema;
 
 final class StaffCampaignContentController extends Controller
 {
@@ -21,6 +22,69 @@ final class StaffCampaignContentController extends Controller
         private readonly SocialAutomationAccess $access,
         private readonly SocialAutomationInstallationResolver $installation,
     ) {}
+
+    public function index(string $campaignId): JsonResponse
+    {
+        $this->access->assertCanAccess();
+        if (! SocialAutomationSchema::campaignsReady()) {
+            return response()->json(['ok' => true, 'data' => [], 'pending' => 'PENDING SCHEMA / MIGRATION']);
+        }
+
+        $result = $this->campaigns->listContents($campaignId, $this->installation->resolveInstallationId());
+        if (! ($result['ok'] ?? false)) {
+            return response()->json(['ok' => false, 'errors' => $result['errors'] ?? ['campaign_not_found']], 404);
+        }
+
+        return response()->json(['ok' => true, 'data' => $result['data'] ?? []]);
+    }
+
+    public function store(Request $request, string $campaignId): JsonResponse
+    {
+        $this->access->assertCanManageCampaigns();
+        if (! SocialAutomationSchema::campaignsReady()) {
+            return response()->json(['ok' => false, 'errors' => ['schema_unavailable']], 503);
+        }
+
+        $result = $this->campaigns->createContent(
+            $campaignId,
+            $this->installation->resolveInstallationId(),
+            $request->all(),
+        );
+        if (! ($result['ok'] ?? false)) {
+            $errors = $result['errors'] ?? ['content_create_failed'];
+            $code = in_array('campaign_not_found', $errors, true) ? 404 : 422;
+
+            return response()->json(['ok' => false, 'errors' => $errors], $code);
+        }
+
+        return response()->json(['ok' => true, 'data' => $result['data']], 201);
+    }
+
+    public function update(Request $request, string $campaignId, string $contentId): JsonResponse
+    {
+        $this->access->assertCanManageCampaigns();
+        if (! SocialAutomationSchema::campaignsReady()) {
+            return response()->json(['ok' => false, 'errors' => ['schema_unavailable']], 503);
+        }
+
+        $result = $this->campaigns->updateContent(
+            $campaignId,
+            $contentId,
+            $this->installation->resolveInstallationId(),
+            $request->all(),
+        );
+        if (! ($result['ok'] ?? false)) {
+            $errors = $result['errors'] ?? ['content_update_failed'];
+            $code = 422;
+            if (in_array('campaign_not_found', $errors, true) || in_array('content_not_found', $errors, true)) {
+                $code = 404;
+            }
+
+            return response()->json(['ok' => false, 'errors' => $errors], $code);
+        }
+
+        return response()->json(['ok' => true, 'data' => $result['data']]);
+    }
 
     public function retry(Request $request, string $id): JsonResponse
     {

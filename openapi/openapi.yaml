@@ -6,7 +6,7 @@ info:
     HTTP API for the Social Automation addon (RPA control plane, package registry, clients, runners, staff UI).
 
     **CP19A/CP19B Campaign V1**
-    - Staff Owner/Admin session: `/social-automation/api/campaigns` + `/campaign-contents/{id}/retry|skip|cancel`
+    - Staff Owner/Admin session: `/social-automation/api/campaigns` + `/campaigns/{id}/contents` CRUD + `/campaign-contents/{id}/retry|skip|cancel`
     - Client API Key: `/api/v1/social-automation/client/jobs/claim|ack|progress|result`
     - Global account execution lock (installation-scoped account_id) + lease_token fencing
     - `execution_mode`: `one_account_one_job` | `one_account_many_jobs`
@@ -988,20 +988,58 @@ components:
         contents:
           type: array
           items:
-            type: object
-            properties:
-              id: { type: string, format: uuid }
-              external_ref: { type: string, nullable: true }
-              status: { type: string }
-              assigned_account_id:
-                type: string
-                format: uuid
-                nullable: true
-              last_error_code: { type: string, nullable: true }
-              last_error_message: { type: string, nullable: true }
-              input:
-                type: object
-                additionalProperties: true
+            $ref: '#/components/schemas/CampaignContentItem'
+
+    CampaignContentItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        external_ref: { type: string, nullable: true }
+        status:
+          type: string
+          enum: [pending, waiting_resources, running, success, failed_locked, unknown, skipped, cancelled]
+        sort_order: { type: integer }
+        assigned_account_id:
+          type: string
+          format: uuid
+          nullable: true
+        last_error_code: { type: string, nullable: true }
+        last_error_message: { type: string, nullable: true }
+        input:
+          type: object
+          additionalProperties: true
+
+    CampaignContentCreateRequest:
+      type: object
+      properties:
+        external_ref:
+          type: string
+          description: Optional stable external reference; unique within the campaign when set
+        account_id:
+          type: string
+          format: uuid
+          description: |
+            Optional Account UUID. When the campaign has a hard pin, must match the pin (or omit).
+            Platform must match the campaign.
+        input:
+          type: object
+          additionalProperties: true
+          description: Script input validated against the campaign's pinned Script variables
+
+    CampaignContentUpdateRequest:
+      type: object
+      description: |
+        Allowed only while content status is `pending` or `waiting_resources` and no job is attached.
+        Rejected for reserved/running/success/failed_locked/unknown/skipped/cancelled.
+      properties:
+        external_ref: { type: string, nullable: true }
+        account_id:
+          type: string
+          format: uuid
+          nullable: true
+        input:
+          type: object
+          additionalProperties: true
 
     CampaignJobClaim:
       type: object
@@ -4793,6 +4831,125 @@ paths:
       responses:
         '200':
           description: Cancelled
+
+  /social-automation/api/campaigns/{id}/contents:
+    get:
+      tags: [Staff Session]
+      summary: List contents for a campaign
+      operationId: staffCampaignContentsList
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+          description: Campaign UUID
+      responses:
+        '200':
+          description: Content list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CampaignContentItem'
+        '404':
+          description: Campaign not found
+    post:
+      tags: [Staff Session]
+      summary: Create content under an existing campaign
+      description: |
+        Manual Content create after Campaign create.
+        Validates Script input schema, respects hard-pinned Account, enforces unique `external_ref`,
+        initializes `pending`. Does **not** create Jobs — running campaigns are nudged via `next_recheck_at`
+        for the normal scheduler tick.
+      operationId: staffCampaignContentsCreate
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+          description: Campaign UUID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CampaignContentCreateRequest'
+            example:
+              external_ref: article-2
+              input:
+                title: Second draft title
+      responses:
+        '201':
+          description: Content created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/CampaignContentItem'
+        '403':
+          description: Owner/Admin only
+        '404':
+          description: Campaign not found
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /social-automation/api/campaigns/{id}/contents/{contentId}:
+    put:
+      tags: [Staff Session]
+      summary: Update content before execution
+      description: |
+        Allowed only for `pending` / `waiting_resources` without an attached job.
+        Rejects updates to running/succeeded/unknown/failed_locked/skipped/cancelled.
+        Does not mutate immutable execution snapshots or create Jobs.
+      operationId: staffCampaignContentsUpdate
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+          description: Campaign UUID
+        - name: contentId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+          description: Content UUID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CampaignContentUpdateRequest'
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/CampaignContentItem'
+        '403':
+          description: Owner/Admin only
+        '404':
+          description: Campaign or content not found
+        '422':
+          $ref: '#/components/responses/ValidationError'
 
   /social-automation/api/campaign-contents/{id}/retry:
     post:

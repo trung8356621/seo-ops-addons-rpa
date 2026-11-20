@@ -106,15 +106,17 @@ final class CampaignWpDraftPocContractTest extends TestCase
         self::assertTrue($okShape['ok']);
     }
 
-    public function test_staff_content_routes_are_admin_actions_not_full_crud(): void
+    public function test_staff_content_routes_include_crud_and_admin_actions(): void
     {
         $src = (string) file_get_contents($this->root.'/src/SocialAutomationServiceProvider.php');
         self::assertStringContainsString("prefix('api/campaign-contents')", $src);
         self::assertStringContainsString('retry', $src);
         self::assertStringContainsString('skip', $src);
-        // Contents are created via CampaignCreateRequest.contents (no separate Manual Content CRUD).
+        // Campaign create still accepts contents[]; post-create CRUD is nested under campaigns/{id}/contents.
         self::assertStringContainsString("Route::post('/', [StaffCampaignController::class, 'store'])", $src);
-        self::assertStringNotContainsString("campaign-contents')->post('/',", $src);
+        self::assertStringContainsString("Route::post('/{id}/contents', [StaffCampaignContentController::class, 'store'])", $src);
+        self::assertStringContainsString("Route::get('/{id}/contents', [StaffCampaignContentController::class, 'index'])", $src);
+        self::assertStringContainsString("Route::put('/{id}/contents/{contentId}', [StaffCampaignContentController::class, 'update'])", $src);
     }
 
     public function test_client_job_claim_ack_result_routes_present(): void
