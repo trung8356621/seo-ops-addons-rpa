@@ -1,0 +1,20 @@
+{
+  "name": "@seo-ops/keepalive-gateway",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Keep Alive 3B.6C single-worker Socket.IO sidecar (Hub-only data plane)",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.1"
+  }
+}

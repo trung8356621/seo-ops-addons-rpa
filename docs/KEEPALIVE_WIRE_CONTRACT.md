@@ -82,3 +82,11 @@ See [KEEPALIVE_SOCKET_TICKET_3B6B.md](KEEPALIVE_SOCKET_TICKET_3B6B.md).
 - Auth: `X-KeepAlive-Gateway-Secret` only.
 - Validates signature, audience, expiry, route_generation, live assignments, optional jti consume.
 - Gateway joins only `authorized_rooms`.
+
+## Socket gateway (3B.6C)
+
+See [KEEPALIVE_SOCKET_GATEWAY_3B6C.md](KEEPALIVE_SOCKET_GATEWAY_3B6C.md).
+
+- Sidecar: `gateway/` Socket.IO (WS-only, Hub-only, single worker).
+- Events: `ka.notify`, `ka.assignment_changed`, `ka.route_invalidated`, `ka.recover_hint` (advisory).
+- Post-commit outbox → gateway `/internal/publish` (never blocks Jobs).

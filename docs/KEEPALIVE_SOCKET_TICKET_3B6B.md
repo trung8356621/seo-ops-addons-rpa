@@ -1,6 +1,6 @@
 # Keep Alive 3B.6B — Socket Ticket & Route Generation
 
-**Status:** Implemented (Laravel addon only; no Socket.IO gateway deploy)  
+**Status:** Implemented (Laravel addon). Gateway sidecar added in 3B.6C (`docs/KEEPALIVE_SOCKET_GATEWAY_3B6C.md`); not LIVE-deployed.  
 **Protocol:** `keepalive.v1` / schema 2  
 **Design parent:** [KEEPALIVE_SOCKETIO_DATA_ROUTING_3B6A.md](KEEPALIVE_SOCKETIO_DATA_ROUTING_3B6A.md)
 

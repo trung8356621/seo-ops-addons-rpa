@@ -18,6 +18,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaKeepAliveCampaignAssignment;
 use Omnichannel\Addons\SocialAutomation\Models\SaKeepAliveCampaignEvent;
 use Omnichannel\Addons\SocialAutomation\Models\SaKeepAliveCampaignSequence;
 use Omnichannel\Addons\SocialAutomation\Models\SaKeepAliveNode;
+use Omnichannel\Addons\SocialAutomation\Services\KeepAliveNotifyService;
 use Omnichannel\Addons\SocialAutomation\Support\JobObservability;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationSchema;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
@@ -26,6 +27,7 @@ final class EloquentKeepAliveFeedStore implements KeepAliveFeedStoreContract
 {
     public function __construct(
         private readonly JobObservability $redactor = new JobObservability,
+        private readonly ?KeepAliveNotifyService $notify = null,
     ) {}
 
     public function isReady(): bool
@@ -225,12 +227,50 @@ final class EloquentKeepAliveFeedStore implements KeepAliveFeedStoreContract
 
             $seq->save();
 
+            // Outbox write in the same TX as durable events; publish only after commit.
+            if ($projected > 0) {
+                $this->enqueueNotifyAfterProjection(
+                    $installationId,
+                    $campaignUuid,
+                    (int) $seq->last_sequence,
+                );
+            }
+
             return [
                 'last_sequence' => (int) $seq->last_sequence,
                 'snapshot_version' => (int) $seq->snapshot_version,
                 'projected' => $projected,
             ];
         });
+    }
+
+    private function enqueueNotifyAfterProjection(
+        string $installationId,
+        string $campaignUuid,
+        int $seqHint,
+    ): void {
+        $notify = $this->notify;
+        if ($notify === null && function_exists('app')) {
+            try {
+                if (app()->bound(KeepAliveNotifyService::class)) {
+                    $notify = app(KeepAliveNotifyService::class);
+                }
+            } catch (\Throwable) {
+                $notify = null;
+            }
+        }
+        if ($notify === null) {
+            return;
+        }
+        try {
+            $rooms = $notify->roomsForCampaign($installationId, $campaignUuid);
+            if ($rooms === []) {
+                return;
+            }
+            $notify->enqueueNotify($installationId, $campaignUuid, $seqHint, $rooms);
+        } catch (\Throwable) {
+            // Never fail durable projection due to advisory notify.
+        }
     }
 
     public function listEvents(

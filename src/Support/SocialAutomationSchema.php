@@ -102,4 +102,13 @@ final class SocialAutomationSchema
             && self::has('sa_keepalive_route_states')
             && self::has('sa_keepalive_socket_ticket_jtis');
     }
+
+    /**
+     * Keep Alive Socket notify outbox (Phase 3B.6C).
+     */
+    public static function keepaliveNotifyReady(): bool
+    {
+        return self::keepaliveSocketReady()
+            && self::has('sa_keepalive_notify_outbox');
+    }
 }

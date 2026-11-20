@@ -6,6 +6,7 @@ namespace Omnichannel\Addons\SocialAutomation\Repositories;
 
 use Omnichannel\Addons\SocialAutomation\Contracts\KeepAliveFeedStoreContract;
 use Omnichannel\Addons\SocialAutomation\Domain\KeepAliveEventTypes;
+use Omnichannel\Addons\SocialAutomation\Services\KeepAliveNotifyService;
 use Omnichannel\Addons\SocialAutomation\Support\JobObservability;
 
 /**
@@ -15,6 +16,7 @@ final class InMemoryKeepAliveFeedStore implements KeepAliveFeedStoreContract
 {
     private InMemoryKeepAliveStore $nodes;
 
+    private ?KeepAliveNotifyService $notify;
     /** @var array<int, array<string, mixed>> */
     private array $jobs = [];
 
@@ -43,10 +45,16 @@ final class InMemoryKeepAliveFeedStore implements KeepAliveFeedStoreContract
 
     private JobObservability $redactor;
 
-    public function __construct(?InMemoryKeepAliveStore $nodes = null)
+    public function __construct(?InMemoryKeepAliveStore $nodes = null, ?KeepAliveNotifyService $notify = null)
     {
         $this->nodes = $nodes ?? new InMemoryKeepAliveStore;
         $this->redactor = new JobObservability;
+        $this->notify = $notify;
+    }
+
+    public function setNotify(?KeepAliveNotifyService $notify): void
+    {
+        $this->notify = $notify;
     }
 
     public function nodes(): InMemoryKeepAliveStore
@@ -226,6 +234,21 @@ final class InMemoryKeepAliveFeedStore implements KeepAliveFeedStoreContract
         // Meta-only snapshot bump when campaign/contents exist but no new events.
         if ($projected === 0 && $this->sequences[$key]['snapshot_version'] === 0) {
             $this->sequences[$key]['snapshot_version'] = 0;
+        }
+
+        if ($projected > 0 && $this->notify !== null) {
+            try {
+                $rooms = $this->notify->roomsForCampaign($installationId, $campaignUuid);
+                if ($rooms !== []) {
+                    $this->notify->enqueueNotify(
+                        $installationId,
+                        $campaignUuid,
+                        $this->sequences[$key]['last_sequence'],
+                        $rooms,
+                    );
+                }
+            } catch (\Throwable) {
+            }
         }
 
         return [

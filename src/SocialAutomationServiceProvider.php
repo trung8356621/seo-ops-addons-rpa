@@ -135,6 +135,12 @@ final class SocialAutomationServiceProvider extends ServiceProvider
             \Omnichannel\Addons\SocialAutomation\Contracts\KeepAliveRouteStoreContract::class,
             \Omnichannel\Addons\SocialAutomation\Repositories\EloquentKeepAliveRouteStore::class
         );
+        $this->app->singleton(
+            \Omnichannel\Addons\SocialAutomation\Contracts\KeepAliveNotifyOutboxContract::class,
+            \Omnichannel\Addons\SocialAutomation\Repositories\EloquentKeepAliveNotifyOutbox::class
+        );
+        $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\KeepAliveGatewayPublisher::class);
+        $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\KeepAliveNotifyService::class);
         $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\KeepAliveNodeService::class);
         $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\KeepAliveCampaignFeedService::class);
         $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\KeepAliveAckService::class);
@@ -169,6 +175,7 @@ final class SocialAutomationServiceProvider extends ServiceProvider
         if ($this->app->runningInConsole()) {
             $this->commands([
                 SocialAutomationScheduleTickCommand::class,
+                \Omnichannel\Addons\SocialAutomation\Console\KeepAliveNotifyFlushCommand::class,
                 \Omnichannel\Addons\SocialAutomation\Console\BackfillScriptRequestsCommand::class,
             ]);
         }

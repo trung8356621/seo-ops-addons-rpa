@@ -20,6 +20,7 @@ final class KeepAliveNodeService
         private readonly KeepAliveStoreContract $store,
         private readonly KeepAliveRegistrationPolicy $policy = new KeepAliveRegistrationPolicy,
         private readonly ?KeepAliveRouteStoreContract $routes = null,
+        private readonly ?KeepAliveNotifyService $notify = null,
     ) {}
 
     /**
@@ -230,6 +231,14 @@ final class KeepAliveNodeService
         );
         $fresh = $this->store->findNode($tenantId, $nodeId);
         $routeGeneration = $this->bumpRoutesAfterAssignmentChange($tenantId, $nodeId, (int) $clientKey->id);
+        $this->notifyAssignmentChange(
+            $tenantId,
+            $campaignUuid,
+            $nodeId,
+            (int) ($fresh['assignment_generation'] ?? 0),
+            $routeGeneration,
+            'assigned',
+        );
 
         return [
             'ok' => true,
@@ -267,6 +276,14 @@ final class KeepAliveNodeService
         $this->store->bumpAssignmentGeneration($tenantId, $nodeId);
         $fresh = $this->store->findNode($tenantId, $nodeId);
         $routeGeneration = $this->bumpRoutesAfterAssignmentChange($tenantId, $nodeId, (int) $clientKey->id);
+        $this->notifyAssignmentChange(
+            $tenantId,
+            $campaignUuid,
+            $nodeId,
+            (int) ($fresh['assignment_generation'] ?? 0),
+            $routeGeneration,
+            'revoked',
+        );
 
         return [
             'ok' => true,
@@ -292,5 +309,40 @@ final class KeepAliveNodeService
         );
 
         return $routeGeneration;
+    }
+
+    private function notifyAssignmentChange(
+        string $tenantId,
+        string $campaignUuid,
+        string $nodeId,
+        int $assignmentGeneration,
+        ?int $routeGeneration,
+        string $reason,
+    ): void {
+        if ($this->notify === null) {
+            return;
+        }
+        try {
+            $rooms = $this->notify->roomsForCampaign($tenantId, $campaignUuid);
+            if ($rooms === []) {
+                // Still notify the affected node room for revoke (assignment gone).
+                $rooms = [
+                    \Omnichannel\Addons\SocialAutomation\Domain\KeepAliveSocketTicket::roomName(
+                        $tenantId,
+                        $campaignUuid,
+                        $nodeId,
+                    ),
+                ];
+            }
+            $this->notify->enqueueAssignmentChanged(
+                $tenantId,
+                $campaignUuid,
+                $rooms,
+                $assignmentGeneration,
+                $routeGeneration,
+                $reason,
+            );
+        } catch (\Throwable) {
+        }
     }
 }
