@@ -72,4 +72,14 @@ final class SocialAutomationSchema
             && self::has('sa_agents')
             && self::has('sa_campaigns');
     }
+
+    /**
+     * Keep Alive snapshot/event feed tables (Phase 3B.3).
+     */
+    public static function keepaliveFeedReady(): bool
+    {
+        return self::keepaliveReady()
+            && self::has('sa_keepalive_campaign_events')
+            && self::has('sa_keepalive_campaign_sequences');
+    }
 }

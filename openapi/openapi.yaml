@@ -17,9 +17,13 @@ info:
     **Keep Alive (keepalive.v1 / schema 2)**
     - `POST /api/v1/social-automation/client/keepalive/register` — idempotent Node registration (Client API Key).
     - `GET /api/v1/social-automation/client/keepalive/assignments?node_id=` — explicit Campaign assignments only.
+    - `GET /api/v1/social-automation/client/keepalive/campaigns/{id}/snapshot` — sanitized Campaign snapshot (assignment + generation required).
+    - `GET /api/v1/social-automation/client/keepalive/campaigns/{id}/events` — durable incremental Job event feed (`from_sequence`/`cursor`, optional `to_sequence`, bounded `limit`).
     - Server tenant = Client API Key `installation_id` (exposed as `tenant_id`); client-supplied `tenant_id` must match or is rejected.
+    - Assignment row: canonical `row_version` (+ `version` alias). Node: `assignment_generation`.
     - Registration does **not** authorize Campaign access; no Browser Profile required; no Job claim side effects.
     - Multi-Node per Campaign and multi-Campaign per Node supported via explicit assignment rows + `assignment_generation`.
+    - See `docs/KEEPALIVE_WIRE_CONTRACT.md`.
 
     **Error envelopes**
     - Most business endpoints return `{ "ok": false, "errors": ["code"] }` with stable HTTP status (401/403/404/409/422/503).
@@ -763,7 +767,7 @@ components:
           description: Explicit assignments only; empty when none
           items:
             type: object
-            required: [campaign_id, campaign_uuid, version]
+            required: [campaign_id, campaign_uuid, row_version]
             properties:
               campaign_id:
                 type: string
@@ -776,12 +780,109 @@ components:
                 type: string
               platform:
                 type: string
+              row_version:
+                type: integer
+                description: Canonical assignment row version
               version:
                 type: integer
+                description: Alias of row_version (3B.1 compatibility)
               assigned_at:
                 type: string
                 format: date-time
           # Never cookies, credentials, or secrets
+
+    KeepAliveSnapshotSuccess:
+      type: object
+      required: [ok, protocol_version, schema_version, tenant_id, node_id, assignment_generation, campaign_id, snapshot_version, event_sequence_head, campaign]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        protocol_version: { type: string, enum: [keepalive.v1] }
+        schema_version: { type: integer, enum: [2] }
+        tenant_id: { type: string }
+        node_id: { type: string }
+        assignment_generation: { type: integer }
+        campaign_id: { type: string }
+        campaign_uuid: { type: string }
+        snapshot_version: { type: integer }
+        event_sequence_head: { type: integer }
+        campaign:
+          type: object
+          properties:
+            campaign_id: { type: string }
+            campaign_uuid: { type: string }
+            name: { type: string }
+            status: { type: string }
+            platform: { type: string }
+            execution_mode: { type: string, nullable: true }
+            run_mode: { type: string, nullable: true }
+            script_id: { type: string, nullable: true }
+            script_version: { type: string, nullable: true }
+        contents:
+          type: array
+          items:
+            type: object
+            properties:
+              content_id: { type: string }
+              status: { type: string }
+              sort_order: { type: integer }
+        jobs:
+          type: array
+          items:
+            type: object
+            properties:
+              job_id: { type: string }
+              status: { type: string }
+              fencing_generation: { type: integer }
+              attempt: { type: integer, nullable: true }
+              content_id: { type: string, nullable: true }
+              error_code: { type: string, nullable: true }
+        content_counts:
+          type: object
+          additionalProperties: { type: integer }
+        job_counts:
+          type: object
+          additionalProperties: { type: integer }
+
+    KeepAliveEventsSuccess:
+      type: object
+      required: [ok, protocol_version, schema_version, tenant_id, node_id, campaign_id, events, next_cursor, event_sequence_head]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        protocol_version: { type: string, enum: [keepalive.v1] }
+        schema_version: { type: integer, enum: [2] }
+        tenant_id: { type: string }
+        node_id: { type: string }
+        assignment_generation: { type: integer }
+        campaign_id: { type: string }
+        campaign_uuid: { type: string }
+        from_sequence: { type: integer }
+        to_sequence: { type: integer, nullable: true }
+        limit: { type: integer }
+        next_cursor: { type: integer }
+        event_sequence_head: { type: integer }
+        payload_version: { type: integer, enum: [2] }
+        events:
+          type: array
+          items:
+            type: object
+            required: [event_id, tenant_id, campaign_id, event_sequence, timestamp, payload_version, event_type]
+            properties:
+              event_id: { type: string }
+              tenant_id: { type: string }
+              campaign_id: { type: string }
+              job_id: { type: string, nullable: true }
+              attempt: { type: integer, nullable: true }
+              fencing_generation: { type: integer }
+              event_sequence: { type: integer }
+              timestamp: { type: string, format: date-time }
+              payload_version: { type: integer }
+              event_type:
+                type: string
+                enum: [job_reserved, job_claimed, job_started, job_completed, job_failed, job_unknown, screenshot_uploaded]
+              payload:
+                type: object
+                nullable: true
+                additionalProperties: true
 
     ClientRegisterRequest:
       type: object
@@ -2605,6 +2706,120 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ClientErrorEnvelope'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          description: schema_unavailable
+
+  /api/v1/social-automation/client/keepalive/campaigns/{id}/snapshot:
+    get:
+      tags: [RPA Client]
+      summary: Keep Alive Campaign snapshot (read-only)
+      description: |
+        Requires explicit active Node↔Campaign assignment and current assignment_generation.
+        Returns sanitized Campaign metadata, content/job summaries. Never secrets/cookies/tokens.
+      operationId: clientKeepAliveCampaignSnapshot
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Campaign UUID
+          schema: { type: string, format: uuid }
+        - name: node_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: assignment_generation
+          in: query
+          required: true
+          schema: { type: integer }
+        - name: tenant_id
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KeepAliveSnapshotSuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: assignment_required / assignment_revoked / cross_tenant_forbidden / node_revoked
+        '409':
+          description: assignment_generation_stale
+        '404':
+          description: campaign_not_found / node_not_registered
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          description: schema_unavailable
+
+  /api/v1/social-automation/client/keepalive/campaigns/{id}/events:
+    get:
+      tags: [RPA Client]
+      summary: Keep Alive incremental durable Job event feed
+      description: |
+        Campaign-scoped durable events with stable event_sequence. Supports from_sequence/cursor,
+        optional to_sequence gap-fill, and bounded limit. Transient progress is never included.
+      operationId: clientKeepAliveCampaignEvents
+      security:
+        - RpaClientApiKey: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Campaign UUID
+          schema: { type: string, format: uuid }
+        - name: node_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: assignment_generation
+          in: query
+          required: true
+          schema: { type: integer }
+        - name: from_sequence
+          in: query
+          required: false
+          description: Exclusive lower bound (alias cursor)
+          schema: { type: integer, minimum: 0 }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0 }
+        - name: to_sequence
+          in: query
+          required: false
+          description: Inclusive upper bound for gap-fill
+          schema: { type: integer, minimum: 0 }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+        - name: tenant_id
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Event page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KeepAliveEventsSuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: assignment_required / assignment_revoked / cross_tenant_forbidden / node_revoked
+        '409':
+          description: assignment_generation_stale
+        '404':
+          description: campaign_not_found / node_not_registered
         '422':
           $ref: '#/components/responses/ValidationError'
         '503':

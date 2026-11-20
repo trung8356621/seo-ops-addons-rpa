@@ -107,6 +107,7 @@ final class EloquentKeepAliveStore implements KeepAliveStoreContract
         $rows = SaKeepAliveCampaignAssignment::query()
             ->where('installation_id', $installationId)
             ->where('node_id', $nodeId)
+            ->whereNull('revoked_at')
             ->orderBy('campaign_uuid')
             ->get();
 
@@ -116,6 +117,7 @@ final class EloquentKeepAliveStore implements KeepAliveStoreContract
                 continue;
             }
             $campaign = SaCampaign::query()->find($row->campaign_id);
+            $version = (int) $row->version;
             $out[] = [
                 'id' => (int) $row->id,
                 'installation_id' => (string) $row->installation_id,
@@ -126,8 +128,10 @@ final class EloquentKeepAliveStore implements KeepAliveStoreContract
                 'campaign_name' => $campaign instanceof SaCampaign ? (string) $campaign->name : '',
                 'campaign_status' => $campaign instanceof SaCampaign ? (string) $campaign->status : '',
                 'campaign_platform' => $campaign instanceof SaCampaign ? (string) $campaign->platform : '',
-                'version' => (int) $row->version,
+                'version' => $version,
+                'row_version' => $version,
                 'assigned_at' => $row->assigned_at?->toIso8601String() ?? '',
+                'revoked_at' => $row->revoked_at?->toIso8601String(),
             ];
         }
 
@@ -245,6 +249,7 @@ final class EloquentKeepAliveStore implements KeepAliveStoreContract
             'assignment_generation' => (int) $node->assignment_generation,
             'registered_at' => $node->registered_at?->toIso8601String() ?? '',
             'last_seen_at' => $node->last_seen_at?->toIso8601String() ?? '',
+            'revoked_at' => $node->revoked_at?->toIso8601String(),
         ];
     }
 }

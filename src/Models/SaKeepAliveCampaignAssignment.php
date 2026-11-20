@@ -34,6 +34,7 @@ final class SaKeepAliveCampaignAssignment extends Model
         'version',
         'assigned_at',
         'assigned_by_user_id',
+        'revoked_at',
     ];
 
     protected function casts(): array
@@ -44,6 +45,7 @@ final class SaKeepAliveCampaignAssignment extends Model
             'version' => 'integer',
             'assigned_by_user_id' => 'integer',
             'assigned_at' => 'datetime',
+            'revoked_at' => 'datetime',
         ];
     }
 

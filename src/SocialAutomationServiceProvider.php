@@ -123,7 +123,12 @@ final class SocialAutomationServiceProvider extends ServiceProvider
             \Omnichannel\Addons\SocialAutomation\Contracts\KeepAliveStoreContract::class,
             \Omnichannel\Addons\SocialAutomation\Repositories\EloquentKeepAliveStore::class
         );
+        $this->app->singleton(
+            \Omnichannel\Addons\SocialAutomation\Contracts\KeepAliveFeedStoreContract::class,
+            \Omnichannel\Addons\SocialAutomation\Repositories\EloquentKeepAliveFeedStore::class
+        );
         $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\KeepAliveNodeService::class);
+        $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\KeepAliveCampaignFeedService::class);
         $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\SaAccountService::class);
 
         try {
@@ -483,11 +488,17 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                         ->name('social-automation.client.scripts.asset');
                 });
 
-                // Keep Alive Phase 3B.1 — Node register + explicit Campaign assignments
+                // Keep Alive Phase 3B.1/3B.3 — Node register, assignments, snapshot, events
                 Route::post('/keepalive/register', [ClientKeepAliveController::class, 'register'])
                     ->name('social-automation.client.keepalive.register');
                 Route::get('/keepalive/assignments', [ClientKeepAliveController::class, 'assignments'])
                     ->name('social-automation.client.keepalive.assignments');
+                Route::get('/keepalive/campaigns/{id}/snapshot', [ClientKeepAliveController::class, 'snapshot'])
+                    ->whereUuid('id')
+                    ->name('social-automation.client.keepalive.campaign-snapshot');
+                Route::get('/keepalive/campaigns/{id}/events', [ClientKeepAliveController::class, 'events'])
+                    ->whereUuid('id')
+                    ->name('social-automation.client.keepalive.campaign-events');
 
                 // CP19A: Client campaign job claim/ack/progress/result (Client API Key only)
                 Route::post('/jobs/claim', [ClientCampaignJobController::class, 'claim'])

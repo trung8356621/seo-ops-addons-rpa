@@ -165,13 +165,15 @@ final class KeepAliveNodeService
         $rows = $this->store->listAssignmentsForNode($tenantId, $nodeId);
         $assignments = [];
         foreach ($rows as $row) {
+            $rowVersion = (int) ($row['row_version'] ?? $row['version'] ?? 0);
             $assignments[] = [
                 'campaign_id' => $row['campaign_uuid'],
                 'campaign_uuid' => $row['campaign_uuid'],
                 'name' => $row['campaign_name'],
                 'status' => $row['campaign_status'],
                 'platform' => $row['campaign_platform'],
-                'version' => $row['version'],
+                'row_version' => $rowVersion,
+                'version' => $rowVersion, // 3B.1 alias
                 'assigned_at' => $row['assigned_at'],
             ];
         }

@@ -38,6 +38,7 @@ final class SaKeepAliveNode extends Model
         'assignment_generation',
         'registered_at',
         'last_seen_at',
+        'revoked_at',
     ];
 
     protected function casts(): array
@@ -50,6 +51,7 @@ final class SaKeepAliveNode extends Model
             'assignment_generation' => 'integer',
             'registered_at' => 'datetime',
             'last_seen_at' => 'datetime',
+            'revoked_at' => 'datetime',
         ];
     }
 

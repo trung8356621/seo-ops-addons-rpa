@@ -85,6 +85,10 @@ final class InMemoryKeepAliveStore implements KeepAliveStoreContract
                     'name' => (string) $campaign['name'],
                     'status' => (string) $campaign['status'],
                     'platform' => (string) $campaign['platform'],
+                    'execution_mode' => $campaign['execution_mode'] ?? null,
+                    'run_mode' => $campaign['run_mode'] ?? null,
+                    'script_id' => $campaign['script_id'] ?? null,
+                    'script_version' => $campaign['script_version'] ?? null,
                 ];
             }
         }
@@ -137,10 +141,53 @@ final class InMemoryKeepAliveStore implements KeepAliveStoreContract
             'assignment_generation' => 0,
             'registered_at' => $now,
             'last_seen_at' => $now,
+            'revoked_at' => null,
         ];
         $this->nodes[$id] = $row;
 
         return $this->normalizeNode($row);
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    public function rawAssignments(): array
+    {
+        $out = [];
+        foreach ($this->assignments as $row) {
+            $out[] = $this->normalizeAssignment($row);
+        }
+
+        return $out;
+    }
+
+    public function revokeAssignment(string $installationId, string $nodeId, string $campaignUuid): bool
+    {
+        foreach ($this->assignments as $id => $row) {
+            if ((string) $row['installation_id'] === $installationId
+                && (string) $row['node_id'] === $nodeId
+                && (string) $row['campaign_uuid'] === $campaignUuid) {
+                $this->assignments[$id]['revoked_at'] = gmdate('c');
+
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public function revokeNode(string $installationId, string $nodeId): bool
+    {
+        foreach ($this->nodes as $id => $node) {
+            if ((string) $node['installation_id'] === $installationId
+                && (string) $node['node_id'] === $nodeId) {
+                $this->nodes[$id]['revoked_at'] = gmdate('c');
+
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public function listAssignmentsForNode(string $installationId, string $nodeId): array
@@ -148,7 +195,8 @@ final class InMemoryKeepAliveStore implements KeepAliveStoreContract
         $out = [];
         foreach ($this->assignments as $row) {
             if ((string) $row['installation_id'] === $installationId
-                && (string) $row['node_id'] === $nodeId) {
+                && (string) $row['node_id'] === $nodeId
+                && (($row['revoked_at'] ?? null) === null || (string) $row['revoked_at'] === '')) {
                 $out[] = $this->normalizeAssignment($row);
             }
         }
@@ -197,6 +245,7 @@ final class InMemoryKeepAliveStore implements KeepAliveStoreContract
             'campaign_platform' => $campaignPlatform,
             'version' => 1,
             'assigned_at' => gmdate('c'),
+            'revoked_at' => null,
         ];
         $this->assignments[$id] = $row;
         $this->bumpAssignmentGeneration($installationId, $nodeId);
@@ -249,6 +298,7 @@ final class InMemoryKeepAliveStore implements KeepAliveStoreContract
             'assignment_generation' => (int) $node['assignment_generation'],
             'registered_at' => (string) $node['registered_at'],
             'last_seen_at' => (string) $node['last_seen_at'],
+            'revoked_at' => $node['revoked_at'] ?? null,
         ];
     }
 
@@ -269,7 +319,9 @@ final class InMemoryKeepAliveStore implements KeepAliveStoreContract
             'campaign_status' => (string) $row['campaign_status'],
             'campaign_platform' => (string) $row['campaign_platform'],
             'version' => (int) $row['version'],
+            'row_version' => (int) $row['version'],
             'assigned_at' => (string) $row['assigned_at'],
+            'revoked_at' => $row['revoked_at'] ?? null,
         ];
     }
 }
