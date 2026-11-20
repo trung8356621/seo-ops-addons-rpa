@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Omnichannel\Addons\SocialAutomation\Orchestration;
 
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Omnichannel\Addons\SocialAutomation\Artifacts\ArtifactAcceptPolicy;
 use Omnichannel\Addons\SocialAutomation\Domain\AccountLockPolicy;
@@ -15,6 +16,7 @@ use Omnichannel\Addons\SocialAutomation\Domain\CampaignScriptVariableSchema;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignShortcodePipeline;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignTestScriptPolicy;
 use Omnichannel\Addons\SocialAutomation\Domain\EligibilitySelector;
+use Omnichannel\Addons\SocialAutomation\Domain\JobIdempotencyKey;
 use Omnichannel\Addons\SocialAutomation\Domain\OnlineStateCalculator;
 use Omnichannel\Addons\SocialAutomation\Domain\SessionLockPolicy;
 use Omnichannel\Addons\SocialAutomation\Enums\AgentAvailability;
@@ -221,7 +223,22 @@ final class CampaignOrchestrator
 
                 return ['ok' => true, 'dispatched' => $dispatched, 'waiting' => $stillWaiting];
             });
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            // Never log raw QueryException message — it embeds SQL + bindings (payload/input).
+            $sqlstate = null;
+            $driverCode = null;
+            if ($e instanceof \Illuminate\Database\QueryException) {
+                $sqlstate = is_array($e->errorInfo ?? null) ? ($e->errorInfo[0] ?? null) : null;
+                $driverCode = is_array($e->errorInfo ?? null) ? ($e->errorInfo[1] ?? null) : null;
+            }
+            Log::warning('social_automation.campaign_dispatch_failed', [
+                'campaign_id' => $campaign->id ?? null,
+                'campaign_uuid' => $campaign->campaign_uuid ?? null,
+                'exception' => $e::class,
+                'sqlstate' => $sqlstate,
+                'driver_code' => $driverCode,
+            ]);
+
             return ['ok' => false, 'dispatched' => 0, 'waiting' => 0, 'errors' => ['dispatch_failed']];
         }
     }
@@ -1023,8 +1040,12 @@ final class CampaignOrchestrator
             return null;
         }
 
-        $idem = 'campaign:'.$campaign->campaign_uuid.':content:'.$content->content_uuid.':attempt:'
-            .((int) SaJob::query()->where('campaign_content_id', $content->id)->count() + 1);
+        $attemptNo = (int) SaJob::query()->where('campaign_content_id', $content->id)->count() + 1;
+        $idem = JobIdempotencyKey::forCampaignContent(
+            (string) $campaign->campaign_uuid,
+            (string) $content->content_uuid,
+            $attemptNo,
+        );
 
         $existing = SaJob::query()->where('idempotency_key', $idem)->lockForUpdate()->first();
         if ($existing instanceof SaJob) {

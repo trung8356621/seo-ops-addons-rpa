@@ -65,6 +65,20 @@ final class CampaignWpDraftPocContractTest extends TestCase
         self::assertStringContainsString('script_pin', $orc);
     }
 
+    public function test_reserve_uses_hashed_campaign_idempotency_key(): void
+    {
+        $orc = (string) file_get_contents($this->root.'/src/Orchestration/CampaignOrchestrator.php');
+        self::assertStringContainsString('JobIdempotencyKey::forCampaignContent', $orc);
+        self::assertStringNotContainsString("'campaign:'.\$campaign->campaign_uuid.':content:'", $orc);
+        self::assertStringContainsString('social_automation.campaign_dispatch_failed', $orc);
+        // Logging must not dump QueryException message (SQL + payload bindings).
+        self::assertStringNotContainsString("'message' => \$e->getMessage()", $orc);
+        self::assertStringContainsString("'sqlstate'", $orc);
+        // Attempt fencing: new reserve still keys off prior job count + 1.
+        self::assertStringContainsString('where(\'campaign_content_id\', $content->id)->count() + 1', $orc);
+        self::assertStringContainsString("'fencing_generation' => \$fencing", $orc);
+    }
+
     public function test_poc_execution_mode_and_live_run_mode(): void
     {
         self::assertSame('one_account_one_job', CampaignExecutionMode::OneAccountOneJob->value);

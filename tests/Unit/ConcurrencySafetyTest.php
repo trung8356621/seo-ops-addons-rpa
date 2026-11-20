@@ -141,6 +141,27 @@ final class ConcurrencySafetyTest extends TestCase
         self::assertSame($a, $b);
     }
 
+    public function test_campaign_content_idempotency_key_fits_varchar_64(): void
+    {
+        $campaignUuid = 'cf0d8be1-5475-4c84-a788-600a6a8ae17f';
+        $contentUuid = '7ee8aabb-bf02-46ca-a867-14a839fc0f0e';
+        $otherContent = '81599877-2888-4f1e-b18e-be33b6189a95';
+        $legacy = 'campaign:'.$campaignUuid.':content:'.$contentUuid.':attempt:1';
+        self::assertGreaterThan(JobIdempotencyKey::MAX_LENGTH, strlen($legacy));
+
+        $a = JobIdempotencyKey::forCampaignContent($campaignUuid, $contentUuid, 1);
+        $b = JobIdempotencyKey::forCampaignContent($campaignUuid, $contentUuid, 1);
+        $c = JobIdempotencyKey::forCampaignContent($campaignUuid, $contentUuid, 2);
+        $d = JobIdempotencyKey::forCampaignContent($campaignUuid, $otherContent, 1);
+        self::assertSame($a, $b);
+        self::assertNotSame($a, $c);
+        self::assertNotSame($a, $d);
+        self::assertSame(JobIdempotencyKey::MAX_LENGTH, strlen($a));
+        self::assertSame(JobIdempotencyKey::MAX_LENGTH, strlen($c));
+        self::assertSame(JobIdempotencyKey::MAX_LENGTH, strlen($d));
+        self::assertDoesNotMatchRegularExpression('/^campaign:/', $a);
+    }
+
     public function test_agent_capacity_multi_account(): void
     {
         $locks = new SessionLockPolicy;
