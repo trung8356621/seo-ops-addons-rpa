@@ -10,8 +10,10 @@ use Omnichannel\Addons\SocialAutomation\Domain\KeepAliveProtocol;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ClientKeepAliveController;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureRpaClientApiKey;
 use Omnichannel\Addons\SocialAutomation\Models\SaClientApiKey;
+use Omnichannel\Addons\SocialAutomation\Repositories\InMemoryKeepAliveAckStore;
 use Omnichannel\Addons\SocialAutomation\Repositories\InMemoryKeepAliveFeedStore;
 use Omnichannel\Addons\SocialAutomation\Repositories\InMemoryKeepAliveStore;
+use Omnichannel\Addons\SocialAutomation\Services\KeepAliveAckService;
 use Omnichannel\Addons\SocialAutomation\Services\KeepAliveCampaignFeedService;
 use Omnichannel\Addons\SocialAutomation\Services\KeepAliveNodeService;
 use PHPUnit\Framework\TestCase;
@@ -40,7 +42,12 @@ final class KeepAlivePhase3B3FeedContractTest extends TestCase
         $this->feedStore = new InMemoryKeepAliveFeedStore($this->nodes);
         $this->nodeService = new KeepAliveNodeService($this->nodes);
         $this->feed = new KeepAliveCampaignFeedService($this->nodes, $this->feedStore);
-        $this->controller = new ClientKeepAliveController($this->nodeService, $this->feed);
+        $ackStore = new InMemoryKeepAliveAckStore($this->feedStore);
+        $this->controller = new ClientKeepAliveController(
+            $this->nodeService,
+            $this->feed,
+            new KeepAliveAckService($this->nodes, $this->feedStore, $ackStore),
+        );
 
         $this->nodes->seedAgent([
             'id' => 10,

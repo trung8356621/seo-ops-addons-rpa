@@ -82,4 +82,14 @@ final class SocialAutomationSchema
             && self::has('sa_keepalive_campaign_events')
             && self::has('sa_keepalive_campaign_sequences');
     }
+
+    /**
+     * Keep Alive delivery ACK tables (Phase 3B.5A).
+     */
+    public static function keepaliveAckReady(): bool
+    {
+        return self::keepaliveFeedReady()
+            && self::has('sa_keepalive_event_ack_cursors')
+            && self::has('sa_keepalive_artifact_acks');
+    }
 }

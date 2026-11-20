@@ -36,3 +36,32 @@ Canonical Client ↔ Server contract for Phases 3B.1–3B.3.
 ## Event types
 
 `job_reserved` | `job_claimed` | `job_started` | `job_completed` | `job_failed` | `job_unknown` | `screenshot_uploaded`
+
+## Delivery ACKs (3B.5A)
+
+These confirm Recovery Node delivery/persistence. **Not** Job Claim/ACK/Result.
+
+### Event ACK — `POST /client/keepalive/events/ack`
+
+Request: `node_id`, `assignment_generation`, `campaign_id`, `event_ids[]`, `last_contiguous_sequence`
+
+Rules:
+- Active assignment + matching generation required.
+- `event_ids` must belong to the Campaign and form the contiguous range `(cursor+1)…last_contiguous_sequence`.
+- Reject ACK beyond durable `event_sequence_head`.
+- Idempotent when `last_contiguous_sequence <=` current cursor.
+- Persist per-Node, per-Campaign `acked_through_sequence`.
+
+Response: `ok`, `protocol_version`, `campaign_id`, `acked_through_sequence`, `acked_event_count`, `assignment_generation`
+
+### Artifact ACK — `POST /client/keepalive/artifacts/ack`
+
+Request: `node_id`, `campaign_id`, `assignment_generation`, `job_id`, `attempt`, `storage_key`, `sha256`
+
+Rules:
+- Server must already hold a verified screenshot artifact (`sa_artifacts`) with checksum.
+- `storage_key` must equal full `storage_path` **or** `artifact_uuid` (never basename-only).
+- `sha256` must match server `checksum_sha256`.
+- Missing/unverifiable artifact → `artifact_not_ready` (409) or `artifact_unsupported` (422).
+- Idempotent; never changes Job completion status.
+- No binary upload in this phase.

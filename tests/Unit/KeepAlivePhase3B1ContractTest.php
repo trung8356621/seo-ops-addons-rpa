@@ -11,8 +11,10 @@ use Omnichannel\Addons\SocialAutomation\Domain\KeepAliveRegistrationPolicy;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ClientKeepAliveController;
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureRpaClientApiKey;
 use Omnichannel\Addons\SocialAutomation\Models\SaClientApiKey;
+use Omnichannel\Addons\SocialAutomation\Repositories\InMemoryKeepAliveAckStore;
 use Omnichannel\Addons\SocialAutomation\Repositories\InMemoryKeepAliveFeedStore;
 use Omnichannel\Addons\SocialAutomation\Repositories\InMemoryKeepAliveStore;
+use Omnichannel\Addons\SocialAutomation\Services\KeepAliveAckService;
 use Omnichannel\Addons\SocialAutomation\Services\KeepAliveCampaignFeedService;
 use Omnichannel\Addons\SocialAutomation\Services\KeepAliveNodeService;
 use Omnichannel\Addons\SocialAutomation\Services\RpaClientApiKeyService;
@@ -39,9 +41,11 @@ final class KeepAlivePhase3B1ContractTest extends TestCase
         $this->store = new InMemoryKeepAliveStore;
         $this->service = new KeepAliveNodeService($this->store);
         $feedStore = new InMemoryKeepAliveFeedStore($this->store);
+        $ackStore = new InMemoryKeepAliveAckStore($feedStore);
         $this->controller = new ClientKeepAliveController(
             $this->service,
             new KeepAliveCampaignFeedService($this->store, $feedStore),
+            new KeepAliveAckService($this->store, $feedStore, $ackStore),
         );
 
         $this->store->seedAgent([

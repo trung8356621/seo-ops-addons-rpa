@@ -343,6 +343,95 @@ final class InMemoryKeepAliveFeedStore implements KeepAliveFeedStoreContract
         return $this->nodes->jobClaimInvocations();
     }
 
+    /**
+     * @param  list<string>  $eventIds
+     * @return list<array{event_id: string, campaign_id: string, event_sequence: int}>
+     */
+    public function findEventsByIds(string $installationId, string $campaignUuid, array $eventIds): array
+    {
+        $wanted = array_fill_keys($eventIds, true);
+        $out = [];
+        foreach ($this->feedEvents as $row) {
+            $id = (string) $row['event_id'];
+            if (! isset($wanted[$id])) {
+                continue;
+            }
+            if ((string) $row['installation_id'] !== $installationId
+                || (string) $row['campaign_uuid'] !== $campaignUuid) {
+                continue;
+            }
+            $out[] = [
+                'event_id' => $id,
+                'campaign_id' => (string) $row['campaign_uuid'],
+                'event_sequence' => (int) $row['event_sequence'],
+            ];
+        }
+
+        return $out;
+    }
+
+    /**
+     * @return array{
+     *   artifact_id: int,
+     *   artifact_uuid: string,
+     *   job_id: string,
+     *   attempt: int|null,
+     *   storage_path: string,
+     *   checksum_sha256: string,
+     *   kind: string
+     * }|null
+     */
+    public function findScreenshotArtifact(
+        string $installationId,
+        string $campaignUuid,
+        string $jobUuid,
+        ?int $attemptNo,
+    ): ?array {
+        $campaign = $this->nodes->findCampaignByUuid($campaignUuid, $installationId);
+        if ($campaign === null) {
+            return null;
+        }
+        $campaignId = (int) $campaign['id'];
+        $job = null;
+        foreach ($this->jobs as $j) {
+            if ((string) ($j['job_uuid'] ?? '') === $jobUuid && (int) ($j['campaign_id'] ?? 0) === $campaignId) {
+                $job = $j;
+                break;
+            }
+        }
+        if ($job === null) {
+            return null;
+        }
+
+        foreach ($this->artifacts as $art) {
+            if ((int) ($art['job_id'] ?? 0) !== (int) $job['id']) {
+                continue;
+            }
+            if (($art['kind'] ?? '') !== 'screenshot') {
+                continue;
+            }
+            if ($attemptNo !== null && isset($art['attempt_no']) && (int) $art['attempt_no'] !== $attemptNo) {
+                continue;
+            }
+            $sha = strtolower(trim((string) ($art['checksum_sha256'] ?? '')));
+            if ($sha === '') {
+                return null; // exists but not verifiable
+            }
+
+            return [
+                'artifact_id' => (int) $art['id'],
+                'artifact_uuid' => (string) ($art['artifact_uuid'] ?? ''),
+                'job_id' => $jobUuid,
+                'attempt' => isset($art['attempt_no']) ? (int) $art['attempt_no'] : $attemptNo,
+                'storage_path' => (string) ($art['storage_path'] ?? ''),
+                'checksum_sha256' => $sha,
+                'kind' => 'screenshot',
+            ];
+        }
+
+        return null;
+    }
+
     private function hasSource(string $kind, int $sourceId): bool
     {
         foreach ($this->feedEvents as $row) {

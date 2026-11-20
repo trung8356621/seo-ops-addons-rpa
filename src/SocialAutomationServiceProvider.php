@@ -127,8 +127,13 @@ final class SocialAutomationServiceProvider extends ServiceProvider
             \Omnichannel\Addons\SocialAutomation\Contracts\KeepAliveFeedStoreContract::class,
             \Omnichannel\Addons\SocialAutomation\Repositories\EloquentKeepAliveFeedStore::class
         );
+        $this->app->singleton(
+            \Omnichannel\Addons\SocialAutomation\Contracts\KeepAliveAckStoreContract::class,
+            \Omnichannel\Addons\SocialAutomation\Repositories\EloquentKeepAliveAckStore::class
+        );
         $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\KeepAliveNodeService::class);
         $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\KeepAliveCampaignFeedService::class);
+        $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\KeepAliveAckService::class);
         $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\SaAccountService::class);
 
         try {
@@ -499,6 +504,10 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                 Route::get('/keepalive/campaigns/{id}/events', [ClientKeepAliveController::class, 'events'])
                     ->whereUuid('id')
                     ->name('social-automation.client.keepalive.campaign-events');
+                Route::post('/keepalive/events/ack', [ClientKeepAliveController::class, 'ackEvents'])
+                    ->name('social-automation.client.keepalive.events-ack');
+                Route::post('/keepalive/artifacts/ack', [ClientKeepAliveController::class, 'ackArtifacts'])
+                    ->name('social-automation.client.keepalive.artifacts-ack');
 
                 // CP19A: Client campaign job claim/ack/progress/result (Client API Key only)
                 Route::post('/jobs/claim', [ClientCampaignJobController::class, 'claim'])

@@ -19,6 +19,8 @@ info:
     - `GET /api/v1/social-automation/client/keepalive/assignments?node_id=` — explicit Campaign assignments only.
     - `GET /api/v1/social-automation/client/keepalive/campaigns/{id}/snapshot` — sanitized Campaign snapshot (assignment + generation required).
     - `GET /api/v1/social-automation/client/keepalive/campaigns/{id}/events` — durable incremental Job event feed (`from_sequence`/`cursor`, optional `to_sequence`, bounded `limit`).
+    - `POST /api/v1/social-automation/client/keepalive/events/ack` — contiguous durable event delivery ACK (not Job execution ACK).
+    - `POST /api/v1/social-automation/client/keepalive/artifacts/ack` — verified Final Screenshot delivery ACK (server evidence required).
     - Server tenant = Client API Key `installation_id` (exposed as `tenant_id`); client-supplied `tenant_id` must match or is rejected.
     - Assignment row: canonical `row_version` (+ `version` alias). Node: `assignment_generation`.
     - Registration does **not** authorize Campaign access; no Browser Profile required; no Job claim side effects.
@@ -842,6 +844,67 @@ components:
         job_counts:
           type: object
           additionalProperties: { type: integer }
+
+    KeepAliveEventsAckRequest:
+      type: object
+      required: [node_id, assignment_generation, campaign_id, event_ids, last_contiguous_sequence]
+      properties:
+        node_id: { type: string }
+        assignment_generation: { type: integer }
+        campaign_id: { type: string, description: Campaign UUID }
+        tenant_id: { type: string }
+        event_ids:
+          type: array
+          items: { type: string }
+        last_contiguous_sequence: { type: integer, minimum: 0 }
+
+    KeepAliveEventsAckSuccess:
+      type: object
+      required: [ok, protocol_version, campaign_id, acked_through_sequence, acked_event_count, assignment_generation]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        protocol_version: { type: string, enum: [keepalive.v1] }
+        schema_version: { type: integer, enum: [2] }
+        campaign_id: { type: string }
+        campaign_uuid: { type: string }
+        node_id: { type: string }
+        tenant_id: { type: string }
+        acked_through_sequence: { type: integer }
+        acked_event_count: { type: integer, description: Newly acked count this call }
+        acked_event_count_total: { type: integer }
+        assignment_generation: { type: integer }
+        idempotent: { type: boolean }
+
+    KeepAliveArtifactsAckRequest:
+      type: object
+      required: [node_id, campaign_id, assignment_generation, job_id, storage_key, sha256]
+      properties:
+        node_id: { type: string }
+        campaign_id: { type: string }
+        assignment_generation: { type: integer }
+        job_id: { type: string }
+        attempt: { type: integer, nullable: true }
+        storage_key:
+          type: string
+          description: Full storage_path or artifact_uuid (not basename)
+        sha256: { type: string, minLength: 64, maxLength: 64 }
+        tenant_id: { type: string }
+
+    KeepAliveArtifactsAckSuccess:
+      type: object
+      required: [ok, protocol_version, campaign_id, job_id, verified, assignment_generation]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        protocol_version: { type: string, enum: [keepalive.v1] }
+        schema_version: { type: integer, enum: [2] }
+        campaign_id: { type: string }
+        node_id: { type: string }
+        job_id: { type: string }
+        attempt: { type: integer, nullable: true }
+        artifact_uuid: { type: string }
+        verified: { type: boolean, enum: [true] }
+        idempotent: { type: boolean }
+        assignment_generation: { type: integer }
 
     KeepAliveEventsSuccess:
       type: object
@@ -2822,6 +2885,70 @@ paths:
           description: campaign_not_found / node_not_registered
         '422':
           $ref: '#/components/responses/ValidationError'
+        '503':
+          description: schema_unavailable
+
+  /api/v1/social-automation/client/keepalive/events/ack:
+    post:
+      tags: [RPA Client]
+      summary: ACK contiguous durable Keep Alive events (delivery, not Job ACK)
+      operationId: clientKeepAliveEventsAck
+      security:
+        - RpaClientApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KeepAliveEventsAckRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KeepAliveEventsAckSuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: assignment_required / revoked / cross_tenant
+        '409':
+          description: assignment_generation_stale
+        '422':
+          description: non-contiguous / beyond head / invalid event_ids
+        '503':
+          description: schema_unavailable
+
+  /api/v1/social-automation/client/keepalive/artifacts/ack:
+    post:
+      tags: [RPA Client]
+      summary: ACK verified Final Screenshot artifact delivery
+      description: |
+        Requires authoritative sa_artifacts screenshot with checksum.
+        storage_key must match full storage_path or artifact_uuid (not basename).
+        Never fabricates success; never mutates Job status.
+      operationId: clientKeepAliveArtifactsAck
+      security:
+        - RpaClientApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KeepAliveArtifactsAckRequest'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KeepAliveArtifactsAckSuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: assignment_required / revoked / cross_tenant
+        '409':
+          description: assignment_generation_stale or artifact_not_ready
+        '422':
+          description: checksum/storage mismatch or artifact_unsupported
         '503':
           description: schema_unavailable
 
