@@ -207,7 +207,12 @@ final class StaffScriptRegistryContractTest extends TestCase
         self::assertStringContainsString('package_key', $yaml);
         self::assertStringContainsString('is_authentication', $yaml);
         self::assertStringContainsString('video_media_url', $yaml);
-        self::assertStringNotContainsString('storage_path', $yaml);
+        // Staff Script Registry schemas must not expose a storage_path field
+        // (descriptive "never includes storage_path" text elsewhere is allowed).
+        self::assertStringNotContainsString("storage_path:\n", $yaml);
+        self::assertStringNotContainsString('storage_path: {', $yaml);
+        self::assertStringContainsString('StaffScriptReleaseVariable', $yaml);
+        self::assertStringContainsString('variables_status', $yaml);
     }
 
     public function test_rpa_admin_script_routes_unchanged(): void

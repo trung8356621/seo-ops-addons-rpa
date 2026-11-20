@@ -286,8 +286,78 @@ components:
                   type: array
                   maxItems: 25
                   items:
-                    type: object
-                    additionalProperties: true
+                    $ref: '#/components/schemas/StaffScriptRegistryRelease'
+
+    StaffScriptReleaseVariable:
+      type: object
+      required: [key, name, type, required, shortcode_compatible]
+      description: |
+        Sanitized Script variable projection from an immutable published release.
+        Compatible with Campaign Shortcode V2 mapping (`CampaignScriptVariableSchema`).
+        Does not include credentials, secret defaults, steps, or asset paths.
+      properties:
+        key: { type: string, example: title }
+        name: { type: string, example: title, description: Display name; equals key unless a separate label exists }
+        type:
+          type: string
+          example: string
+          description: Normalized type (text→string; select→enum when allowed values present)
+        required: { type: boolean }
+        allow_multiple: { type: boolean }
+        shortcode_compatible: { type: boolean }
+        min: { type: number, nullable: true }
+        max: { type: number, nullable: true }
+        minLength: { type: integer, nullable: true }
+        maxLength: { type: integer, nullable: true }
+        pattern: { type: string, nullable: true }
+        enum:
+          type: array
+          items: {}
+          description: Allowed values when present
+        allowed_values:
+          type: array
+          items: {}
+          description: Alias of enum for Web clients
+
+    StaffScriptRegistryRelease:
+      type: object
+      required: [id, version, status, variables, variables_status, variable_count]
+      properties:
+        id: { type: integer, description: Release ID (pin target) }
+        version: { type: string, example: "1" }
+        status: { type: string, example: published }
+        published_at: { type: string, nullable: true }
+        content_digest: { type: string }
+        execution_digest: { type: string, nullable: true }
+        sync_source: { type: string, nullable: true }
+        assets_complete: { type: boolean }
+        asset_count: { type: integer }
+        variable_count: { type: integer }
+        variables:
+          type: array
+          items:
+            $ref: '#/components/schemas/StaffScriptReleaseVariable'
+        variables_status:
+          type: string
+          enum: [ok, empty, invalid]
+          description: |
+            ok = one or more projected variables;
+            empty = published release declares an empty variables list;
+            invalid = missing/malformed variable metadata (see variables_errors)
+        variables_errors:
+          type: array
+          items: { type: string }
+          description: Present when variables_status=invalid (e.g. script_variables_missing, script_variables_invalid)
+        step_count: { type: integer }
+        video_demo_status: { type: string }
+        has_video_demo_meta: { type: boolean }
+        video_media_id: { type: integer, nullable: true }
+        thumbnail_media_id: { type: integer, nullable: true }
+        video_media_url: { type: string, nullable: true }
+        thumbnail_media_url: { type: string, nullable: true }
+        runtime_requirements:
+          type: array
+          items: {}
 
     ErrorEnvelope:
       type: object

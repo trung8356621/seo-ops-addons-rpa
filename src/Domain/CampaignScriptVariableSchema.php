@@ -66,6 +66,80 @@ final class CampaignScriptVariableSchema
     }
 
     /**
+     * Sanitized Staff/API projection of Script variables from an immutable release manifest.
+     * Distinguishes genuinely empty variables from invalid metadata.
+     *
+     * @param  array<string, mixed>  $manifest
+     * @return array{
+     *   status: 'ok'|'empty'|'invalid',
+     *   variables: list<array<string, mixed>>,
+     *   errors: list<string>
+     * }
+     */
+    public function projectStaffList(array $manifest): array
+    {
+        if (! array_key_exists('variables', $manifest) || $manifest['variables'] === null) {
+            return [
+                'status' => 'invalid',
+                'variables' => [],
+                'errors' => ['script_variables_missing'],
+            ];
+        }
+
+        $parsed = $this->fromManifest($manifest);
+        if (! ($parsed['ok'] ?? false)) {
+            return [
+                'status' => 'invalid',
+                'variables' => [],
+                'errors' => $parsed['errors'] ?? ['script_variables_invalid'],
+            ];
+        }
+
+        /** @var array<string, array<string, mixed>> $byKey */
+        $byKey = $parsed['variables'] ?? [];
+        $list = [];
+        foreach ($byKey as $key => $var) {
+            $list[] = $this->toStaffItem($var, (string) $key);
+        }
+
+        return [
+            'status' => $list === [] ? 'empty' : 'ok',
+            'variables' => $list,
+            'errors' => [],
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $var
+     * @return array<string, mixed>
+     */
+    public function toStaffItem(array $var, ?string $key = null): array
+    {
+        $k = $key ?? (string) ($var['key'] ?? '');
+        $type = (string) ($var['type'] ?? 'string');
+        $item = [
+            'key' => $k,
+            'name' => $k,
+            'type' => $type,
+            'required' => (bool) ($var['required'] ?? true),
+            'allow_multiple' => (bool) ($var['allow_multiple'] ?? false),
+            'shortcode_compatible' => $this->isShortcodeSupported($type)
+                && ! in_array($type, self::SHORTCODE_UNSUPPORTED_TYPES, true),
+        ];
+        foreach (['min', 'max', 'minLength', 'maxLength', 'pattern'] as $constraint) {
+            if (array_key_exists($constraint, $var) && $var[$constraint] !== null && $var[$constraint] !== '') {
+                $item[$constraint] = $var[$constraint];
+            }
+        }
+        if (is_array($var['enum'] ?? null) && $var['enum'] !== []) {
+            $item['enum'] = array_values($var['enum']);
+            $item['allowed_values'] = array_values($var['enum']);
+        }
+
+        return $item;
+    }
+
+    /**
      * @param  array<string, mixed>  $var
      * @return array{
      *   key: string,

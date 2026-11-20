@@ -6,6 +6,7 @@ namespace Omnichannel\Addons\SocialAutomation\Http\Controllers\ScriptRegistry;
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\JsonResponse;
+use Omnichannel\Addons\SocialAutomation\Domain\CampaignScriptVariableSchema;
 use Omnichannel\Addons\SocialAutomation\PackageRegistry\ScriptRegistryUiService;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationAccess;
 
@@ -165,8 +166,11 @@ final class StaffScriptRegistryController extends Controller
         $videoMediaId = self::nullablePositiveInt($release['video_media_id'] ?? null);
         $thumbMediaId = self::nullablePositiveInt($release['thumbnail_media_id'] ?? null);
         $assets = is_array($release['assets'] ?? null) ? $release['assets'] : [];
-        $variables = is_array($release['variables'] ?? null) ? $release['variables'] : [];
         $steps = is_array($release['steps'] ?? null) ? $release['steps'] : [];
+
+        // Variables originate only from this release's immutable manifest payload
+        // (ScriptRegistryUiService copies manifest.variables onto the release DTO).
+        $projection = self::projectReleaseVariables($release);
 
         return [
             'id' => (int) ($release['id'] ?? 0),
@@ -184,7 +188,10 @@ final class StaffScriptRegistryController extends Controller
                 : null,
             'assets_complete' => self::assetsCompleteSummary($assets),
             'asset_count' => count($assets),
-            'variable_count' => count($variables),
+            'variable_count' => count($projection['variables']),
+            'variables' => $projection['variables'],
+            'variables_status' => $projection['status'],
+            'variables_errors' => $projection['errors'],
             'step_count' => count($steps),
             'video_demo_status' => (string) ($release['video_demo_status'] ?? 'missing'),
             'has_video_demo_meta' => is_array($release['video_demo'] ?? null),
@@ -195,6 +202,31 @@ final class StaffScriptRegistryController extends Controller
             'runtime_requirements' => is_array($release['runtime_requirements'] ?? null)
                 ? $release['runtime_requirements']
                 : [],
+        ];
+    }
+
+    /**
+     * Sanitized variable projection shared with Campaign Shortcode V2 schema.
+     *
+     * @param  array<string, mixed>  $release
+     * @return array{status: 'ok'|'empty'|'invalid', variables: list<array<string, mixed>>, errors: list<string>}
+     */
+    public static function projectReleaseVariables(array $release): array
+    {
+        $schema = new CampaignScriptVariableSchema;
+        // Prefer explicit release.variables (copied from immutable published manifest).
+        // Fall back to release.manifest when present. Never invent platform/tag defaults.
+        if (array_key_exists('variables', $release)) {
+            return $schema->projectStaffList(['variables' => $release['variables']]);
+        }
+        if (is_array($release['manifest'] ?? null)) {
+            return $schema->projectStaffList($release['manifest']);
+        }
+
+        return [
+            'status' => 'invalid',
+            'variables' => [],
+            'errors' => ['script_variables_missing'],
         ];
     }
 

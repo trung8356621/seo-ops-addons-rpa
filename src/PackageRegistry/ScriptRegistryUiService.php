@@ -133,7 +133,7 @@ final class ScriptRegistryUiService
                 $manifest = is_array($r->manifest) ? $r->manifest : [];
                 $mediaStatus = $media->statusForRelease((int) $r->id);
 
-                return [
+                $row = [
                     'id' => (int) $r->id,
                     'version' => (string) $r->version,
                     'content_digest' => (string) $r->content_digest,
@@ -142,7 +142,6 @@ final class ScriptRegistryUiService
                     'published_at' => $r->published_at?->toIso8601String(),
                     'sync_source' => $r->sync_source,
                     'created_by_user_id' => $r->created_by_user_id,
-                    'variables' => $manifest['variables'] ?? [],
                     'steps' => $manifest['steps'] ?? [],
                     'assets' => $manifest['assets'] ?? [],
                     'video_demo' => $manifest['video_demo'] ?? null,
@@ -151,6 +150,12 @@ final class ScriptRegistryUiService
                     'thumbnail_media_id' => $mediaStatus['thumbnail_media_id'] ?? null,
                     'runtime_requirements' => $manifest['runtime_requirements'] ?? [],
                 ];
+                // Preserve missing vs empty variables so Staff projection can diagnose.
+                if (array_key_exists('variables', $manifest)) {
+                    $row['variables'] = $manifest['variables'];
+                }
+
+                return $row;
             })
             ->all();
 
