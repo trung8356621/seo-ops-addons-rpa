@@ -92,7 +92,7 @@ final class KeepAlivePhase3B6CNotifyContractTest extends TestCase
         $this->genA = (int) ($this->nodes->findNode('tenant-alpha', 'node-a')['assignment_generation'] ?? $this->genA);
         // Drain assign notifications for clean notify tests.
         $this->outbox = new InMemoryKeepAliveNotifyOutbox;
-        $this->publisher = new KeepAliveGatewayPublisher('', 'test-secret');
+        $this->publisher = $this->recordingPublisher();
         $this->notify = new KeepAliveNotifyService($this->outbox, $this->routes, $this->publisher);
         $this->notify->setAutoFlush(false);
         $this->feed->setNotify($this->notify);
@@ -201,15 +201,44 @@ final class KeepAlivePhase3B6CNotifyContractTest extends TestCase
         self::assertGreaterThanOrEqual(1, $this->outbox->pendingCount());
         self::assertSame(0, $this->nodes->jobClaimInvocations());
 
-        $this->publisher->setOffline(false);
-        // available_at may block; use fresh outbox + deferred flush
+        // After recovery: configured publisher drains pending outbox.
         $fresh = new InMemoryKeepAliveNotifyOutbox;
-        $pub = new KeepAliveGatewayPublisher('', 'x');
+        $pub = $this->recordingPublisher();
         $svc = new KeepAliveNotifyService($fresh, $this->routes, $pub);
         $svc->setAutoFlush(false);
         $svc->enqueueNotify('tenant-alpha', $this->campaignUuid, 6, $rooms);
         $ok = $svc->flush();
         self::assertSame(1, $ok['flushed']);
+        self::assertSame(0, $ok['pending']);
+    }
+
+    public function test_unconfigured_gateway_retains_durable_outbox(): void
+    {
+        $outbox = new InMemoryKeepAliveNotifyOutbox;
+        $pub = new KeepAliveGatewayPublisher('', 'test-secret');
+        $svc = new KeepAliveNotifyService($outbox, $this->routes, $pub);
+        $svc->setAutoFlush(false);
+        $rooms = [
+            KeepAliveSocketTicket::roomName('tenant-alpha', $this->campaignUuid, 'node-a'),
+        ];
+        $svc->enqueueNotify('tenant-alpha', $this->campaignUuid, 7, $rooms);
+        self::assertSame(1, $outbox->pendingCount());
+
+        $result = $svc->flush();
+        self::assertSame(0, $result['flushed']);
+        self::assertSame(1, $result['failed']);
+        self::assertSame(1, $outbox->pendingCount());
+        self::assertSame([], $pub->sent());
+
+        $direct = $pub->publish([
+            'event_type' => KeepAliveSocketEnvelope::TYPE_NOTIFY,
+            'installation_id' => 'tenant-alpha',
+            'campaign_uuid' => $this->campaignUuid,
+            'rooms' => $rooms,
+            'seq_hint' => 7,
+        ]);
+        self::assertFalse($direct['ok']);
+        self::assertSame('gateway_unconfigured', $direct['error']);
     }
 
     public function test_assignment_revoke_emits_route_invalidated_and_ticket_stale(): void
@@ -280,5 +309,13 @@ final class KeepAlivePhase3B6CNotifyContractTest extends TestCase
         $key->setAttribute('installation_id', $installationId);
 
         return $key;
+    }
+
+    private function recordingPublisher(): KeepAliveGatewayPublisher
+    {
+        $publisher = new KeepAliveGatewayPublisher('http://127.0.0.1:3015/internal/publish', 'test-secret');
+        $publisher->setPublishOverride(static fn (array $row): array => ['ok' => true, 'http' => 200]);
+
+        return $publisher;
     }
 }

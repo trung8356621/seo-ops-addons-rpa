@@ -62,6 +62,7 @@ use Omnichannel\Addons\SocialAutomation\PackageRegistry\WidgetInvalidationServic
 use Omnichannel\Addons\SocialAutomation\PackageRegistry\WidgetWorkflowComposerService;
 use Omnichannel\Addons\SocialAutomation\Registry\AgentRegistryService;
 use Omnichannel\Addons\SocialAutomation\Registry\SessionSyncService;
+use Omnichannel\Addons\SocialAutomation\Scheduling\KeepAliveNotifyFlushRegistrar;
 use Omnichannel\Addons\SocialAutomation\Scheduling\ScheduleDispatcher;
 use Omnichannel\Addons\SocialAutomation\Scheduling\ScheduleTickRegistrar;
 use Omnichannel\Addons\SocialAutomation\Services\RpaClientApiKeyService;
@@ -181,6 +182,7 @@ final class SocialAutomationServiceProvider extends ServiceProvider
         }
 
         $this->registerScheduleTick();
+        $this->registerKeepAliveNotifyFlush();
 
         try {
             $this->registerWorkspaceDestination();
@@ -199,6 +201,17 @@ final class SocialAutomationServiceProvider extends ServiceProvider
     {
         $this->callAfterResolving(Schedule::class, function (Schedule $schedule): void {
             (new ScheduleTickRegistrar)->register($schedule);
+        });
+    }
+
+    /**
+     * Wire social-automation:keepalive-notify-flush (every minute, non-overlapping).
+     * Retries durable outbox after gateway recovery. Preserves schedule-tick.
+     */
+    private function registerKeepAliveNotifyFlush(): void
+    {
+        $this->callAfterResolving(Schedule::class, function (Schedule $schedule): void {
+            (new KeepAliveNotifyFlushRegistrar)->register($schedule);
         });
     }
 

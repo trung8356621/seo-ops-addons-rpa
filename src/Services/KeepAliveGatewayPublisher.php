@@ -23,6 +23,9 @@ final class KeepAliveGatewayPublisher
 
     private int $failures = 0;
 
+    /** @var (callable(array<string, mixed>): array{ok: bool, error?: string, http?: int})|null */
+    private $publishOverride = null;
+
     public function __construct(
         private readonly ?string $publishUrl = null,
         private readonly ?string $gatewaySecret = null,
@@ -32,6 +35,16 @@ final class KeepAliveGatewayPublisher
     public function setOffline(bool $offline): void
     {
         $this->offline = $offline;
+    }
+
+    /**
+     * Test/dev hook to simulate a reachable gateway without HTTP.
+     *
+     * @param  (callable(array<string, mixed>): array{ok: bool, error?: string, http?: int})|null  $override
+     */
+    public function setPublishOverride(?callable $override): void
+    {
+        $this->publishOverride = $override;
     }
 
     /**
@@ -68,6 +81,26 @@ final class KeepAliveGatewayPublisher
             return ['ok' => false, 'error' => 'gateway_offline'];
         }
 
+        if ($this->publishOverride !== null) {
+            $result = ($this->publishOverride)($row);
+            if ($result['ok'] ?? false) {
+                $this->sent[] = [
+                    'event' => (string) $row['event_type'],
+                    'tenant_id' => (string) $row['installation_id'],
+                    'campaign_id' => (string) $row['campaign_uuid'],
+                    'rooms' => array_values($row['rooms']),
+                    'seq_hint' => $row['seq_hint'] ?? null,
+                    'route_generation' => $row['route_generation'] ?? null,
+                    'assignment_generation' => $row['assignment_generation'] ?? null,
+                    'reason' => is_array($row['payload'] ?? null) ? ($row['payload']['reason'] ?? null) : null,
+                ];
+            } else {
+                $this->failures++;
+            }
+
+            return $result;
+        }
+
         $body = [
             'event' => (string) $row['event_type'],
             'tenant_id' => (string) $row['installation_id'],
@@ -88,11 +121,11 @@ final class KeepAliveGatewayPublisher
 
         $url = $this->resolveUrl();
         $secret = $this->resolveSecret();
+        // Unconfigured gateway must NOT discard durable outbox rows (no soft success).
         if ($url === '' || $secret === '') {
-            // Local/dev without gateway configured: treat as soft no-op success so outbox drains.
-            $this->sent[] = $body;
+            $this->failures++;
 
-            return ['ok' => true];
+            return ['ok' => false, 'error' => 'gateway_unconfigured', 'http' => 0];
         }
 
         $lastError = 'publish_failed';

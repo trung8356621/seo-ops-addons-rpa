@@ -70,8 +70,9 @@ Durable truth remains HTTP snapshot/events/ACK.
 1. Inside the durable projection TX (when `projected > 0`): enqueue coalesced outbox row (`sa_keepalive_notify_outbox`) with server-resolved rooms.
 2. `DB::afterCommit` → `KeepAliveNotifyService::flush()` → HTTP POST gateway `/internal/publish`.
 3. Gateway failure → mark outbox failed + retry backoff; **never** rolls back durable events or Jobs.
-4. Assign/revoke → enqueue `ka.assignment_changed` + `ka.route_invalidated`.
-5. Artisan: `social-automation:keepalive-notify-flush` for retry when gateway was offline.
+4. Unconfigured publish URL/secret → `gateway_unconfigured` (pending rows **retained**; no soft-success discard).
+5. Assign/revoke → enqueue `ka.assignment_changed` + `ka.route_invalidated`.
+6. Artisan + scheduler: `social-automation:keepalive-notify-flush` every minute (`withoutOverlapping`) for retry when gateway was offline/unconfigured.
 
 ### Coalesce
 
@@ -149,7 +150,7 @@ Do **not** expose `/internal/publish` publicly (firewall / listen 127.0.0.1 only
 - `GET /health` → connected count, queue, memory
 - Memory: expect small RSS for single worker; alert on heap growth
 - Restart: systemd `Restart=on-failure`; peers re-mint tickets and reconnect
-- Schedule: `social-automation:keepalive-notify-flush` every minute (optional)
+- Schedule: `social-automation:keepalive-notify-flush` every minute (registered; non-overlapping)
 
 ### Migrations
 
