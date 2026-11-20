@@ -852,9 +852,34 @@ components:
           format: date-time
           nullable: true
 
+    CampaignShortcodeMapping:
+      type: object
+      required: [entries]
+      description: |
+        Campaign-owned shortcode → Script variable mapping.
+        Must cover ALL required variables of the pinned published Script release.
+        Default editor shortcode name is `body`; the Script is NOT assumed to have a `body` variable
+        (e.g. WordPress POC may map `[body]` → Script variable `title`).
+      properties:
+        entries:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [shortcode, variable]
+            properties:
+              shortcode:
+                type: string
+                pattern: '^[a-z][a-z0-9_]*$'
+                example: body
+              variable:
+                type: string
+                description: Script variable key from the pinned published release
+                example: title
+
     CampaignCreateRequest:
       type: object
-      required: [name, platform, execution_mode, script_id, contents]
+      required: [name, platform, execution_mode, script_id]
       properties:
         name: { type: string }
         platform: { type: string }
@@ -895,9 +920,14 @@ components:
           type: integer
           default: 3600
           description: Durable resource recheck interval (not job retry)
+        shortcode_mapping:
+          $ref: '#/components/schemas/CampaignShortcodeMapping'
         contents:
           type: array
-          minItems: 1
+          minItems: 0
+          description: |
+            Optional. Zero contents allowed at create (Shortcode V2).
+            Campaign cannot Start until it has valid actionable Content covering all required Script variables.
           items:
             type: object
             properties:
@@ -911,7 +941,52 @@ components:
               input:
                 type: object
                 additionalProperties: true
-                description: Placeholder-safe script input; plaintext secrets rejected. Title-only scripts use `{ title: "..." }`.
+                description: Legacy placeholder-safe script input; plaintext secrets rejected. Not reinterpreted as shortcode.
+              raw_source:
+                type: string
+                description: |
+                  Canonical shortcode-delimited plain text (not HTML / not Tiptap JSON).
+                  Example: `[body]Some text[/body]`
+    CampaignMockBatchRequest:
+      type: object
+      required: [count]
+      properties:
+        count:
+          type: integer
+          minimum: 1
+          maximum: 50
+          description: Number of Articles to generate. Types/shortcodes come from Campaign mapping + Script schema only.
+        idempotency_key:
+          type: string
+          maxLength: 128
+          description: Required for mock-save (also accepted via Idempotency-Key header).
+
+    CampaignMockPreviewResponse:
+      type: object
+      properties:
+        count: { type: integer }
+        mapping_version: { type: integer }
+        articles:
+          type: array
+          items:
+            type: object
+            properties:
+              external_ref: { type: string }
+              raw_source: { type: string }
+              input:
+                type: object
+                additionalProperties: true
+
+    CampaignMockSaveResponse:
+      type: object
+      properties:
+        count: { type: integer }
+        mapping_version: { type: integer }
+        idempotent: { type: boolean }
+        contents:
+          type: array
+          items:
+            $ref: '#/components/schemas/CampaignContentItem'
 
     CampaignSummary:
       type: object
@@ -947,6 +1022,11 @@ components:
           type: string
           format: date-time
           nullable: true
+        shortcode_mapping:
+          allOf:
+            - $ref: '#/components/schemas/CampaignShortcodeMapping'
+          nullable: true
+        shortcode_mapping_version: { type: integer }
 
     CampaignDetail:
       type: object
@@ -1008,6 +1088,16 @@ components:
         input:
           type: object
           additionalProperties: true
+        source_format:
+          type: string
+          enum: [legacy_input, shortcode]
+        raw_source:
+          type: string
+          nullable: true
+          description: Canonical shortcode plain text when source_format=shortcode
+        mapping_version:
+          type: integer
+          nullable: true
 
     CampaignContentCreateRequest:
       type: object
@@ -1024,7 +1114,13 @@ components:
         input:
           type: object
           additionalProperties: true
-          description: Script input validated against the campaign's pinned Script variables
+          description: Legacy Script input. Must include ALL required Script variables. Not reinterpreted as shortcode.
+        raw_source:
+          type: string
+          description: |
+            Canonical shortcode source. Requires Campaign shortcode_mapping.
+            Example: `[body]POC Draft Title[/body]` when mapping body→title.
+            Rejects HTML / Tiptap JSON (`richtext_format_unsupported`).
 
     CampaignContentUpdateRequest:
       type: object
@@ -1040,6 +1136,7 @@ components:
         input:
           type: object
           additionalProperties: true
+        raw_source: { type: string }
 
     CampaignJobClaim:
       type: object
@@ -4628,10 +4725,13 @@ paths:
       tags: [Staff Session]
       summary: Create campaign (Owner/Admin only)
       description: |
-        Creates a draft Campaign with Contents. `execution_mode` is immutable after start.
-        Content `input` may use placeholders such as `{account.username}` / `{account.password}`;
-        plaintext passwords are rejected. Credentials are never persisted resolved —
-        Electron retrieves them via the Browser-bound credential API.
+        Creates a draft Campaign. Zero contents allowed (Shortcode V2).
+        `execution_mode` and `shortcode_mapping` are immutable after start.
+        Content `input` (legacy) or `raw_source` (shortcode) may be supplied later.
+        Placeholders such as `{account.username}` / `{account.password}` are kept;
+        plaintext passwords are rejected. Credentials are never persisted resolved.
+        Start is rejected with `no_actionable_content` until valid Content covers
+        ALL required variables of the pinned published Script.
       operationId: staffCampaignsStore
       security:
         - SeoOpsSessionCookie: []
@@ -4642,8 +4742,23 @@ paths:
             schema:
               $ref: '#/components/schemas/CampaignCreateRequest'
             examples:
+              empty_campaign_shortcode_v2:
+                summary: Empty Campaign with shortcode mapping (body → title)
+                value:
+                  name: Shortcode V2 Empty
+                  platform: mayhopphat
+                  run_mode: live
+                  execution_mode: one_account_one_job
+                  script_id: mayhopphat.create_post
+                  script_version: "1"
+                  account_id: ff0035e0-a6d8-42af-8370-f5be9e453f2d
+                  shortcode_mapping:
+                    entries:
+                      - shortcode: body
+                        variable: title
+                  contents: []
               wordpress_draft_poc:
-                summary: 1 Campaign → 1 Account → 1 Job → WordPress Save Draft
+                summary: Legacy 1 Campaign → 1 Account → 1 Job → WordPress Save Draft
                 value:
                   name: WP Draft POC
                   platform: mayhopphat
@@ -4772,6 +4887,11 @@ paths:
     post:
       tags: [Staff Session]
       summary: Start campaign dispatch
+      description: |
+        Rejects with 422 `no_actionable_content` when the Campaign has zero Content
+        or no dispatchable Content with validated input covering ALL required Script variables.
+        Other errors: `content_input_invalid`, `required_variable_missing:*`, `mapping_version_stale`,
+        `required_variable_unmapped:*`, `shortcode_mapping_required`.
       operationId: staffCampaignsStart
       security:
         - SeoOpsSessionCookie: []
@@ -4783,6 +4903,19 @@ paths:
       responses:
         '200':
           description: Running; eligible contents dispatched; shortfall → waiting_resources + next_recheck_at
+        '422':
+          description: |
+            Example empty campaign:
+            `{ "ok": false, "errors": ["no_actionable_content"] }`
+          content:
+            application/json:
+              schema:
+                type: object
+              examples:
+                no_actionable_content:
+                  value:
+                    ok: false
+                    errors: [no_actionable_content]
 
   /social-automation/api/campaigns/{id}/pause:
     post:
@@ -4883,10 +5016,17 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/CampaignContentCreateRequest'
-            example:
-              external_ref: article-2
-              input:
-                title: Second draft title
+            examples:
+              legacy_input:
+                value:
+                  external_ref: article-2
+                  input:
+                    title: Second draft title
+              shortcode_body_to_title:
+                summary: Shortcode content with body→title mapping
+                value:
+                  external_ref: article-sc-1
+                  raw_source: "[body]POC Draft Title[/body]"
       responses:
         '201':
           description: Content created
@@ -4902,6 +5042,113 @@ paths:
           description: Owner/Admin only
         '404':
           description: Campaign not found
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /social-automation/api/campaigns/{id}/contents/mock-preview:
+    post:
+      tags: [Staff Session]
+      summary: Preview mock Articles (no DB write, no Jobs)
+      description: |
+        Generates typed Articles from Campaign shortcode mapping + pinned Script schema.
+        User supplies ONLY `count`. Same generator/parser/validator as mock-save.
+        Does not persist Content, create Jobs, or Start the Campaign.
+      operationId: staffCampaignContentsMockPreview
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CampaignMockBatchRequest'
+            example:
+              count: 3
+      responses:
+        '200':
+          description: Preview articles
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/CampaignMockPreviewResponse'
+              example:
+                ok: true
+                data:
+                  count: 1
+                  mapping_version: 1
+                  articles:
+                    - external_ref: mock-a1b2c3d4e5f60708-1
+                      raw_source: "[body]Mock title #1 (mock-a1b2c3d4e5f60708-1)[/body]"
+                      input:
+                        title: "Mock title #1 (mock-a1b2c3d4e5f60708-1)"
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /social-automation/api/campaigns/{id}/contents/mock-save:
+    post:
+      tags: [Staff Session]
+      summary: Confirm-save mock Articles (atomic batch)
+      description: |
+        Persists mock Articles atomically (all-or-nothing) under Campaign row lock.
+        Requires Idempotency-Key header or body `idempotency_key`.
+        Concurrent duplicates are prevented via lock + idempotency replay.
+        On any failure the entire batch is rolled back — never reports partial success.
+        Does not create Jobs or Start the Campaign.
+      operationId: staffCampaignContentsMockSave
+      security:
+        - SeoOpsSessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CampaignMockBatchRequest'
+            example:
+              count: 3
+              idempotency_key: mock-batch-2026-11-20-a
+      responses:
+        '201':
+          description: Contents created (or idempotent replay)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/CampaignMockSaveResponse'
+              example:
+                ok: true
+                data:
+                  count: 3
+                  mapping_version: 1
+                  idempotent: false
+                  contents:
+                    - id: 11111111-1111-1111-1111-111111111111
+                      external_ref: mock-a1b2c3d4e5f60708-1
+                      status: pending
+                      source_format: shortcode
+                      mapping_version: 1
+                      input:
+                        title: "Mock title #1 (mock-a1b2c3d4e5f60708-1)"
         '422':
           $ref: '#/components/responses/ValidationError'
 

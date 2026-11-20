@@ -11,6 +11,8 @@ use Omnichannel\Addons\SocialAutomation\Domain\AccountLockPolicy;
 use Omnichannel\Addons\SocialAutomation\Domain\AttemptFencePolicy;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignModePolicy;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignRecheckPolicy;
+use Omnichannel\Addons\SocialAutomation\Domain\CampaignScriptVariableSchema;
+use Omnichannel\Addons\SocialAutomation\Domain\CampaignShortcodePipeline;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignTestScriptPolicy;
 use Omnichannel\Addons\SocialAutomation\Domain\EligibilitySelector;
 use Omnichannel\Addons\SocialAutomation\Domain\OnlineStateCalculator;
@@ -34,6 +36,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaCampaignContent;
 use Omnichannel\Addons\SocialAutomation\Models\SaJob;
 use Omnichannel\Addons\SocialAutomation\Models\SaJobAttempt;
 use Omnichannel\Addons\SocialAutomation\Models\SaJobEvent;
+use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
 use Omnichannel\Addons\SocialAutomation\Models\SaSessionAccount;
 use Omnichannel\Addons\SocialAutomation\Services\ActionScriptDistributionService;
 use Omnichannel\Addons\SocialAutomation\Support\JobObservability;
@@ -62,6 +65,8 @@ final class CampaignOrchestrator
         private readonly CampaignTestScriptPolicy $testScripts = new CampaignTestScriptPolicy,
         private readonly ArtifactAcceptPolicy $artifacts = new ArtifactAcceptPolicy,
         private readonly ActionScriptDistributionService $actionScripts = new ActionScriptDistributionService,
+        private readonly CampaignShortcodePipeline $shortcodePipeline = new CampaignShortcodePipeline,
+        private readonly CampaignScriptVariableSchema $variableSchema = new CampaignScriptVariableSchema,
     ) {}
 
     /**
@@ -164,6 +169,16 @@ final class CampaignOrchestrator
                         $content->status = CampaignContentStatus::WaitingResources->value;
                         $content->last_error_code = 'pinned_account_mismatch';
                         $content->last_error_message = 'Dispatch refused non-pinned account (no silent fallback)';
+                        $content->save();
+                        $stillWaiting++;
+                        continue;
+                    }
+
+                    $inputGate = $this->assertContentInputForDispatch($locked, $content);
+                    if (! ($inputGate['ok'] ?? false)) {
+                        $content->status = CampaignContentStatus::WaitingResources->value;
+                        $content->last_error_code = (string) (($inputGate['errors'][0] ?? 'content_input_invalid'));
+                        $content->last_error_message = 'Content input failed pre-dispatch validation';
                         $content->save();
                         $stillWaiting++;
                         continue;
@@ -767,6 +782,55 @@ final class CampaignOrchestrator
      * Resolve hard Account pin for a content row.
      * Precedence: content.assigned_account_id → campaign.meta.pinned_account_id (UUID→id).
      */
+    /**
+     * Pre-dispatch validation: stored typed input must cover ALL required Script variables.
+     * Does not reparse raw_source (frozen input for reserved/executed safety).
+     *
+     * @return array{ok: bool, errors?: list<string>}
+     */
+    private function assertContentInputForDispatch(SaCampaign $campaign, SaCampaignContent $content): array
+    {
+        $input = is_array($content->input) ? $content->input : [];
+        if ($input === []) {
+            return ['ok' => false, 'errors' => ['content_input_empty']];
+        }
+
+        $fmt = (string) ($content->source_format ?? 'legacy_input');
+        if ($fmt === 'shortcode') {
+            $campaignVersion = (int) ($campaign->shortcode_mapping_version ?? 0);
+            $contentVersion = (int) ($content->mapping_version ?? 0);
+            if ($campaignVersion > 0 && $contentVersion !== $campaignVersion) {
+                return ['ok' => false, 'errors' => ['mapping_version_stale']];
+            }
+        }
+
+        $scriptPin = $this->actionScripts->resolvePublishedPin(
+            (string) $campaign->script_id,
+            (string) $campaign->script_version,
+            $campaign->script_content_digest !== null ? (string) $campaign->script_content_digest : null,
+        );
+        if ($scriptPin === null) {
+            return ['ok' => false, 'errors' => ['script_not_found']];
+        }
+        $release = SaPackageRelease::query()->find($scriptPin['release_id'] ?? null);
+        $manifest = $release instanceof SaPackageRelease && is_array($release->manifest)
+            ? $release->manifest
+            : [];
+        if ($manifest === []) {
+            return ['ok' => true];
+        }
+        $schema = $this->variableSchema->fromManifest($manifest);
+        if (! ($schema['ok'] ?? false)) {
+            return ['ok' => false, 'errors' => $schema['errors'] ?? ['script_variables_invalid']];
+        }
+        $variables = $schema['variables'] ?? [];
+        if ($variables === []) {
+            return ['ok' => true];
+        }
+
+        return $this->shortcodePipeline->validateStoredInput($input, $variables);
+    }
+
     private function resolveRequiredAccountId(SaCampaign $campaign, SaCampaignContent $content): ?int
     {
         if ($content->assigned_account_id) {
@@ -970,6 +1034,9 @@ final class CampaignOrchestrator
         $leaseToken = Str::random(40);
         $fencing = 1;
         $input = is_array($content->input) ? $content->input : [];
+        if ($input === []) {
+            return null;
+        }
         $scriptPin = $this->actionScripts->resolvePublishedPin(
             (string) $campaign->script_id,
             (string) $campaign->script_version,

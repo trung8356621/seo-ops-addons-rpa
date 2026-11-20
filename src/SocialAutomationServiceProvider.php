@@ -392,6 +392,12 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     Route::get('/{id}/contents', [StaffCampaignContentController::class, 'index'])
                         ->whereUuid('id')
                         ->name('social-automation.campaigns.contents.index');
+                    Route::post('/{id}/contents/mock-preview', [StaffCampaignContentController::class, 'mockPreview'])
+                        ->whereUuid('id')
+                        ->name('social-automation.campaigns.contents.mock-preview');
+                    Route::post('/{id}/contents/mock-save', [StaffCampaignContentController::class, 'mockSave'])
+                        ->whereUuid('id')
+                        ->name('social-automation.campaigns.contents.mock-save');
                     Route::post('/{id}/contents', [StaffCampaignContentController::class, 'store'])
                         ->whereUuid('id')
                         ->name('social-automation.campaigns.contents.store');

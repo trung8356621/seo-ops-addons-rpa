@@ -8,6 +8,10 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignInputSanitizer;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignRecheckPolicy;
+use Omnichannel\Addons\SocialAutomation\Domain\CampaignScriptVariableSchema;
+use Omnichannel\Addons\SocialAutomation\Domain\CampaignShortcodeMappingValidator;
+use Omnichannel\Addons\SocialAutomation\Domain\CampaignShortcodeMockGenerator;
+use Omnichannel\Addons\SocialAutomation\Domain\CampaignShortcodePipeline;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignTestScriptPolicy;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignContentStatus;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignExecutionMode;
@@ -31,6 +35,10 @@ final class CampaignService
         private readonly CampaignInputSanitizer $sanitizer = new CampaignInputSanitizer,
         private readonly CampaignRecheckPolicy $recheck = new CampaignRecheckPolicy,
         private readonly CampaignTestScriptPolicy $testScripts = new CampaignTestScriptPolicy,
+        private readonly CampaignShortcodePipeline $shortcodePipeline = new CampaignShortcodePipeline,
+        private readonly CampaignShortcodeMappingValidator $mappingValidator = new CampaignShortcodeMappingValidator,
+        private readonly CampaignScriptVariableSchema $variableSchema = new CampaignScriptVariableSchema,
+        private readonly CampaignShortcodeMockGenerator $mockGenerator = new CampaignShortcodeMockGenerator,
     ) {}
 
     /**
@@ -49,13 +57,14 @@ final class CampaignService
         $runMode = CampaignRunMode::tryFromInput($input['run_mode'] ?? null);
         $scriptId = trim((string) ($input['script_id'] ?? ''));
         $recheckSeconds = $this->recheck->normalizeInterval((int) ($input['resource_recheck_seconds'] ?? CampaignRecheckPolicy::DEFAULT_INTERVAL_SECONDS));
-        $contents = $input['contents'] ?? null;
+        $contents = $input['contents'] ?? [];
 
         if ($name === '' || $platform === '' || $mode === null || $runMode === null || $scriptId === '') {
             return ['ok' => false, 'errors' => ['validation_failed']];
         }
-        if (! is_array($contents) || $contents === []) {
-            return ['ok' => false, 'errors' => ['contents_required']];
+        // Zero contents allowed (Shortcode V2). Contents may be added later before Start.
+        if (! is_array($contents)) {
+            return ['ok' => false, 'errors' => ['contents_invalid']];
         }
 
         $script = $this->resolveScriptPin($scriptId, isset($input['script_version']) ? (string) $input['script_version'] : null);
@@ -73,6 +82,30 @@ final class CampaignService
         }
 
         $manifest = is_array($script['manifest'] ?? null) ? $script['manifest'] : [];
+        $schema = $this->variableSchema->fromManifest($manifest);
+        if (! ($schema['ok'] ?? false)) {
+            return ['ok' => false, 'errors' => $schema['errors'] ?? ['script_variables_invalid']];
+        }
+        /** @var array<string, array<string, mixed>> $variables */
+        $variables = $schema['variables'] ?? [];
+
+        $mappingDoc = null;
+        $mappingVersion = 0;
+        if (array_key_exists('shortcode_mapping', $input)) {
+            if (! SocialAutomationSchema::campaignShortcodeReady()) {
+                return ['ok' => false, 'errors' => ['schema_unavailable']];
+            }
+            if (! is_array($input['shortcode_mapping'])) {
+                return ['ok' => false, 'errors' => ['shortcode_mapping_invalid']];
+            }
+            $mapped = $this->mappingValidator->validate($input['shortcode_mapping'], $variables);
+            if (! ($mapped['ok'] ?? false)) {
+                return ['ok' => false, 'errors' => $mapped['errors'] ?? ['shortcode_mapping_invalid']];
+            }
+            $mappingDoc = $mapped['mapping'] ?? null;
+            $mappingVersion = 1;
+        }
+
         $testGate = null;
         if ($runMode->requiresTestCompatibleScript()) {
             $testGate = $this->testScripts->assertCompatibleForTestMode($manifest);
@@ -85,38 +118,32 @@ final class CampaignService
             }
         }
 
-        $variableNames = $this->scriptVariableNames($manifest);
+        $variableNames = array_keys($variables);
         $prepared = [];
         foreach ($contents as $i => $row) {
             if (! is_array($row)) {
                 return ['ok' => false, 'errors' => ['content_invalid:'.$i]];
             }
-            $externalRef = trim((string) ($row['external_ref'] ?? ''));
-            $rawInput = is_array($row['input'] ?? null) ? $row['input'] : [];
-            $sanitized = $this->sanitizer->sanitize($rawInput, $variableNames);
-            if (! ($sanitized['ok'] ?? false)) {
-                return ['ok' => false, 'errors' => $sanitized['errors'] ?? ['content_input_invalid']];
+            $built = $this->buildContentFromRequestRow(
+                $row,
+                $variables,
+                $variableNames,
+                $mappingDoc,
+                $mappingVersion,
+                $pinnedAccount,
+                $installationId,
+                $platform,
+                $i,
+            );
+            if (! ($built['ok'] ?? false)) {
+                return ['ok' => false, 'errors' => $built['errors'] ?? ['content_invalid:'.$i]];
             }
-            $rowAccountId = $pinnedAccount?->id;
-            $rowAccountUuid = trim((string) ($row['account_id'] ?? ''));
-            if ($rowAccountUuid !== '') {
-                $rowAccount = $this->resolvePinnedAccount($rowAccountUuid, $installationId, $platform);
-                if ($rowAccount === null) {
-                    return ['ok' => false, 'errors' => ['content_account_invalid:'.$i]];
-                }
-                $rowAccountId = $rowAccount->id;
-            }
-            $prepared[] = [
-                'external_ref' => $externalRef !== '' ? $externalRef : null,
-                'input' => $sanitized['input'] ?? [],
-                'sort_order' => $i,
-                'assigned_account_id' => $rowAccountId,
-            ];
+            $prepared[] = $built;
         }
 
         try {
             return DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use (
-                $name, $platform, $mode, $runMode, $script, $recheckSeconds, $prepared, $installationId, $userId, $testGate, $manifest, $pinnedAccount
+                $name, $platform, $mode, $runMode, $script, $recheckSeconds, $prepared, $installationId, $userId, $testGate, $pinnedAccount, $mappingDoc, $mappingVersion
             ): array {
                 $meta = [];
                 if (is_array($testGate)) {
@@ -129,7 +156,7 @@ final class CampaignService
                 if ($pinnedAccount instanceof SaAccount) {
                     $meta['pinned_account_id'] = $pinnedAccount->account_uuid;
                 }
-                $campaign = SaCampaign::query()->create([
+                $attrs = [
                     'campaign_uuid' => (string) Str::uuid(),
                     'installation_id' => $installationId,
                     'name' => $name,
@@ -143,10 +170,15 @@ final class CampaignService
                     'resource_recheck_seconds' => $recheckSeconds,
                     'created_by_user_id' => $userId,
                     'meta' => $meta !== [] ? $meta : null,
-                ]);
+                ];
+                if (SocialAutomationSchema::campaignShortcodeReady()) {
+                    $attrs['shortcode_mapping'] = $mappingDoc;
+                    $attrs['shortcode_mapping_version'] = $mappingVersion;
+                }
+                $campaign = SaCampaign::query()->create($attrs);
 
                 foreach ($prepared as $row) {
-                    SaCampaignContent::query()->create([
+                    $contentAttrs = [
                         'content_uuid' => (string) Str::uuid(),
                         'campaign_id' => $campaign->id,
                         'external_ref' => $row['external_ref'],
@@ -154,10 +186,14 @@ final class CampaignService
                         'status' => CampaignContentStatus::Pending->value,
                         'input' => $row['input'],
                         'assigned_account_id' => $row['assigned_account_id'],
-                    ]);
+                    ];
+                    if (SocialAutomationSchema::campaignShortcodeReady()) {
+                        $contentAttrs['source_format'] = $row['source_format'] ?? 'legacy_input';
+                        $contentAttrs['raw_source'] = $row['raw_source'] ?? null;
+                        $contentAttrs['mapping_version'] = $row['mapping_version'] ?? null;
+                    }
+                    SaCampaignContent::query()->create($contentAttrs);
                 }
-
-                unset($manifest);
 
                 return ['ok' => true, 'data' => $this->summaryDto($campaign->fresh() ?? $campaign)];
             });
@@ -214,9 +250,11 @@ final class CampaignService
             return ['ok' => false, 'errors' => ['campaign_not_found']];
         }
         if ((string) $campaign->status !== CampaignStatus::Draft->value) {
-            // After start: only name is mutable; execution_mode/script immutable.
-            if (isset($input['execution_mode']) || isset($input['script_id']) || isset($input['contents'])) {
-                return ['ok' => false, 'errors' => ['campaign_immutable_after_start']];
+            // After start: only name is mutable; execution_mode/script/mapping immutable.
+            if (isset($input['execution_mode']) || isset($input['script_id']) || isset($input['contents']) || isset($input['shortcode_mapping'])) {
+                return ['ok' => false, 'errors' => isset($input['shortcode_mapping'])
+                    ? ['mapping_immutable_after_start']
+                    : ['campaign_immutable_after_start']];
             }
             if (isset($input['name'])) {
                 $campaign->name = trim((string) $input['name']);
@@ -246,6 +284,32 @@ final class CampaignService
         if (isset($input['resource_recheck_seconds'])) {
             $campaign->resource_recheck_seconds = $this->recheck->normalizeInterval((int) $input['resource_recheck_seconds']);
         }
+        if (isset($input['shortcode_mapping'])) {
+            if (! SocialAutomationSchema::campaignShortcodeReady()) {
+                return ['ok' => false, 'errors' => ['schema_unavailable']];
+            }
+            if (! is_array($input['shortcode_mapping'])) {
+                return ['ok' => false, 'errors' => ['shortcode_mapping_invalid']];
+            }
+            $script = $this->resolveScriptPin((string) $campaign->script_id, (string) $campaign->script_version);
+            if ($script === null) {
+                return ['ok' => false, 'errors' => ['script_not_found']];
+            }
+            $manifest = is_array($script['manifest'] ?? null) ? $script['manifest'] : [];
+            $schema = $this->variableSchema->fromManifest($manifest);
+            if (! ($schema['ok'] ?? false)) {
+                return ['ok' => false, 'errors' => $schema['errors'] ?? ['script_variables_invalid']];
+            }
+            $mapped = $this->mappingValidator->validate($input['shortcode_mapping'], $schema['variables'] ?? []);
+            if (! ($mapped['ok'] ?? false)) {
+                return ['ok' => false, 'errors' => $mapped['errors'] ?? ['shortcode_mapping_invalid']];
+            }
+            $campaign->shortcode_mapping = $mapped['mapping'] ?? null;
+            $campaign->shortcode_mapping_version = ((int) ($campaign->shortcode_mapping_version ?? 0)) + 1;
+            if ((int) $campaign->shortcode_mapping_version < 1) {
+                $campaign->shortcode_mapping_version = 1;
+            }
+        }
         $campaign->save();
 
         return ['ok' => true, 'data' => $this->summaryDto($campaign)];
@@ -267,6 +331,11 @@ final class CampaignService
             }
 
             return ['ok' => false, 'errors' => ['invalid_campaign_status']];
+        }
+
+        $gate = $this->assertActionableContents($campaign);
+        if (! ($gate['ok'] ?? false)) {
+            return ['ok' => false, 'errors' => $gate['errors'] ?? ['no_actionable_content']];
         }
 
         $campaign->status = CampaignStatus::Running->value;
@@ -442,7 +511,7 @@ final class CampaignService
                 }
 
                 $maxSort = (int) SaCampaignContent::query()->where('campaign_id', $locked->id)->max('sort_order');
-                $content = SaCampaignContent::query()->create([
+                $contentAttrs = [
                     'content_uuid' => (string) Str::uuid(),
                     'campaign_id' => $locked->id,
                     'external_ref' => $externalRef,
@@ -453,7 +522,13 @@ final class CampaignService
                     'last_error_code' => null,
                     'last_error_message' => null,
                     'last_error_meta' => null,
-                ]);
+                ];
+                if (SocialAutomationSchema::campaignShortcodeReady()) {
+                    $contentAttrs['source_format'] = $prepared['source_format'] ?? 'legacy_input';
+                    $contentAttrs['raw_source'] = $prepared['raw_source'] ?? null;
+                    $contentAttrs['mapping_version'] = $prepared['mapping_version'] ?? null;
+                }
+                $content = SaCampaignContent::query()->create($contentAttrs);
 
                 // Running campaigns: nudge scheduler only — never dispatch/create Job from CRUD.
                 if ($status === CampaignStatus::Running) {
@@ -526,6 +601,11 @@ final class CampaignService
                 $locked->external_ref = $externalRef;
                 $locked->input = $prepared['input'] ?? [];
                 $locked->assigned_account_id = $prepared['assigned_account_id'] ?? null;
+                if (SocialAutomationSchema::campaignShortcodeReady()) {
+                    $locked->source_format = $prepared['source_format'] ?? $locked->source_format ?? 'legacy_input';
+                    $locked->raw_source = $prepared['raw_source'] ?? $locked->raw_source;
+                    $locked->mapping_version = $prepared['mapping_version'] ?? $locked->mapping_version;
+                }
                 // Re-queue for normal scheduler evaluation after edit.
                 $locked->status = CampaignContentStatus::Pending->value;
                 $locked->last_error_code = null;
@@ -550,7 +630,7 @@ final class CampaignService
 
     /**
      * @param  array<string, mixed>  $input
-     * @return array{ok: bool, external_ref?: string|null, input?: array<string, mixed>, assigned_account_id?: int|null, errors?: list<string>}
+     * @return array{ok: bool, external_ref?: string|null, input?: array<string, mixed>, source_format?: string, raw_source?: string|null, mapping_version?: int|null, assigned_account_id?: int|null, errors?: list<string>}
      */
     private function prepareContentRow(SaCampaign $campaign, string $installationId, array $input, ?SaCampaignContent $existing): array
     {
@@ -559,15 +639,82 @@ final class CampaignService
             return ['ok' => false, 'errors' => ['script_not_found']];
         }
         $manifest = is_array($script['manifest'] ?? null) ? $script['manifest'] : [];
-        $variableNames = $this->scriptVariableNames($manifest);
+        $schema = $this->variableSchema->fromManifest($manifest);
+        if (! ($schema['ok'] ?? false)) {
+            return ['ok' => false, 'errors' => $schema['errors'] ?? ['script_variables_invalid']];
+        }
+        /** @var array<string, array<string, mixed>> $variables */
+        $variables = $schema['variables'] ?? [];
+        $variableNames = array_keys($variables);
 
+        $mappingDoc = is_array($campaign->shortcode_mapping ?? null) ? $campaign->shortcode_mapping : null;
+        $mappingVersion = (int) ($campaign->shortcode_mapping_version ?? 0);
+
+        $hasRaw = array_key_exists('raw_source', $input) || array_key_exists('body', $input);
         $hasInputKey = array_key_exists('input', $input);
-        $rawInput = $hasInputKey
-            ? (is_array($input['input'] ?? null) ? $input['input'] : [])
-            : (is_array($existing?->input) ? $existing->input : []);
-        $sanitized = $this->sanitizer->sanitize($rawInput, $variableNames);
-        if (! ($sanitized['ok'] ?? false)) {
-            return ['ok' => false, 'errors' => $sanitized['errors'] ?? ['content_input_invalid']];
+
+        $sourceFormat = 'legacy_input';
+        $rawSource = null;
+        $contentMappingVersion = null;
+        $typedInput = [];
+
+        if ($hasRaw) {
+            if (! SocialAutomationSchema::campaignShortcodeReady()) {
+                return ['ok' => false, 'errors' => ['schema_unavailable']];
+            }
+            if (! is_array($mappingDoc) || $mappingVersion < 1) {
+                return ['ok' => false, 'errors' => ['shortcode_mapping_required']];
+            }
+            $raw = (string) ($input['raw_source'] ?? $input['body'] ?? '');
+            $processed = $this->shortcodePipeline->process($raw, $mappingDoc, $variables);
+            if (! ($processed['ok'] ?? false)) {
+                return ['ok' => false, 'errors' => $processed['errors'] ?? ['content_input_invalid']];
+            }
+            $typedInput = $processed['input'] ?? [];
+            $rawSource = $processed['raw_source'] ?? $raw;
+            $sourceFormat = 'shortcode';
+            $contentMappingVersion = $mappingVersion;
+        } elseif ($hasInputKey || $existing === null) {
+            $rawInput = $hasInputKey
+                ? (is_array($input['input'] ?? null) ? $input['input'] : [])
+                : [];
+            // Legacy path: still enforce ALL required Script variables.
+            $validated = $this->shortcodePipeline->validateStoredInput($rawInput, $variables);
+            if (! ($validated['ok'] ?? false)) {
+                // Allow legacy create with partial input only when script has zero required vars;
+                // otherwise fail. Also keep sanitizer-only path for backward compat when variables empty.
+                if ($variables === []) {
+                    $sanitized = $this->sanitizer->sanitize($rawInput, $variableNames);
+                    if (! ($sanitized['ok'] ?? false)) {
+                        return ['ok' => false, 'errors' => $sanitized['errors'] ?? ['content_input_invalid']];
+                    }
+                    $typedInput = $sanitized['input'] ?? [];
+                } else {
+                    return ['ok' => false, 'errors' => $validated['errors'] ?? ['content_input_invalid']];
+                }
+            } else {
+                $typedInput = $validated['input'] ?? [];
+            }
+            $sourceFormat = 'legacy_input';
+            if ($existing !== null && ! $hasInputKey) {
+                $typedInput = is_array($existing->input) ? $existing->input : [];
+                $sourceFormat = (string) ($existing->source_format ?? 'legacy_input');
+                $rawSource = $existing->raw_source;
+                $contentMappingVersion = $existing->mapping_version !== null ? (int) $existing->mapping_version : null;
+            }
+        } else {
+            // Update without input/raw: keep existing payload, re-validate.
+            $typedInput = is_array($existing->input) ? $existing->input : [];
+            $sourceFormat = (string) ($existing->source_format ?? 'legacy_input');
+            $rawSource = $existing->raw_source;
+            $contentMappingVersion = $existing->mapping_version !== null ? (int) $existing->mapping_version : null;
+            if ($variables !== []) {
+                $validated = $this->shortcodePipeline->validateStoredInput($typedInput, $variables);
+                if (! ($validated['ok'] ?? false)) {
+                    return ['ok' => false, 'errors' => $validated['errors'] ?? ['content_input_invalid']];
+                }
+                $typedInput = $validated['input'] ?? [];
+            }
         }
 
         $meta = is_array($campaign->meta) ? $campaign->meta : [];
@@ -605,9 +752,163 @@ final class CampaignService
         return [
             'ok' => true,
             'external_ref' => $externalRef,
-            'input' => $sanitized['input'] ?? [],
+            'input' => $typedInput,
+            'source_format' => $sourceFormat,
+            'raw_source' => $rawSource,
+            'mapping_version' => $contentMappingVersion,
             'assigned_account_id' => $assignedAccountId,
         ];
+    }
+
+    /**
+     * Preview mock articles — no DB writes, no Jobs.
+     *
+     * @return array{ok: bool, data?: array<string, mixed>, errors?: list<string>}
+     */
+    public function mockPreview(string $campaignUuid, string $installationId, int $count): array
+    {
+        if (! SocialAutomationSchema::campaignShortcodeReady()) {
+            return ['ok' => false, 'errors' => ['schema_unavailable']];
+        }
+        $campaign = $this->findOwned($campaignUuid, $installationId);
+        if ($campaign === null) {
+            return ['ok' => false, 'errors' => ['campaign_not_found']];
+        }
+        $ctx = $this->mockContext($campaign);
+        if (! ($ctx['ok'] ?? false)) {
+            return ['ok' => false, 'errors' => $ctx['errors'] ?? ['mock_context_invalid']];
+        }
+        $generated = $this->mockGenerator->generate($count, $ctx['mapping'], $ctx['variables']);
+        if (! ($generated['ok'] ?? false)) {
+            return ['ok' => false, 'errors' => $generated['errors'] ?? ['mock_generate_failed']];
+        }
+
+        return [
+            'ok' => true,
+            'data' => [
+                'count' => count($generated['articles'] ?? []),
+                'articles' => $generated['articles'] ?? [],
+                'mapping_version' => (int) ($campaign->shortcode_mapping_version ?? 0),
+            ],
+        ];
+    }
+
+    /**
+     * Confirm-save mock articles — atomic batch + idempotency. No Jobs / no Start.
+     *
+     * @return array{ok: bool, data?: array<string, mixed>, errors?: list<string>}
+     */
+    public function mockSave(string $campaignUuid, string $installationId, int $count, string $idempotencyKey): array
+    {
+        if (! SocialAutomationSchema::campaignShortcodeReady()) {
+            return ['ok' => false, 'errors' => ['schema_unavailable']];
+        }
+        $idempotencyKey = trim($idempotencyKey);
+        if ($idempotencyKey === '' || strlen($idempotencyKey) > 128) {
+            return ['ok' => false, 'errors' => ['idempotency_key_invalid']];
+        }
+
+        $campaign = $this->findOwned($campaignUuid, $installationId);
+        if ($campaign === null) {
+            return ['ok' => false, 'errors' => ['campaign_not_found']];
+        }
+        $status = CampaignStatus::tryFrom((string) $campaign->status);
+        if ($status === null || $status->isTerminal()) {
+            return ['ok' => false, 'errors' => ['campaign_terminal']];
+        }
+
+        try {
+            return DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($campaign, $count, $idempotencyKey): array {
+                $locked = SaCampaign::query()->where('id', $campaign->id)->lockForUpdate()->first();
+                if (! $locked instanceof SaCampaign) {
+                    return ['ok' => false, 'errors' => ['campaign_not_found']];
+                }
+                $status = CampaignStatus::tryFrom((string) $locked->status);
+                if ($status === null || $status->isTerminal()) {
+                    return ['ok' => false, 'errors' => ['campaign_terminal']];
+                }
+
+                $meta = is_array($locked->meta) ? $locked->meta : [];
+                $prior = is_array($meta['mock_batch_results'][$idempotencyKey] ?? null)
+                    ? $meta['mock_batch_results'][$idempotencyKey]
+                    : null;
+                if (is_array($prior) && ($prior['ok'] ?? false) === true) {
+                    return [
+                        'ok' => true,
+                        'data' => array_merge($prior['data'] ?? [], ['idempotent' => true]),
+                    ];
+                }
+
+                $ctx = $this->mockContext($locked);
+                if (! ($ctx['ok'] ?? false)) {
+                    return ['ok' => false, 'errors' => $ctx['errors'] ?? ['mock_context_invalid']];
+                }
+
+                $generated = $this->mockGenerator->generate($count, $ctx['mapping'], $ctx['variables']);
+                if (! ($generated['ok'] ?? false)) {
+                    return ['ok' => false, 'errors' => $generated['errors'] ?? ['mock_generate_failed']];
+                }
+
+                $articles = $generated['articles'] ?? [];
+                $created = [];
+                $maxSort = (int) SaCampaignContent::query()->where('campaign_id', $locked->id)->max('sort_order');
+                $mappingVersion = (int) ($locked->shortcode_mapping_version ?? 0);
+                $pinnedAccountId = $this->pinnedAccountIdFromMeta($locked);
+
+                foreach ($articles as $i => $article) {
+                    $ref = (string) ($article['external_ref'] ?? '');
+                    if ($ref !== '') {
+                        $dup = SaCampaignContent::query()
+                            ->where('campaign_id', $locked->id)
+                            ->where('external_ref', $ref)
+                            ->exists();
+                        if ($dup) {
+                            // Atomic: throw to rollback entire batch
+                            throw new \RuntimeException('external_ref_duplicate');
+                        }
+                    }
+                    $content = SaCampaignContent::query()->create([
+                        'content_uuid' => (string) Str::uuid(),
+                        'campaign_id' => $locked->id,
+                        'external_ref' => $ref !== '' ? $ref : null,
+                        'sort_order' => $maxSort + 1 + $i,
+                        'status' => CampaignContentStatus::Pending->value,
+                        'input' => $article['input'] ?? [],
+                        'source_format' => 'shortcode',
+                        'raw_source' => $article['raw_source'] ?? null,
+                        'mapping_version' => $mappingVersion,
+                        'assigned_account_id' => $pinnedAccountId,
+                    ]);
+                    $created[] = $this->contentDto($content);
+                }
+
+                if ($status === CampaignStatus::Running) {
+                    $locked->next_recheck_at = now();
+                }
+
+                $resultData = [
+                    'count' => count($created),
+                    'contents' => $created,
+                    'idempotent' => false,
+                    'mapping_version' => $mappingVersion,
+                ];
+                $meta['mock_batch_results'][$idempotencyKey] = [
+                    'ok' => true,
+                    'data' => $resultData,
+                    'saved_at' => now()->toIso8601String(),
+                ];
+                $locked->meta = $meta;
+                $locked->save();
+
+                return ['ok' => true, 'data' => $resultData];
+            });
+        } catch (Throwable $e) {
+            if ($e->getMessage() === 'external_ref_duplicate') {
+                return ['ok' => false, 'errors' => ['external_ref_duplicate']];
+            }
+
+            return ['ok' => false, 'errors' => ['mock_save_failed']];
+        }
     }
 
     /**
@@ -640,7 +941,7 @@ final class CampaignService
     {
         $aid = $content->assigned_account_id ? (int) $content->assigned_account_id : null;
 
-        return [
+        $dto = [
             'id' => $content->content_uuid,
             'external_ref' => $content->external_ref,
             'status' => $content->status,
@@ -649,6 +950,215 @@ final class CampaignService
             'last_error_code' => $content->last_error_code,
             'last_error_message' => $content->last_error_message,
             'input' => is_array($content->input) ? $content->input : [],
+        ];
+        if (SocialAutomationSchema::campaignShortcodeReady()) {
+            $dto['source_format'] = (string) ($content->source_format ?? 'legacy_input');
+            $dto['raw_source'] = $content->raw_source;
+            $dto['mapping_version'] = $content->mapping_version !== null ? (int) $content->mapping_version : null;
+        }
+
+        return $dto;
+    }
+
+    /**
+     * @return array{ok: bool, errors?: list<string>}
+     */
+    private function assertActionableContents(SaCampaign $campaign): array
+    {
+        $contents = SaCampaignContent::query()
+            ->where('campaign_id', $campaign->id)
+            ->orderBy('sort_order')
+            ->orderBy('id')
+            ->get();
+        if ($contents->isEmpty()) {
+            return ['ok' => false, 'errors' => ['no_actionable_content']];
+        }
+
+        $script = $this->resolveScriptPin((string) $campaign->script_id, (string) $campaign->script_version);
+        if ($script === null) {
+            return ['ok' => false, 'errors' => ['script_not_found']];
+        }
+        $manifest = is_array($script['manifest'] ?? null) ? $script['manifest'] : [];
+        $schema = $this->variableSchema->fromManifest($manifest);
+        if (! ($schema['ok'] ?? false)) {
+            return ['ok' => false, 'errors' => $schema['errors'] ?? ['script_variables_invalid']];
+        }
+        /** @var array<string, array<string, mixed>> $variables */
+        $variables = $schema['variables'] ?? [];
+
+        $mappingDoc = is_array($campaign->shortcode_mapping ?? null) ? $campaign->shortcode_mapping : null;
+        $mappingVersion = (int) ($campaign->shortcode_mapping_version ?? 0);
+        if ($variables !== [] && $this->variableSchema->requiredKeys($variables) !== []) {
+            if (! is_array($mappingDoc) || $mappingVersion < 1) {
+                // Legacy-only campaigns may still start if every content is legacy_input with full required values.
+                $allLegacy = true;
+                foreach ($contents as $c) {
+                    $fmt = (string) ($c->source_format ?? 'legacy_input');
+                    if ($fmt === 'shortcode') {
+                        $allLegacy = false;
+                        break;
+                    }
+                }
+                if (! $allLegacy) {
+                    return ['ok' => false, 'errors' => ['shortcode_mapping_required']];
+                }
+            } else {
+                $mapCheck = $this->mappingValidator->validate($mappingDoc, $variables);
+                if (! ($mapCheck['ok'] ?? false)) {
+                    return ['ok' => false, 'errors' => $mapCheck['errors'] ?? ['shortcode_mapping_invalid']];
+                }
+            }
+        }
+
+        $actionable = 0;
+        foreach ($contents as $content) {
+            $st = CampaignContentStatus::tryFrom((string) $content->status);
+            if ($st === null || ! $st->isDispatchable()) {
+                continue;
+            }
+            $fmt = (string) ($content->source_format ?? 'legacy_input');
+            if ($fmt === 'shortcode') {
+                if ((int) ($content->mapping_version ?? 0) !== $mappingVersion) {
+                    return ['ok' => false, 'errors' => ['mapping_version_stale']];
+                }
+            }
+            $input = is_array($content->input) ? $content->input : [];
+            if ($input === []) {
+                return ['ok' => false, 'errors' => ['content_input_empty']];
+            }
+            if ($variables !== []) {
+                $validated = $this->shortcodePipeline->validateStoredInput($input, $variables);
+                if (! ($validated['ok'] ?? false)) {
+                    return ['ok' => false, 'errors' => $validated['errors'] ?? ['content_input_invalid']];
+                }
+            }
+            $actionable++;
+        }
+
+        if ($actionable < 1) {
+            return ['ok' => false, 'errors' => ['no_actionable_content']];
+        }
+
+        return ['ok' => true];
+    }
+
+    /**
+     * @return array{ok: bool, mapping?: array{entries: list<array{shortcode: string, variable: string}}}, variables?: array<string, array<string, mixed>>, errors?: list<string>}
+     */
+    private function mockContext(SaCampaign $campaign): array
+    {
+        $mappingDoc = is_array($campaign->shortcode_mapping ?? null) ? $campaign->shortcode_mapping : null;
+        $mappingVersion = (int) ($campaign->shortcode_mapping_version ?? 0);
+        if (! is_array($mappingDoc) || $mappingVersion < 1) {
+            return ['ok' => false, 'errors' => ['shortcode_mapping_required']];
+        }
+        $script = $this->resolveScriptPin((string) $campaign->script_id, (string) $campaign->script_version);
+        if ($script === null) {
+            return ['ok' => false, 'errors' => ['script_not_found']];
+        }
+        $manifest = is_array($script['manifest'] ?? null) ? $script['manifest'] : [];
+        $schema = $this->variableSchema->fromManifest($manifest);
+        if (! ($schema['ok'] ?? false)) {
+            return ['ok' => false, 'errors' => $schema['errors'] ?? ['script_variables_invalid']];
+        }
+        $variables = $schema['variables'] ?? [];
+        $mapped = $this->mappingValidator->validate($mappingDoc, $variables);
+        if (! ($mapped['ok'] ?? false)) {
+            return ['ok' => false, 'errors' => $mapped['errors'] ?? ['shortcode_mapping_invalid']];
+        }
+
+        return [
+            'ok' => true,
+            'mapping' => $mapped['mapping'] ?? $mappingDoc,
+            'variables' => $variables,
+        ];
+    }
+
+    private function pinnedAccountIdFromMeta(SaCampaign $campaign): ?int
+    {
+        $meta = is_array($campaign->meta) ? $campaign->meta : [];
+        $uuid = trim((string) ($meta['pinned_account_id'] ?? ''));
+        if ($uuid === '') {
+            return null;
+        }
+        $account = $this->resolvePinnedAccount($uuid, (string) $campaign->installation_id, (string) $campaign->platform);
+
+        return $account instanceof SaAccount ? (int) $account->id : null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $row
+     * @param  array<string, array<string, mixed>>  $variables
+     * @param  list<string>  $variableNames
+     * @param  array{entries: list<array{shortcode: string, variable: string}}}|null  $mappingDoc
+     * @return array{ok: bool, external_ref?: string|null, input?: array<string, mixed>, source_format?: string, raw_source?: string|null, mapping_version?: int|null, sort_order?: int, assigned_account_id?: int|null, errors?: list<string>}
+     */
+    private function buildContentFromRequestRow(
+        array $row,
+        array $variables,
+        array $variableNames,
+        ?array $mappingDoc,
+        int $mappingVersion,
+        ?SaAccount $pinnedAccount,
+        string $installationId,
+        string $platform,
+        int $sortOrder,
+    ): array {
+        $externalRef = trim((string) ($row['external_ref'] ?? ''));
+        $hasRaw = array_key_exists('raw_source', $row) || array_key_exists('body', $row);
+        $sourceFormat = 'legacy_input';
+        $rawSource = null;
+        $contentMappingVersion = null;
+
+        if ($hasRaw) {
+            if (! is_array($mappingDoc) || $mappingVersion < 1) {
+                return ['ok' => false, 'errors' => ['shortcode_mapping_required']];
+            }
+            $raw = (string) ($row['raw_source'] ?? $row['body'] ?? '');
+            $processed = $this->shortcodePipeline->process($raw, $mappingDoc, $variables);
+            if (! ($processed['ok'] ?? false)) {
+                return ['ok' => false, 'errors' => $processed['errors'] ?? ['content_input_invalid']];
+            }
+            $typedInput = $processed['input'] ?? [];
+            $rawSource = $processed['raw_source'] ?? $raw;
+            $sourceFormat = 'shortcode';
+            $contentMappingVersion = $mappingVersion;
+        } else {
+            $rawInput = is_array($row['input'] ?? null) ? $row['input'] : [];
+            if ($variables !== []) {
+                $validated = $this->shortcodePipeline->validateStoredInput($rawInput, $variables);
+                if (! ($validated['ok'] ?? false)) {
+                    return ['ok' => false, 'errors' => $validated['errors'] ?? ['content_input_invalid']];
+                }
+                $typedInput = $validated['input'] ?? [];
+            } else {
+                $sanitized = $this->sanitizer->sanitize($rawInput, $variableNames);
+                if (! ($sanitized['ok'] ?? false)) {
+                    return ['ok' => false, 'errors' => $sanitized['errors'] ?? ['content_input_invalid']];
+                }
+                $typedInput = $sanitized['input'] ?? [];
+            }
+        }
+
+        $rowAccountId = $pinnedAccount?->id;
+        $rowAccountUuid = trim((string) ($row['account_id'] ?? ''));
+        if ($rowAccountUuid !== '') {
+            $rowAccount = $this->resolvePinnedAccount($rowAccountUuid, $installationId, $platform);
+            if ($rowAccount === null) {
+                return ['ok' => false, 'errors' => ['content_account_invalid:'.$sortOrder]];
+            }
+            $rowAccountId = $rowAccount->id;
+        }
+
+        return [
+            'ok' => true,
+            'external_ref' => $externalRef !== '' ? $externalRef : null,
+            'input' => $typedInput,
+            'source_format' => $sourceFormat,
+            'raw_source' => $rawSource,
+            'mapping_version' => $contentMappingVersion,
+            'sort_order' => $sortOrder,
+            'assigned_account_id' => $rowAccountId,
         ];
     }
 
@@ -828,6 +1338,12 @@ final class CampaignService
             'failed_contents' => $counts['failed_locked'],
             'waiting_contents' => $counts['pending'] + $counts['waiting_resources'],
             'next_recheck_at' => $campaign->next_recheck_at?->toIso8601String(),
+            'shortcode_mapping' => SocialAutomationSchema::campaignShortcodeReady()
+                ? (is_array($campaign->shortcode_mapping ?? null) ? $campaign->shortcode_mapping : null)
+                : null,
+            'shortcode_mapping_version' => SocialAutomationSchema::campaignShortcodeReady()
+                ? (int) ($campaign->shortcode_mapping_version ?? 0)
+                : 0,
         ];
     }
 
@@ -871,6 +1387,12 @@ final class CampaignService
                 'cancelled' => $counts['cancelled'],
             ],
             'next_recheck_at' => $campaign->next_recheck_at?->toIso8601String(),
+            'shortcode_mapping' => SocialAutomationSchema::campaignShortcodeReady()
+                ? (is_array($campaign->shortcode_mapping ?? null) ? $campaign->shortcode_mapping : null)
+                : null,
+            'shortcode_mapping_version' => SocialAutomationSchema::campaignShortcodeReady()
+                ? (int) ($campaign->shortcode_mapping_version ?? 0)
+                : 0,
             'contents' => $contents,
         ];
     }

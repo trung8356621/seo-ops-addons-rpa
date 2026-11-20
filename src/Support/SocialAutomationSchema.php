@@ -40,4 +40,25 @@ final class SocialAutomationSchema
             && self::has('sa_campaign_account_assignments')
             && self::jobsReady();
     }
+
+    /**
+     * Campaign Shortcode V2 columns present (additive migration applied).
+     */
+    public static function campaignShortcodeReady(): bool
+    {
+        if (! self::campaignsReady()) {
+            return false;
+        }
+        try {
+            $conn = SocialAutomationServiceConfig::CONNECTION;
+
+            return (bool) @Schema::connection($conn)->hasColumn('sa_campaigns', 'shortcode_mapping')
+                && (bool) @Schema::connection($conn)->hasColumn('sa_campaigns', 'shortcode_mapping_version')
+                && (bool) @Schema::connection($conn)->hasColumn('sa_campaign_contents', 'source_format')
+                && (bool) @Schema::connection($conn)->hasColumn('sa_campaign_contents', 'raw_source')
+                && (bool) @Schema::connection($conn)->hasColumn('sa_campaign_contents', 'mapping_version');
+        } catch (Throwable) {
+            return false;
+        }
+    }
 }

@@ -33,7 +33,7 @@ final class SaCampaign extends Model
         'campaign_uuid', 'installation_id', 'name', 'platform', 'execution_mode', 'run_mode', 'status',
         'script_id', 'script_version', 'script_content_digest', 'resource_recheck_seconds',
         'next_recheck_at', 'started_at', 'paused_at', 'cancelled_at', 'completed_at',
-        'created_by_user_id', 'meta',
+        'created_by_user_id', 'meta', 'shortcode_mapping', 'shortcode_mapping_version',
     ];
 
     protected function casts(): array
@@ -42,6 +42,8 @@ final class SaCampaign extends Model
             'resource_recheck_seconds' => 'integer',
             'created_by_user_id' => 'integer',
             'meta' => 'array',
+            'shortcode_mapping' => 'array',
+            'shortcode_mapping_version' => 'integer',
             'next_recheck_at' => 'datetime',
             'started_at' => 'datetime',
             'paused_at' => 'datetime',

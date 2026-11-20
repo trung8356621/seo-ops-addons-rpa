@@ -27,6 +27,7 @@ final class SaCampaignContent extends Model
 
     protected $fillable = [
         'content_uuid', 'campaign_id', 'external_ref', 'sort_order', 'status', 'input',
+        'source_format', 'raw_source', 'mapping_version',
         'assigned_account_id', 'current_job_id', 'last_error_code', 'last_error_message',
         'last_error_meta', 'admin_action_idempotency', 'admin_action_at',
     ];
@@ -36,6 +37,7 @@ final class SaCampaignContent extends Model
         return [
             'sort_order' => 'integer',
             'input' => 'array',
+            'mapping_version' => 'integer',
             'last_error_meta' => 'array',
             'assigned_account_id' => 'integer',
             'current_job_id' => 'integer',

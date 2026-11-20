@@ -86,6 +86,60 @@ final class StaffCampaignContentController extends Controller
         return response()->json(['ok' => true, 'data' => $result['data']]);
     }
 
+    /**
+     * Preview mock Articles — no DB writes, no Jobs.
+     */
+    public function mockPreview(Request $request, string $campaignId): JsonResponse
+    {
+        $this->access->assertCanManageCampaigns();
+        if (! SocialAutomationSchema::campaignShortcodeReady()) {
+            return response()->json(['ok' => false, 'errors' => ['schema_unavailable']], 503);
+        }
+
+        $count = (int) $request->input('count', 0);
+        $result = $this->campaigns->mockPreview(
+            $campaignId,
+            $this->installation->resolveInstallationId(),
+            $count,
+        );
+        if (! ($result['ok'] ?? false)) {
+            $errors = $result['errors'] ?? ['mock_preview_failed'];
+            $code = in_array('campaign_not_found', $errors, true) ? 404 : 422;
+
+            return response()->json(['ok' => false, 'errors' => $errors], $code);
+        }
+
+        return response()->json(['ok' => true, 'data' => $result['data']]);
+    }
+
+    /**
+     * Confirm-save mock Articles — atomic batch + idempotency. No Jobs / no Start.
+     */
+    public function mockSave(Request $request, string $campaignId): JsonResponse
+    {
+        $this->access->assertCanManageCampaigns();
+        if (! SocialAutomationSchema::campaignShortcodeReady()) {
+            return response()->json(['ok' => false, 'errors' => ['schema_unavailable']], 503);
+        }
+
+        $count = (int) $request->input('count', 0);
+        $idem = trim((string) ($request->header('Idempotency-Key') ?: $request->input('idempotency_key', '')));
+        $result = $this->campaigns->mockSave(
+            $campaignId,
+            $this->installation->resolveInstallationId(),
+            $count,
+            $idem,
+        );
+        if (! ($result['ok'] ?? false)) {
+            $errors = $result['errors'] ?? ['mock_save_failed'];
+            $code = in_array('campaign_not_found', $errors, true) ? 404 : 422;
+
+            return response()->json(['ok' => false, 'errors' => $errors], $code);
+        }
+
+        return response()->json(['ok' => true, 'data' => $result['data']], 201);
+    }
+
     public function retry(Request $request, string $id): JsonResponse
     {
         $this->access->assertCanManageCampaigns();
