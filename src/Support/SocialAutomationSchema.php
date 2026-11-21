@@ -63,6 +63,25 @@ final class SocialAutomationSchema
     }
 
     /**
+     * Campaign V2 Multi-Tag Draft tables & columns present.
+     */
+    public static function campaignV2Ready(): bool
+    {
+        if (! self::campaignsReady()) {
+            return false;
+        }
+        try {
+            $conn = SocialAutomationServiceConfig::CONNECTION;
+
+            return (bool) @Schema::connection($conn)->hasColumn('sa_campaigns', 'plan_version')
+                && self::has('sa_campaign_action_tags')
+                && self::has('sa_campaign_content_assignments');
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    /**
      * Keep Alive Node registration + explicit Campaign assignment tables.
      */
     public static function keepaliveReady(): bool

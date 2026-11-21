@@ -41,16 +41,21 @@ final class CampaignService
         private readonly CampaignShortcodeMappingValidator $mappingValidator = new CampaignShortcodeMappingValidator,
         private readonly CampaignScriptVariableSchema $variableSchema = new CampaignScriptVariableSchema,
         private readonly CampaignShortcodeMockGenerator $mockGenerator = new CampaignShortcodeMockGenerator,
+        private readonly CampaignV2PlanService $v2Plan = new CampaignV2PlanService,
     ) {}
 
     /**
      * @param  array<string, mixed>  $input
-     * @return array{ok: bool, data?: array<string, mixed>, errors?: list<string>, limitations?: list<string>}
+     * @return array{ok: bool, http?: int, data?: array<string, mixed>, errors?: list<string>, field_errors?: array<string, list<string>>, message?: string, limitations?: list<string>}
      */
     public function create(array $input, string $installationId, ?int $userId): array
     {
         if (! SocialAutomationSchema::campaignsReady()) {
             return ['ok' => false, 'errors' => ['schema_unavailable']];
+        }
+
+        if ($this->v2Plan->isV2CreatePayload($input)) {
+            return $this->v2Plan->createDraft($input, $installationId, $userId);
         }
 
         $name = trim((string) ($input['name'] ?? ''));
@@ -259,6 +264,9 @@ final class CampaignService
         if ($campaign === null) {
             return ['ok' => false, 'errors' => ['campaign_not_found']];
         }
+        if ((int) ($campaign->plan_version ?? 1) >= 2) {
+            return ['ok' => false, 'errors' => ['v2_campaign_update_unsupported']];
+        }
         if ((string) $campaign->status !== CampaignStatus::Draft->value) {
             // After start: only name is mutable; execution_mode/script/mapping immutable.
             if (isset($input['execution_mode']) || isset($input['script_id']) || isset($input['contents']) || isset($input['shortcode_mapping'])) {
@@ -334,6 +342,9 @@ final class CampaignService
         if ($campaign === null) {
             return ['ok' => false, 'errors' => ['campaign_not_found']];
         }
+        if ((int) ($campaign->plan_version ?? 1) >= 2) {
+            return ['ok' => false, 'errors' => ['v2_campaign_execution_unsupported']];
+        }
         $status = CampaignStatus::tryFrom((string) $campaign->status);
         if ($status !== CampaignStatus::Draft && $status !== CampaignStatus::Paused) {
             if ($status === CampaignStatus::Running) {
@@ -387,6 +398,9 @@ final class CampaignService
         $campaign = $this->findOwned($campaignUuid, $installationId);
         if ($campaign === null) {
             return ['ok' => false, 'errors' => ['campaign_not_found']];
+        }
+        if ((int) ($campaign->plan_version ?? 1) >= 2) {
+            return ['ok' => false, 'errors' => ['v2_campaign_execution_unsupported']];
         }
         if ((string) $campaign->status !== CampaignStatus::Paused->value) {
             return ['ok' => false, 'errors' => ['invalid_campaign_status']];
@@ -1389,6 +1403,7 @@ final class CampaignService
 
         return [
             'id' => $campaign->campaign_uuid,
+            'plan_version' => (int) ($campaign->plan_version ?? 1),
             'name' => $campaign->name,
             'platform' => $campaign->platform,
             'execution_mode' => $campaign->execution_mode,
@@ -1429,8 +1444,9 @@ final class CampaignService
             ->map(fn (SaCampaignContent $c): array => $this->contentDto($c, $accountUuids))
             ->all();
 
-        return [
+        $detail = [
             'id' => $campaign->campaign_uuid,
+            'plan_version' => (int) ($campaign->plan_version ?? 1),
             'name' => $campaign->name,
             'platform' => $campaign->platform,
             'status' => $campaign->status,
@@ -1461,6 +1477,12 @@ final class CampaignService
                 : 0,
             'contents' => $contents,
         ];
+
+        if ((int) ($campaign->plan_version ?? 1) >= 2 && SocialAutomationSchema::campaignV2Ready()) {
+            return $this->v2Plan->detailDto($campaign, $detail);
+        }
+
+        return $detail;
     }
 
     /**

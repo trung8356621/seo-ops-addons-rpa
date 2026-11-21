@@ -23,7 +23,7 @@ final class CampaignShortcodePipeline
      * @param  array<string, array<string, mixed>>  $variables
      * @return array{ok: bool, input?: array<string, mixed>, raw_source?: string, errors?: list<string>}
      */
-    public function process(string $rawSource, array $mapping, array $variables): array
+    public function process(string $rawSource, array $mapping, array $variables, bool $ignoreUnsupported = false): array
     {
         $canonical = $this->richText->assertCanonical($rawSource);
         if (! ($canonical['ok'] ?? false)) {
@@ -40,7 +40,7 @@ final class CampaignShortcodePipeline
             }
         }
 
-        $parsed = $this->parser->parse($raw, $names, $allowMultiple);
+        $parsed = $this->parser->parse($raw, $names, $allowMultiple, $ignoreUnsupported);
         if (! ($parsed['ok'] ?? false)) {
             return ['ok' => false, 'errors' => $parsed['errors'] ?? ['shortcode_parse_failed']];
         }

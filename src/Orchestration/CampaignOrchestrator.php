@@ -81,6 +81,9 @@ final class CampaignOrchestrator
         if (! SocialAutomationSchema::campaignsReady()) {
             return ['ok' => false, 'dispatched' => 0, 'waiting' => 0, 'errors' => ['schema_unavailable']];
         }
+        if ((int) ($campaign->plan_version ?? 1) >= 2) {
+            return ['ok' => false, 'dispatched' => 0, 'waiting' => 0, 'errors' => ['v2_campaign_execution_unsupported']];
+        }
 
         $status = CampaignStatus::tryFrom((string) $campaign->status);
         if ($status === null || ! $status->allowsDispatch()) {
@@ -268,6 +271,9 @@ final class CampaignOrchestrator
             ->get();
 
         foreach ($campaigns as $campaign) {
+            if ((int) ($campaign->plan_version ?? 1) >= 2) {
+                continue;
+            }
             $hasWaiting = SaCampaignContent::query()
                 ->where('campaign_id', $campaign->id)
                 ->whereIn('status', [

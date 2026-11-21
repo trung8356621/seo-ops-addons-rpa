@@ -17,7 +17,7 @@ final class CampaignShortcodeParser
      * @param  array<string, bool>  $allowMultiple  shortcode => allow duplicate assignments
      * @return ParseOk|ParseErr
      */
-    public function parse(string $rawSource, array $allowedShortcodes, array $allowMultiple = []): array
+    public function parse(string $rawSource, array $allowedShortcodes, array $allowMultiple = [], bool $ignoreUnsupported = false): array
     {
         $allowed = [];
         foreach ($allowedShortcodes as $name) {
@@ -60,7 +60,8 @@ final class CampaignShortcodeParser
             $openLen = strlen($open[0]);
             $contentStart = $pos + $openLen;
 
-            if (! isset($allowed[$name])) {
+            $isAllowed = isset($allowed[$name]);
+            if (! $isAllowed && ! $ignoreUnsupported) {
                 return ['ok' => false, 'errors' => ['shortcode_unsupported:'.$name]];
             }
 
@@ -76,6 +77,11 @@ final class CampaignShortcodeParser
             if (preg_match('/\[[a-z][a-z0-9_]*\]/i', $inner) === 1
                 || preg_match('/\[\/[a-z][a-z0-9_]*\]/i', $inner) === 1) {
                 return ['ok' => false, 'errors' => ['shortcode_ambiguous:'.$name]];
+            }
+
+            if (! $isAllowed) {
+                $pos = $closePos + strlen($closeNeedle);
+                continue;
             }
 
             if (isset($seen[$name]) && ! ($allowMultiple[$name] ?? false)) {

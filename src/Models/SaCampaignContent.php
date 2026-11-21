@@ -56,4 +56,10 @@ final class SaCampaignContent extends Model
     {
         return $this->hasMany(SaJob::class, 'campaign_content_id');
     }
+
+    /** @return HasMany<SaCampaignContentAssignment, $this> */
+    public function assignments(): HasMany
+    {
+        return $this->hasMany(SaCampaignContentAssignment::class, 'campaign_content_id');
+    }
 }

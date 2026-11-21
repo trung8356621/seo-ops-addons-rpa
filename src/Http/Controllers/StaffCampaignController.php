@@ -44,6 +44,15 @@ final class StaffCampaignController extends Controller
             $request->user()?->id ? (int) $request->user()->id : null,
         );
         if (! ($result['ok'] ?? false)) {
+            if (isset($result['field_errors'])) {
+                return response()->json([
+                    'ok' => false,
+                    'message' => $result['message'] ?? 'Validation failed.',
+                    'errors' => $result['field_errors'],
+                    'error_codes' => $result['errors'] ?? ['validation_failed'],
+                ], (int) ($result['http'] ?? 422));
+            }
+
             return response()->json(['ok' => false, 'errors' => $result['errors'] ?? ['create_failed']], 422);
         }
 

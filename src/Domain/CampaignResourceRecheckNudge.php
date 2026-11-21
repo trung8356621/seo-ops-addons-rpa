@@ -62,6 +62,10 @@ final class CampaignResourceRecheckNudge
             if (! $campaign instanceof SaCampaign) {
                 continue;
             }
+            if ((int) ($campaign->plan_version ?? 1) >= 2) {
+                $skipped++;
+                continue;
+            }
 
             $hasWaiting = SaCampaignContent::query()
                 ->where('campaign_id', $campaign->id)
