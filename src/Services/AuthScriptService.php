@@ -852,9 +852,63 @@ final class AuthScriptService
             return null;
         }
 
-        $site = SaSite::query()->whereRaw('LOWER(key) = ?', [strtolower(trim($platform))])->first();
+        $site = SaSite::query()->where('key', strtolower(trim($platform)))->first();
 
         return $site instanceof SaSite ? $site : null;
+    }
+
+    /**
+     * Read-only Auth resolution preview for Staff Action Registry UI (no Account required).
+     *
+     * @return array{auth_resolution_source: 'site_specific'|'cms_global'|'missing'|null, effective_auth_script: array<string, mixed>|null}
+     */
+    public function resolveAuthPreviewForTag(SaActionTag $tag): array
+    {
+        if (! $this->tagPathIsAuthentication($tag)) {
+            return [
+                'auth_resolution_source' => null,
+                'effective_auth_script' => null,
+            ];
+        }
+
+        if (! $this->schemaReady()) {
+            return [
+                'auth_resolution_source' => ScriptResolutionService::SOURCE_MISSING,
+                'effective_auth_script' => null,
+            ];
+        }
+
+        $siteKey = strtolower(trim((string) ($tag->site_key ?: $tag->platform)));
+        $dummyAccount = new SaAccount;
+        $dummyAccount->platform = $siteKey;
+
+        $resolved = $this->assertAuthTagEligibleForAccount($dummyAccount, $tag);
+        if (! ($resolved['ok'] ?? false)) {
+            return [
+                'auth_resolution_source' => ScriptResolutionService::SOURCE_MISSING,
+                'effective_auth_script' => null,
+            ];
+        }
+
+        /** @var SaPackage $package */
+        $package = $resolved['package'];
+        /** @var SaPackageRelease $release */
+        $release = $resolved['release'];
+
+        return [
+            'auth_resolution_source' => (string) $resolved['source'],
+            'effective_auth_script' => [
+                'package_id' => (int) $package->id,
+                'package_key' => (string) $package->package_key,
+                'script_id' => (string) $package->package_key,
+                'name' => (string) $package->name,
+                'release_id' => (int) $release->id,
+                'version' => (string) $release->version,
+                'content_digest' => (string) $release->content_digest,
+                'source_action_tag_key' => (string) ($resolved['source_action_tag_key'] ?? $tag->tag_key),
+                'cms_scope' => $resolved['cms_scope'] ?? null,
+            ],
+        ];
     }
 
     private function resolveSiteForTag(SaActionTag $tag, string $fallbackPlatform): ?SaSite

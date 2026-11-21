@@ -929,6 +929,7 @@ final class ActionRegistryController
 
         $hasAuthCols = Schema::connection($conn)->hasColumn('sa_action_tags', 'auth_script_id');
         $resolution = app(ScriptResolutionService::class)->resolveForTag($t);
+        $authPreview = app(AuthScriptService::class)->resolveAuthPreviewForTag($t);
 
         return [
             'id' => (int) $t->id,
@@ -947,6 +948,8 @@ final class ActionRegistryController
             'is_enabled' => $this->tagEnabledColumnReady() ? (bool) ($t->is_enabled ?? true) : true,
             'auth_script_id' => $hasAuthCols && $t->auth_script_id !== null ? (int) $t->auth_script_id : null,
             'auth_release_id' => $hasAuthCols && $t->auth_release_id !== null ? (int) $t->auth_release_id : null,
+            'auth_resolution_source' => $authPreview['auth_resolution_source'],
+            'effective_auth_script' => $authPreview['effective_auth_script'],
             'scripts_count' => $linksCount,
             'ready' => $linksCount > 0,
             'effective_ready' => (bool) ($resolution['resolved'] ?? false),

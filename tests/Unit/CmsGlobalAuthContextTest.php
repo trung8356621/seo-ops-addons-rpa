@@ -14,6 +14,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Facade;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaClientApiController;
 use Omnichannel\Addons\SocialAutomation\Models\SaAccount;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTag;
@@ -218,6 +219,14 @@ final class CmsGlobalAuthContextTest extends TestCase
             $table->text('description')->nullable();
             $table->timestamps();
             $table->unique(['site_id', 'key']);
+        });
+
+        $schema->create('sa_actions', function (Blueprint $table): void {
+            $table->id();
+            $table->string('key', 64)->unique();
+            $table->string('name', 128);
+            $table->text('description')->nullable();
+            $table->timestamps();
         });
 
         $schema->create('sa_action_tags', function (Blueprint $table): void {
@@ -488,6 +497,19 @@ final class CmsGlobalAuthContextTest extends TestCase
         $encoded = json_encode([$baloGlobal, $pullResp]);
         self::assertStringNotContainsString('SECRET_SHOULD_NEVER_LEAK', (string) $encoded);
         self::assertStringNotContainsString('encrypted_password', (string) $encoded);
+
+        // 2b. Verify ActionRegistryController::data() exposes effective_auth_script & auth_resolution_source
+        $arResp = (new ActionRegistryController)->data(Request::create('/social-automation/api/action-registry/data', 'GET'))->getData(true);
+        $arTags = [];
+        foreach ($arResp['tags'] as $t) {
+            $arTags[$t['tag_key']] = $t;
+        }
+        self::assertSame('site_specific', $arTags['mayhopphat.login']['auth_resolution_source']);
+        self::assertSame('mayhopphat.login', $arTags['mayhopphat.login']['effective_auth_script']['package_key']);
+        self::assertSame('cms_global', $arTags['congtybalo.login']['auth_resolution_source']);
+        self::assertSame('mayhopphat.login', $arTags['congtybalo.login']['effective_auth_script']['package_key']);
+        self::assertNull($arTags['mayhopphat.create_post']['auth_resolution_source']);
+        self::assertNull($arTags['mayhopphat.create_post']['effective_auth_script']);
 
         // 3. Different CMS Type (ghostblog) does NOT match wordpress:login
         $ghostCtx = $ctrl->authContext($this->makeClientRequest($seed['clientKey'], ['account_id' => $ghostAcc->account_uuid]))->getData(true);
