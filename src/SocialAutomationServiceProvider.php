@@ -322,6 +322,9 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     Route::put('/sites/{id}', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'updateSite'])
                         ->whereNumber('id')
                         ->name('social-automation.action-registry.sites.update');
+                    Route::delete('/sites/{id}', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'destroySite'])
+                        ->whereNumber('id')
+                        ->name('social-automation.action-registry.sites.destroy');
                     Route::post('/paths', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'storePath'])
                         ->name('social-automation.action-registry.paths.store');
                     Route::put('/paths/{id}', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'updatePath'])
@@ -347,6 +350,9 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     Route::post('/tags/{id}/requests', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'createRequest'])
                         ->whereNumber('id')
                         ->name('social-automation.action-registry.tags.requests.create');
+                    Route::patch('/tags/{id}', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'patchTag'])
+                        ->whereNumber('id')
+                        ->name('social-automation.action-registry.tags.patch');
                     Route::delete('/tags/{id}', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'destroyTag'])
                         ->whereNumber('id')
                         ->name('social-automation.action-registry.tags.destroy');

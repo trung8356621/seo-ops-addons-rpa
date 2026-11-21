@@ -287,6 +287,7 @@ final class RpaAdminScriptSyncController extends Controller
                 'action' => ($t->action !== null && $t->action !== '') ? $t->action : $actionKey,
                 'name' => $t->name,
                 'description' => $t->description,
+                'is_enabled' => (bool) ($t->is_enabled ?? true),
                 'linked_scripts_count' => $linkedCount,
                 'base_url' => $t->site?->base_url,
                 'url_pattern' => $t->path?->url_pattern,

@@ -16,6 +16,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaPath;
 use Omnichannel\Addons\SocialAutomation\Models\SaScriptRequest;
 use Omnichannel\Addons\SocialAutomation\Models\SaSite;
 use Omnichannel\Addons\SocialAutomation\Services\AuthScriptService;
+use Omnichannel\Addons\SocialAutomation\Services\CmsPathTemplateService;
 use Omnichannel\Addons\SocialAutomation\Support\PathPatternResolver;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationAccess;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
@@ -29,18 +30,9 @@ final class ActionRegistryController
             return response()->json(['ok' => false, 'error' => 'schema_unavailable'], 503);
         }
 
-        $sites = SaSite::query()->with('paths')->orderBy('name')->get()->map(function (SaSite $s) {
-            return [
-                'id' => (int) $s->id,
-                'key' => $s->key,
-                'name' => $s->name,
-                'base_url' => $s->base_url ?? '',
-                'base_url_mode' => $s->base_url_mode ?? SaSite::MODE_FIXED,
-                'test_base_url' => $s->test_base_url,
-                'description' => $s->description,
-                'paths_count' => $s->paths->count(),
-            ];
-        })->all();
+        $sites = SaSite::query()->with('paths')->orderBy('name')->get()->map(
+            fn (SaSite $s) => $this->serializeSite($s)
+        )->all();
 
         $paths = SaPath::query()->orderBy('site_id')->orderBy('name')->get()->map(
             fn (SaPath $p) => $this->serializePath($p)
@@ -59,49 +51,9 @@ final class ActionRegistryController
             ])->all();
 
         $tagQuery = SaActionTag::query()->with(['site', 'path', 'actionDefinition'])->orderByDesc('id');
-        $tags = $tagQuery->get()->map(function (SaActionTag $t) use ($conn) {
-            $hasScriptLinks = Schema::connection($conn)->hasTable('sa_action_tag_scripts');
-            $linksCount = $hasScriptLinks
-                ? SaActionTagScript::query()->where('action_tag_id', $t->id)->count()
-                : 0;
-
-            $hasRequests = Schema::connection($conn)->hasTable('sa_script_requests');
-            $latestRequest = $hasRequests
-                ? SaScriptRequest::query()->where('action_tag_id', $t->id)->orderByDesc('id')->first()
-                : null;
-
-            $siteKey = $t->site_key ?: $t->platform;
-            $pathKey = $t->path_key ?: $t->target;
-            $actionKey = $t->resolvedActionKey();
-
-            $siteName = $t->site?->name ?? ucfirst((string) $siteKey);
-            $pathName = $t->path?->name ?? ucfirst((string) $pathKey);
-            $actionName = $t->actionDefinition?->name ?? ($actionKey !== null ? ucfirst($actionKey) : null);
-
-            $hasAuthCols = Schema::connection($conn)->hasColumn('sa_action_tags', 'auth_script_id');
-
-            return [
-                'id' => (int) $t->id,
-                'tag_key' => $t->tag_key,
-                'site_id' => $t->site_id,
-                'site_key' => $siteKey,
-                'site_name' => $siteName,
-                'path_id' => $t->path_id,
-                'path_key' => $pathKey,
-                'path_name' => $pathName,
-                'action_id' => $t->action_id,
-                'action_key' => $actionKey,
-                'action_name' => $actionName,
-                'name' => $t->name,
-                'description' => $t->description,
-                'auth_script_id' => $hasAuthCols && $t->auth_script_id !== null ? (int) $t->auth_script_id : null,
-                'auth_release_id' => $hasAuthCols && $t->auth_release_id !== null ? (int) $t->auth_release_id : null,
-                'scripts_count' => $linksCount,
-                'ready' => $linksCount > 0,
-                'latest_request_status' => $latestRequest?->status,
-                'latest_request_id' => $latestRequest?->request_id,
-            ];
-        })->all();
+        $tags = $tagQuery->get()->map(
+            fn (SaActionTag $t) => $this->serializeTag($t)
+        )->all();
 
         $requests = Schema::connection($conn)->hasTable('sa_script_requests')
             ? SaScriptRequest::query()->orderByDesc('id')->limit(50)->get()->map(fn (SaScriptRequest $r) => [
@@ -143,6 +95,11 @@ final class ActionRegistryController
         // Legacy column retained for compatibility; not required for unified Base URL contract.
         $testBaseUrl = SaSite::normalizeBaseUrl((string) $request->input('test_base_url', ''));
         $description = trim((string) $request->input('description', ''));
+        $cmsType = SaSite::normalizeCmsType($request->input('cms_type'));
+
+        if (! SaSite::isSupportedCmsType($cmsType)) {
+            return response()->json(['ok' => false, 'error' => 'invalid_cms_type'], 422);
+        }
 
         if ($name === '') {
             return response()->json(['ok' => false, 'error' => 'Tên Site không được để trống.'], 422);
@@ -162,16 +119,43 @@ final class ActionRegistryController
             return response()->json(['ok' => false, 'error' => "Site key [{$key}] đã tồn tại."], 422);
         }
 
-        $site = SaSite::query()->create([
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+        $cmsService = app(CmsPathTemplateService::class);
+        $pathOverrides = $cmsService->normalizePathOverrides($request->input('path_overrides'));
+        $userId = Auth::id();
+        $sitePayload = [
             'key' => $key,
             'name' => $name,
             'base_url_mode' => $mode,
             'base_url' => $baseUrl,
             'test_base_url' => $testBaseUrl !== '' ? $testBaseUrl : null,
             'description' => $description !== '' ? $description : null,
-        ]);
+        ];
+        if ($this->siteCmsTypeColumnReady()) {
+            $sitePayload['cms_type'] = $cmsType;
+        }
 
-        return response()->json(['ok' => true, 'site' => $site]);
+        $result = DB::connection($conn)->transaction(function () use ($sitePayload, $cmsService, $pathOverrides, $userId): array {
+            $site = SaSite::query()->create($sitePayload);
+            $synced = $cmsService->syncSiteCmsPathsAndTags(
+                $site,
+                $pathOverrides,
+                is_numeric($userId) ? (int) $userId : null,
+            );
+
+            return [
+                'site' => $site->fresh('paths') ?? $site,
+                'paths' => $synced['paths'],
+                'tags' => $synced['tags'],
+            ];
+        });
+
+        return response()->json([
+            'ok' => true,
+            'site' => $this->serializeSite($result['site']),
+            'paths' => array_map(fn (SaPath $p) => $this->serializePath($p), $result['paths']),
+            'tags' => array_map(fn (SaActionTag $t) => $this->serializeTag($t), $result['tags']),
+        ]);
     }
 
     public function updateSite(Request $request, int $id): JsonResponse
@@ -196,6 +180,16 @@ final class ActionRegistryController
             $site->base_url_mode = $mode === SaSite::MODE_DYNAMIC ? SaSite::MODE_DYNAMIC : SaSite::MODE_FIXED;
         }
 
+        if ($request->exists('cms_type')) {
+            $cmsType = SaSite::normalizeCmsType($request->input('cms_type'));
+            if (! SaSite::isSupportedCmsType($cmsType)) {
+                return response()->json(['ok' => false, 'error' => 'invalid_cms_type'], 422);
+            }
+            if ($this->siteCmsTypeColumnReady()) {
+                $site->cms_type = $cmsType;
+            }
+        }
+
         if ($request->has('base_url')) {
             $site->base_url = $rawBaseUrl !== '' ? SaSite::normalizeBaseUrl($rawBaseUrl) : null;
         }
@@ -214,9 +208,59 @@ final class ActionRegistryController
             $site->description = $description !== '' ? $description : null;
         }
 
-        $site->save();
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+        $cmsService = app(CmsPathTemplateService::class);
+        $pathOverrides = $cmsService->normalizePathOverrides($request->input('path_overrides'));
+        $userId = Auth::id();
 
-        return response()->json(['ok' => true, 'site' => $site]);
+        $result = DB::connection($conn)->transaction(function () use ($site, $cmsService, $pathOverrides, $userId): array {
+            $site->save();
+            $synced = $cmsService->syncSiteCmsPathsAndTags(
+                $site,
+                $pathOverrides,
+                is_numeric($userId) ? (int) $userId : null,
+            );
+
+            return [
+                'site' => $site->fresh('paths') ?? $site,
+                'paths' => $synced['paths'],
+                'tags' => $synced['tags'],
+            ];
+        });
+
+        return response()->json([
+            'ok' => true,
+            'site' => $this->serializeSite($result['site']),
+            'paths' => array_map(fn (SaPath $p) => $this->serializePath($p), $result['paths']),
+            'tags' => array_map(fn (SaActionTag $t) => $this->serializeTag($t), $result['tags']),
+        ]);
+    }
+
+    public function destroySite(int $id): JsonResponse
+    {
+        app(SocialAutomationAccess::class)->assertCanMutate();
+
+        $site = SaSite::query()->find($id);
+        if (! $site) {
+            return response()->json(['ok' => false, 'error' => 'site_not_found'], 404);
+        }
+
+        $dependencies = $this->collectSiteDependencies($site);
+        if (array_sum($dependencies) > 0) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'site_has_dependencies',
+                'message' => 'Không thể xóa Site vì còn Paths, Action Tags, Scripts hoặc Campaigns phụ thuộc.',
+                'dependencies' => $dependencies,
+            ], 422);
+        }
+
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+        DB::connection($conn)->transaction(function () use ($site): void {
+            $site->delete();
+        });
+
+        return response()->json(['ok' => true]);
     }
 
     public function storePath(Request $request): JsonResponse
@@ -261,6 +305,11 @@ final class ActionRegistryController
             ], 503);
         }
 
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+        $userId = Auth::id();
+        $cmsService = app(CmsPathTemplateService::class);
+        $hasAuthCol = $this->pathAuthenticationColumnReady();
+
         $payload = [
             'site_id' => $site->id,
             'site_key' => $site->key,
@@ -270,16 +319,42 @@ final class ActionRegistryController
             'path_inputs' => $detectedInputs,
             'description' => $description !== '' ? $description : null,
         ];
-        if ($this->pathAuthenticationColumnReady()) {
+        if ($hasAuthCol) {
             $payload['is_authentication'] = $wantsAuth;
         }
 
-        $path = SaPath::query()->create($payload);
-        if ($this->pathAuthenticationColumnReady()) {
-            app(AuthScriptService::class)->syncPackageAuthFlagsForPath($path);
+        $result = DB::connection($conn)->transaction(function () use (
+            $payload,
+            $hasAuthCol,
+            $site,
+            $cmsService,
+            $userId,
+        ): array {
+            $path = SaPath::query()->create($payload);
+            if ($hasAuthCol) {
+                app(AuthScriptService::class)->syncPackageAuthFlagsForPath($path);
+            }
+            $ensured = $cmsService->ensureTagForPath(
+                $site,
+                $path,
+                is_numeric($userId) ? (int) $userId : null,
+            );
+
+            return [
+                'path' => $path,
+                'tag' => $ensured['tag'],
+            ];
+        });
+
+        $response = [
+            'ok' => true,
+            'path' => $this->serializePath($result['path']),
+        ];
+        if ($result['tag'] instanceof SaActionTag) {
+            $response['tag'] = $this->serializeTag($result['tag']);
         }
 
-        return response()->json(['ok' => true, 'path' => $this->serializePath($path)]);
+        return response()->json($response);
     }
 
     public function updatePath(Request $request, int $id): JsonResponse
@@ -556,6 +631,44 @@ final class ActionRegistryController
         return response()->json(['ok' => true, 'revoked' => $revoked]);
     }
 
+    public function patchTag(Request $request, int $id): JsonResponse
+    {
+        app(SocialAutomationAccess::class)->assertCanMutate();
+
+        $tag = SaActionTag::query()->with(['site', 'path', 'actionDefinition'])->find($id);
+        if (! $tag) {
+            return response()->json(['ok' => false, 'error' => 'tag_not_found'], 404);
+        }
+
+        if (! $this->tagEnabledColumnReady()) {
+            return response()->json([
+                'ok' => false,
+                'error' => 'schema_unavailable',
+                'message' => 'Migration/schema is_enabled chưa sẵn sàng (sa_action_tags.is_enabled).',
+            ], 503);
+        }
+
+        $raw = $request->exists('is_enabled')
+            ? $request->input('is_enabled')
+            : ($request->exists('enabled') ? $request->input('enabled') : null);
+
+        $enabled = $raw !== null
+            ? filter_var($raw, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE)
+            : null;
+
+        if ($enabled === null) {
+            return response()->json(['ok' => false, 'error' => 'is_enabled_required'], 422);
+        }
+
+        $tag->is_enabled = $enabled;
+        $tag->save();
+
+        return response()->json([
+            'ok' => true,
+            'tag' => $this->serializeTag($tag->fresh(['site', 'path', 'actionDefinition']) ?? $tag),
+        ]);
+    }
+
     public function destroyTag(int $id): JsonResponse
     {
         app(SocialAutomationAccess::class)->assertCanMutate();
@@ -695,6 +808,206 @@ final class ActionRegistryController
         } catch (\Throwable) {
             return false;
         }
+    }
+
+    private function siteCmsTypeColumnReady(): bool
+    {
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+
+        try {
+            return Schema::connection($conn)->hasTable('sa_sites')
+                && Schema::connection($conn)->hasColumn('sa_sites', 'cms_type');
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    private function tagEnabledColumnReady(): bool
+    {
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+
+        try {
+            return Schema::connection($conn)->hasTable('sa_action_tags')
+                && Schema::connection($conn)->hasColumn('sa_action_tags', 'is_enabled');
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    /**
+     * @return array{
+     *   id: int,
+     *   key: string,
+     *   name: string,
+     *   base_url: string,
+     *   base_url_mode: string,
+     *   cms_type: string|null,
+     *   test_base_url: string|null,
+     *   description: string|null,
+     *   paths_count: int
+     * }
+     */
+    private function serializeSite(SaSite $s): array
+    {
+        $pathsCount = $s->relationLoaded('paths')
+            ? $s->paths->count()
+            : $s->paths()->count();
+
+        return [
+            'id' => (int) $s->id,
+            'key' => $s->key,
+            'name' => $s->name,
+            'base_url' => $s->base_url ?? '',
+            'base_url_mode' => $s->base_url_mode ?? SaSite::MODE_FIXED,
+            'cms_type' => $s->cms_type ?? null,
+            'test_base_url' => $s->test_base_url,
+            'description' => $s->description,
+            'paths_count' => $pathsCount,
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function serializeTag(SaActionTag $t): array
+    {
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+        $hasScriptLinks = Schema::connection($conn)->hasTable('sa_action_tag_scripts');
+        $linksCount = $hasScriptLinks
+            ? SaActionTagScript::query()->where('action_tag_id', $t->id)->count()
+            : 0;
+
+        $hasRequests = Schema::connection($conn)->hasTable('sa_script_requests');
+        $latestRequest = $hasRequests
+            ? SaScriptRequest::query()->where('action_tag_id', $t->id)->orderByDesc('id')->first()
+            : null;
+
+        $siteKey = $t->site_key ?: $t->platform;
+        $pathKey = $t->path_key ?: $t->target;
+        $actionKey = $t->resolvedActionKey();
+
+        $siteName = $t->site?->name ?? ucfirst((string) $siteKey);
+        $pathName = $t->path?->name ?? ucfirst((string) $pathKey);
+        $actionName = $t->actionDefinition?->name ?? ($actionKey !== null ? ucfirst($actionKey) : null);
+
+        $hasAuthCols = Schema::connection($conn)->hasColumn('sa_action_tags', 'auth_script_id');
+
+        return [
+            'id' => (int) $t->id,
+            'tag_key' => $t->tag_key,
+            'site_id' => $t->site_id,
+            'site_key' => $siteKey,
+            'site_name' => $siteName,
+            'path_id' => $t->path_id,
+            'path_key' => $pathKey,
+            'path_name' => $pathName,
+            'action_id' => $t->action_id,
+            'action_key' => $actionKey,
+            'action_name' => $actionName,
+            'name' => $t->name,
+            'description' => $t->description,
+            'is_enabled' => $this->tagEnabledColumnReady() ? (bool) ($t->is_enabled ?? true) : true,
+            'auth_script_id' => $hasAuthCols && $t->auth_script_id !== null ? (int) $t->auth_script_id : null,
+            'auth_release_id' => $hasAuthCols && $t->auth_release_id !== null ? (int) $t->auth_release_id : null,
+            'scripts_count' => $linksCount,
+            'ready' => $linksCount > 0,
+            'latest_request_status' => $latestRequest?->status,
+            'latest_request_id' => $latestRequest?->request_id,
+        ];
+    }
+
+    /**
+     * @return array{paths: int, tags: int, scripts: int, script_requests: int, campaigns: int}
+     */
+    private function collectSiteDependencies(SaSite $site): array
+    {
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+        $siteKeyLower = strtolower((string) $site->key);
+
+        $pathsCount = 0;
+        if (Schema::connection($conn)->hasTable('sa_paths')) {
+            $pathsCount = SaPath::query()
+                ->where(function ($q) use ($site): void {
+                    $q->where('site_id', $site->id)
+                        ->orWhere('site_key', $site->key);
+                })
+                ->count();
+        }
+
+        $tagIds = [];
+        $tagKeys = [];
+        $tagsCount = 0;
+        if (Schema::connection($conn)->hasTable('sa_action_tags')) {
+            $tags = SaActionTag::query()
+                ->where(function ($q) use ($site): void {
+                    if (Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasColumn('sa_action_tags', 'site_id')) {
+                        $q->where('site_id', $site->id)
+                            ->orWhere('site_key', $site->key)
+                            ->orWhere('platform', $site->key);
+                    } else {
+                        $q->where('platform', $site->key);
+                    }
+                })
+                ->get(['id', 'tag_key']);
+            $tagsCount = $tags->count();
+            $tagIds = $tags->pluck('id')->map(fn ($v) => (int) $v)->all();
+            $tagKeys = $tags->pluck('tag_key')->map(fn ($v) => (string) $v)->all();
+        }
+
+        $scriptsCount = 0;
+        if (Schema::connection($conn)->hasTable('sa_action_tag_scripts')) {
+            $scriptsCount = SaActionTagScript::query()
+                ->where(function ($q) use ($tagIds, $tagKeys, $site): void {
+                    $q->where('action_tag_key', 'like', $site->key.'.%');
+                    if ($tagIds !== []) {
+                        $q->orWhereIn('action_tag_id', $tagIds);
+                    }
+                    if ($tagKeys !== []) {
+                        $q->orWhereIn('action_tag_key', $tagKeys);
+                    }
+                })
+                ->count();
+        }
+
+        $requestsCount = 0;
+        if (Schema::connection($conn)->hasTable('sa_script_requests')) {
+            $requestsCount = SaScriptRequest::query()
+                ->where(function ($q) use ($tagIds, $tagKeys, $site): void {
+                    $q->where('action_tag_key', 'like', $site->key.'.%');
+                    if (Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasColumn('sa_script_requests', 'site_key')) {
+                        $q->orWhere('site_key', $site->key);
+                    }
+                    if ($tagIds !== []) {
+                        $q->orWhereIn('action_tag_id', $tagIds);
+                    }
+                    if ($tagKeys !== []) {
+                        $q->orWhereIn('action_tag_key', $tagKeys);
+                    }
+                })
+                ->count();
+        }
+
+        $campaignsCount = 0;
+        if (Schema::connection($conn)->hasTable('sa_campaigns')) {
+            $campaignsCount = DB::connection($conn)
+                ->table('sa_campaigns')
+                ->where(function ($q) use ($siteKeyLower, $tagKeys, $site): void {
+                    $q->whereRaw('LOWER(platform) = ?', [$siteKeyLower])
+                        ->orWhere('script_id', 'like', $site->key.'.%');
+                    if ($tagKeys !== []) {
+                        $q->orWhereIn('script_id', $tagKeys);
+                    }
+                })
+                ->count();
+        }
+
+        return [
+            'paths' => $pathsCount,
+            'tags' => $tagsCount,
+            'scripts' => $scriptsCount,
+            'script_requests' => $requestsCount,
+            'campaigns' => $campaignsCount,
+        ];
     }
 
     public function createRequest(Request $request, int $tagId): JsonResponse

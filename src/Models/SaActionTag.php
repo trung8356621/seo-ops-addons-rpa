@@ -21,6 +21,15 @@ class SaActionTag extends Model
 
     protected $guarded = [];
 
+    protected $casts = [
+        'is_enabled' => 'boolean',
+    ];
+
+    public function isEnabled(): bool
+    {
+        return (bool) ($this->is_enabled ?? true);
+    }
+
     protected static function booted(): void
     {
         static::saving(function (SaActionTag $tag): void {

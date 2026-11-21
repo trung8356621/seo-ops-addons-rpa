@@ -23,6 +23,13 @@ class SaSite extends Model
     public const MODE_FIXED = 'fixed';
     public const MODE_DYNAMIC = 'dynamic';
 
+    public const CMS_WORDPRESS = 'wordpress';
+
+    /** @var list<string> */
+    public const SUPPORTED_CMS_TYPES = [
+        self::CMS_WORDPRESS,
+    ];
+
     protected $connection = SocialAutomationServiceConfig::CONNECTION;
 
     protected $table = 'sa_sites';
@@ -82,5 +89,31 @@ class SaSite extends Model
         }
 
         return rtrim($trimmed, '/');
+    }
+
+    /**
+     * Normalize cms_type input. Empty/none/custom values normalize to null.
+     */
+    public static function normalizeCmsType(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $normalized = strtolower(trim((string) $value));
+        if ($normalized === '' || $normalized === 'none' || $normalized === 'custom') {
+            return null;
+        }
+
+        if ($normalized === 'wp') {
+            return self::CMS_WORDPRESS;
+        }
+
+        return $normalized;
+    }
+
+    public static function isSupportedCmsType(?string $value): bool
+    {
+        return $value === null || in_array($value, self::SUPPORTED_CMS_TYPES, true);
     }
 }
