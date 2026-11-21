@@ -14,12 +14,14 @@ use Omnichannel\Addons\SocialAutomation\Models\SaActionTagScript;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackage;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
 use Omnichannel\Addons\SocialAutomation\Models\SaPath;
+use Omnichannel\Addons\SocialAutomation\Models\SaSite;
 use Omnichannel\Addons\SocialAutomation\Support\ScriptReleaseAssetReader;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
 
 /**
  * Staff + Client Auth Script pin / resolve / pull (CP8).
  * Pins live on sa_action_tags.auth_* — never sa_action_tag_scripts.
+ * Supports CMS Global Auth Script fallback when Site-specific Auth pin is absent.
  */
 final class AuthScriptService
 {
@@ -27,6 +29,7 @@ final class AuthScriptService
         private readonly AuthScriptPinPolicy $pinPolicy = new AuthScriptPinPolicy,
         private readonly AccountTagEntitlementPolicy $entitlement = new AccountTagEntitlementPolicy,
         private readonly ScriptReleaseAssetReader $assets = new ScriptReleaseAssetReader,
+        private readonly ?ScriptResolutionService $scriptResolution = null,
     ) {}
 
     public function schemaReady(): bool
@@ -331,51 +334,141 @@ final class AuthScriptService
      */
     public function findEligibleAuthContextForAccount(SaAccount $account): array
     {
+        $accountUuid = (string) ($account->account_uuid ?? '');
         if (! $this->schemaReady()) {
-            return ['match' => 'none', 'count' => 0];
+            return [
+                'match' => 'none',
+                'count' => 0,
+                'source' => ScriptResolutionService::SOURCE_MISSING,
+                'reason' => 'auth_schema_unavailable',
+                'account_id' => $accountUuid,
+                'site_id' => null,
+                'site_key' => null,
+                'auth_path' => null,
+                'cms_scope' => null,
+                'script' => null,
+                'execution_context' => null,
+            ];
         }
 
         $accountPlatform = strtolower(trim((string) $account->platform));
         if ($accountPlatform === '') {
-            return ['match' => 'none', 'count' => 0];
+            return [
+                'match' => 'none',
+                'count' => 0,
+                'source' => ScriptResolutionService::SOURCE_MISSING,
+                'reason' => 'account_platform_missing',
+                'account_id' => $accountUuid,
+                'site_id' => null,
+                'site_key' => null,
+                'auth_path' => null,
+                'cms_scope' => null,
+                'script' => null,
+                'execution_context' => null,
+            ];
         }
 
+        $site = $this->resolveSiteForPlatform($accountPlatform);
         $eligible = [];
+        $failureReasons = [];
+        $firstAuthPath = null;
+
         foreach ($this->candidateAuthTagsForSite($accountPlatform) as $tag) {
-            $check = $this->assertAuthTagEligibleForAccount($account, $tag);
-            if (! ($check['ok'] ?? false)) {
+            $resolved = $this->assertAuthTagEligibleForAccount($account, $tag);
+            if (! ($resolved['ok'] ?? false)) {
+                $err = (string) (($resolved['errors'][0] ?? null) ?: 'script_not_found');
+                if ($err !== 'auth_path_required') {
+                    $failureReasons[] = $err;
+                    if ($firstAuthPath === null && ($resolved['path'] ?? null) instanceof SaPath) {
+                        $firstAuthPath = $resolved['path'];
+                    }
+                }
                 continue;
             }
 
-            $eligible[] = [
-                'action_tag_id' => (int) $tag->id,
-                'action_tag_key' => (string) $tag->tag_key,
-            ];
+            $eligible[] = $resolved;
         }
 
         $count = count($eligible);
         if ($count === 0) {
-            return ['match' => 'none', 'count' => 0];
+            $reason = $failureReasons[0] ?? 'no_auth_path_for_site';
+
+            return [
+                'match' => 'none',
+                'count' => 0,
+                'source' => ScriptResolutionService::SOURCE_MISSING,
+                'reason' => $reason,
+                'account_id' => $accountUuid,
+                'site_id' => $site instanceof SaSite ? (int) $site->id : null,
+                'site_key' => $site instanceof SaSite ? (string) $site->key : $accountPlatform,
+                'auth_path' => $firstAuthPath instanceof SaPath ? $this->pathSummary($firstAuthPath) : null,
+                'cms_scope' => null,
+                'script' => null,
+                'execution_context' => null,
+            ];
         }
+
         if ($count === 1) {
+            $item = $eligible[0];
+            /** @var SaActionTag $tag */
+            $tag = $item['tag'];
+            /** @var SaPackage $package */
+            $package = $item['package'];
+            /** @var SaPackageRelease $release */
+            $release = $item['release'];
+            /** @var SaPath|null $path */
+            $path = $item['path'] ?? null;
+            /** @var SaSite|null $resolvedSite */
+            $resolvedSite = $item['site'] ?? $site;
+
             return [
                 'match' => 'unique',
                 'count' => 1,
-                'action_tag_id' => $eligible[0]['action_tag_id'],
-                'action_tag_key' => $eligible[0]['action_tag_key'],
+                'action_tag_id' => (int) $tag->id,
+                'action_tag_key' => (string) $tag->tag_key,
+                'source' => (string) $item['source'],
+                'reason' => null,
+                'account_id' => $accountUuid,
+                'site_id' => $resolvedSite instanceof SaSite ? (int) $resolvedSite->id : null,
+                'site_key' => $resolvedSite instanceof SaSite ? (string) $resolvedSite->key : $accountPlatform,
+                'auth_path' => $path instanceof SaPath ? $this->pathSummary($path) : null,
+                'cms_scope' => $item['cms_scope'] ?? null,
+                'script' => [
+                    'package_key' => (string) $package->package_key,
+                    'package_id' => (int) $package->id,
+                    'script_id' => (string) $package->package_key,
+                    'release_id' => (int) $release->id,
+                    'version' => (string) $release->version,
+                    'content_digest' => $release->content_digest !== null ? (string) $release->content_digest : null,
+                    'source_action_tag_key' => $item['source_action_tag_key'] ?? (string) $tag->tag_key,
+                ],
+                'execution_context' => $this->buildExecutionContext($resolvedSite, $path, $account),
             ];
         }
 
         return [
             'match' => 'ambiguous',
             'count' => $count,
-            'candidates' => $eligible,
+            'source' => ScriptResolutionService::SOURCE_MISSING,
+            'reason' => 'ambiguous_auth_tags',
+            'account_id' => $accountUuid,
+            'site_id' => $site instanceof SaSite ? (int) $site->id : null,
+            'site_key' => $site instanceof SaSite ? (string) $site->key : $accountPlatform,
+            'auth_path' => null,
+            'cms_scope' => null,
+            'script' => null,
+            'execution_context' => null,
+            'candidates' => array_map(static fn (array $item): array => [
+                'action_tag_id' => (int) $item['tag']->id,
+                'action_tag_key' => (string) $item['tag']->tag_key,
+                'source' => (string) $item['source'],
+            ], $eligible),
         ];
     }
 
     /**
-     * Resolve explicit Tag → pinned Auth release for an Account on the same Site.
-     * Eligibility aligns with findEligibleAuthContextForAccount (Site + Auth Path + pin).
+     * Resolve explicit Tag → pinned or CMS Global Auth release for an Account on the same Site.
+     * Eligibility aligns with findEligibleAuthContextForAccount (Site + Auth Path + Site-specific pin or CMS Global).
      * Does not require sa_account_action_tags for Authentication Scripts.
      *
      * @return array{ok: true, release: array<string, mixed>}|array{ok: false, errors: list<string>, http?: int}
@@ -386,25 +479,33 @@ final class AuthScriptService
             return ['ok' => false, 'errors' => ['auth_schema_unavailable'], 'http' => 503];
         }
 
-        $check = $this->assertAuthTagEligibleForAccount($account, $tag);
-        if (! ($check['ok'] ?? false)) {
+        $resolved = $this->assertAuthTagEligibleForAccount($account, $tag);
+        if (! ($resolved['ok'] ?? false)) {
             return [
                 'ok' => false,
-                'errors' => $check['errors'] ?? ['auth_pin_invalid'],
-                'http' => (int) ($check['http'] ?? 404),
+                'errors' => $resolved['errors'] ?? ['auth_pin_invalid'],
+                'http' => (int) ($resolved['http'] ?? 404),
             ];
         }
 
-        $pinnedPackageId = (int) $tag->auth_script_id;
-        $package = SaPackage::query()->find($pinnedPackageId);
-        $release = SaPackageRelease::query()->find((int) $tag->auth_release_id);
-        if (! $package instanceof SaPackage || ! $release instanceof SaPackageRelease) {
-            return ['ok' => false, 'errors' => ['auth_pin_target_missing'], 'http' => 404];
-        }
+        /** @var SaPackage $package */
+        $package = $resolved['package'];
+        /** @var SaPackageRelease $release */
+        $release = $resolved['release'];
 
         return [
             'ok' => true,
-            'release' => $this->clientReleasePayload($package, $release, $tag, $includeManifest),
+            'release' => $this->clientReleasePayload(
+                $package,
+                $release,
+                $tag,
+                $includeManifest,
+                (string) $resolved['source'],
+                $resolved['source_action_tag_key'] ?? (string) $tag->tag_key,
+                $resolved['cms_scope'] ?? null,
+                $resolved['site'] ?? null,
+                $resolved['path'] ?? null,
+            ),
         ];
     }
 
@@ -496,17 +597,16 @@ final class AuthScriptService
         }
 
         foreach ($this->candidateAuthTagsForSite($accountPlatform) as $tag) {
-            $check = $this->assertAuthTagEligibleForAccount($account, $tag);
-            if (! ($check['ok'] ?? false)) {
+            $resolved = $this->assertAuthTagEligibleForAccount($account, $tag);
+            if (! ($resolved['ok'] ?? false)) {
                 continue;
             }
-            if ((int) $tag->auth_release_id !== $releaseId) {
-                continue;
-            }
+            /** @var SaPackage $package */
+            $package = $resolved['package'];
+            /** @var SaPackageRelease $release */
+            $release = $resolved['release'];
 
-            $package = SaPackage::query()->find((int) $tag->auth_script_id);
-            $release = SaPackageRelease::query()->find($releaseId);
-            if (! $package instanceof SaPackage || ! $release instanceof SaPackageRelease) {
+            if ((int) $release->id !== $releaseId) {
                 continue;
             }
             if ((string) $package->package_key !== $packageKey) {
@@ -546,6 +646,11 @@ final class AuthScriptService
         SaPackageRelease $release,
         SaActionTag $tag,
         bool $includeManifest,
+        string $source = ScriptResolutionService::SOURCE_SITE_SPECIFIC,
+        ?string $sourceActionTagKey = null,
+        ?array $cmsScope = null,
+        ?SaSite $site = null,
+        ?SaPath $path = null,
     ): array {
         $manifest = is_array($release->manifest) ? $release->manifest : [];
         $assets = is_array($manifest['assets'] ?? null) ? $manifest['assets'] : [];
@@ -561,6 +666,11 @@ final class AuthScriptService
         $payload = [
             'action_tag_id' => (int) $tag->id,
             'action_tag_key' => (string) $tag->tag_key,
+            'source' => $source,
+            'source_action_tag_key' => $sourceActionTagKey ?? (string) $tag->tag_key,
+            'cms_scope' => $cmsScope,
+            'target_site_key' => $site?->key ?? ($tag->site_key ?: $tag->platform),
+            'target_path' => $path instanceof SaPath ? $this->pathSummary($path) : null,
             'package_key' => (string) $package->package_key,
             'package_id' => (int) $package->id,
             'kind' => (string) $package->kind,
@@ -590,7 +700,7 @@ final class AuthScriptService
     }
 
     /**
-     * Candidate Auth-pinned tags for a Site. No account-grant filter.
+     * Candidate Action Tags for a Site (includes both pinned and unpinned tags so CMS Global Auth can resolve).
      *
      * @return \Illuminate\Support\Collection<int, SaActionTag>
      */
@@ -601,17 +711,27 @@ final class AuthScriptService
                 $query->whereRaw('LOWER(site_key) = ?', [$accountPlatform])
                     ->orWhereRaw('LOWER(platform) = ?', [$accountPlatform]);
             })
-            ->whereNotNull('auth_script_id')
-            ->whereNotNull('auth_release_id')
             ->orderBy('id')
             ->get();
     }
 
     /**
-     * Shared Auth eligibility: Site match + Authentication Path + valid published pin.
-     * Intentionally ignores sa_account_action_tags (Auth is Site-scoped).
+     * Authoritative Auth binding resolver for an Account + Action Tag:
+     * 1. Site match + enabled Action Tag + Authentication Path
+     * 2. Prefer explicit Site-specific Auth pin (auth_script_id / auth_release_id)
+     * 3. Otherwise resolve CMS Global Authentication Script via ScriptResolutionService
      *
-     * @return array{ok: true}|array{ok: false, errors: list<string>, http?: int}
+     * @return array{
+     *   ok: true,
+     *   source: string,
+     *   tag: SaActionTag,
+     *   package: SaPackage,
+     *   release: SaPackageRelease,
+     *   path: SaPath|null,
+     *   site: SaSite|null,
+     *   cms_scope: array<string, mixed>|null,
+     *   source_action_tag_key: string
+     * }|array{ok: false, errors: list<string>, http?: int, path?: SaPath|null}
      */
     private function assertAuthTagEligibleForAccount(SaAccount $account, SaActionTag $tag): array
     {
@@ -620,38 +740,179 @@ final class AuthScriptService
             return ['ok' => false, 'errors' => ['account_tag_platform_mismatch'], 'http' => 403];
         }
 
-        if (! $this->tagPathIsAuthentication($tag)) {
-            return ['ok' => false, 'errors' => ['auth_path_required'], 'http' => 404];
+        if (! $tag->isEnabled()) {
+            return ['ok' => false, 'errors' => ['action_tag_disabled'], 'http' => 404];
         }
 
+        $path = $tag->path_id ? SaPath::query()->find((int) $tag->path_id) : null;
+        if (! $this->tagPathIsAuthentication($tag)) {
+            return ['ok' => false, 'errors' => ['auth_path_required'], 'http' => 404, 'path' => $path];
+        }
+
+        $site = $this->resolveSiteForTag($tag, $accountPlatform);
+
+        // Priority 1: Explicit Site-specific Auth pin
         $pinnedPackageId = $tag->auth_script_id !== null ? (int) $tag->auth_script_id : null;
         $pinnedReleaseId = $tag->auth_release_id !== null ? (int) $tag->auth_release_id : null;
-        if ($pinnedPackageId === null || $pinnedReleaseId === null) {
-            return ['ok' => false, 'errors' => ['auth_pin_missing'], 'http' => 404];
-        }
+        if ($pinnedPackageId !== null && $pinnedReleaseId !== null) {
+            $package = SaPackage::query()->find($pinnedPackageId);
+            $release = SaPackageRelease::query()->find($pinnedReleaseId);
+            $packageRow = $this->packageRowForAuthPin(
+                $package instanceof SaPackage ? $package : null,
+                $tag,
+            );
 
-        $package = SaPackage::query()->find($pinnedPackageId);
-        $release = SaPackageRelease::query()->find($pinnedReleaseId);
-        $packageRow = $this->packageRowForAuthPin(
-            $package instanceof SaPackage ? $package : null,
-            $tag,
-        );
+            $check = $this->pinPolicy->assertPinnedAuthRelease(
+                $packageRow,
+                $release instanceof SaPackageRelease ? $this->releaseRow($release) : null,
+                $pinnedPackageId,
+                $pinnedReleaseId,
+            );
+            if (! ($check['ok'] ?? false)) {
+                return [
+                    'ok' => false,
+                    'errors' => $check['errors'] ?? ['auth_pin_invalid'],
+                    'http' => 404,
+                    'path' => $path,
+                ];
+            }
 
-        $check = $this->pinPolicy->assertPinnedAuthRelease(
-            $packageRow,
-            $release instanceof SaPackageRelease ? $this->releaseRow($release) : null,
-            $pinnedPackageId,
-            $pinnedReleaseId,
-        );
-        if (! ($check['ok'] ?? false)) {
+            /** @var SaPackage $package */
+            /** @var SaPackageRelease $release */
             return [
-                'ok' => false,
-                'errors' => $check['errors'] ?? ['auth_pin_invalid'],
-                'http' => 404,
+                'ok' => true,
+                'source' => ScriptResolutionService::SOURCE_SITE_SPECIFIC,
+                'tag' => $tag,
+                'package' => $package,
+                'release' => $release,
+                'path' => $path,
+                'site' => $site,
+                'cms_scope' => null,
+                'source_action_tag_key' => (string) $tag->tag_key,
             ];
         }
 
-        return ['ok' => true];
+        // Priority 2: CMS Global Authentication Script fallback
+        $resolver = $this->scriptResolution ?? new ScriptResolutionService;
+        $globalRes = $resolver->resolveForTag($tag);
+        if (! ($globalRes['ok'] ?? false)
+            || ($globalRes['source'] ?? '') !== ScriptResolutionService::SOURCE_CMS_GLOBAL
+            || ! ($globalRes['package'] instanceof SaPackage)
+            || ! ($globalRes['release'] instanceof SaPackageRelease)) {
+            $reason = (string) ($globalRes['reason'] ?? 'auth_pin_missing');
+
+            return [
+                'ok' => false,
+                'errors' => [$reason],
+                'http' => 404,
+                'path' => $path,
+            ];
+        }
+
+        /** @var SaPackage $globalPackage */
+        $globalPackage = $globalRes['package'];
+        /** @var SaPackageRelease $globalRelease */
+        $globalRelease = $globalRes['release'];
+
+        // Verify via AuthScriptPinPolicy as well (ensures kind=script, enabled, published, auth-compatible)
+        $globalPackageRow = $this->packageRow($globalPackage);
+        $globalPackageRow['is_authentication'] = true; // verified by ScriptResolutionService::effectiveIsAuthentication
+        $pinCheck = $this->pinPolicy->assertPinnedAuthRelease(
+            $globalPackageRow,
+            $this->releaseRow($globalRelease),
+            (int) $globalPackage->id,
+            (int) $globalRelease->id,
+        );
+        if (! ($pinCheck['ok'] ?? false)) {
+            return [
+                'ok' => false,
+                'errors' => $pinCheck['errors'] ?? ['auth_pin_invalid'],
+                'http' => 404,
+                'path' => $path,
+            ];
+        }
+
+        return [
+            'ok' => true,
+            'source' => ScriptResolutionService::SOURCE_CMS_GLOBAL,
+            'tag' => $tag,
+            'package' => $globalPackage,
+            'release' => $globalRelease,
+            'path' => $path,
+            'site' => $site,
+            'cms_scope' => $globalRes['cms_scope'] ?? null,
+            'source_action_tag_key' => (string) ($globalRes['source_action_tag_key'] ?? $tag->tag_key),
+        ];
+    }
+
+    private function resolveSiteForPlatform(string $platform): ?SaSite
+    {
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+        if (! Schema::connection($conn)->hasTable('sa_sites')) {
+            return null;
+        }
+
+        $site = SaSite::query()->whereRaw('LOWER(key) = ?', [strtolower(trim($platform))])->first();
+
+        return $site instanceof SaSite ? $site : null;
+    }
+
+    private function resolveSiteForTag(SaActionTag $tag, string $fallbackPlatform): ?SaSite
+    {
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+        if (! Schema::connection($conn)->hasTable('sa_sites')) {
+            return null;
+        }
+
+        if ($tag->site_id) {
+            $site = SaSite::query()->find((int) $tag->site_id);
+            if ($site instanceof SaSite) {
+                return $site;
+            }
+        }
+
+        return $this->resolveSiteForPlatform((string) ($tag->site_key ?: $tag->platform ?: $fallbackPlatform));
+    }
+
+    /**
+     * @return array{id: int, key: string, name: string, url_pattern: string, is_authentication: bool, cms_template_id: int|null}
+     */
+    private function pathSummary(SaPath $path): array
+    {
+        return [
+            'id' => (int) $path->id,
+            'key' => (string) $path->key,
+            'name' => (string) $path->name,
+            'url_pattern' => (string) $path->url_pattern,
+            'is_authentication' => (bool) ($path->is_authentication ?? false),
+            'cms_template_id' => $path->cms_template_id !== null ? (int) $path->cms_template_id : null,
+        ];
+    }
+
+    /**
+     * @return array{base_url: string|null, url_pattern: string|null, resolved_url: string|null, is_authentication: bool}|null
+     */
+    private function buildExecutionContext(?SaSite $site, ?SaPath $path, SaAccount $account): ?array
+    {
+        if (! $path instanceof SaPath) {
+            return null;
+        }
+
+        $baseUrl = $site instanceof SaSite ? $site->canonicalBaseUrl() : null;
+        if ($baseUrl === null && is_string($account->site_url) && trim($account->site_url) !== '') {
+            $baseUrl = SaSite::normalizeBaseUrl($account->site_url);
+        }
+        $pattern = (string) $path->url_pattern;
+        $resolvedUrl = $baseUrl !== null && $pattern !== ''
+            ? rtrim($baseUrl, '/').'/'.ltrim($pattern, '/')
+            : null;
+
+        return [
+            'base_url' => $baseUrl,
+            'url_pattern' => $pattern !== '' ? $pattern : null,
+            'resolved_url' => $resolvedUrl,
+            'is_authentication' => (bool) ($path->is_authentication ?? false),
+        ];
     }
 
     private function tagPathIsAuthentication(SaActionTag $tag): bool
