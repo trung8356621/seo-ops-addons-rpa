@@ -356,6 +356,31 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     Route::delete('/tags/{id}', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\ActionRegistryController::class, 'destroyTag'])
                         ->whereNumber('id')
                         ->name('social-automation.action-registry.tags.destroy');
+
+                    Route::get('/cms-types', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\CmsRegistryController::class, 'index'])
+                        ->name('social-automation.action-registry.cms-types.index');
+                    Route::post('/cms-types', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\CmsRegistryController::class, 'store'])
+                        ->name('social-automation.action-registry.cms-types.store');
+                    Route::put('/cms-types/{id}', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\CmsRegistryController::class, 'update'])
+                        ->whereNumber('id')
+                        ->name('social-automation.action-registry.cms-types.update');
+                    Route::patch('/cms-types/{id}', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\CmsRegistryController::class, 'patch'])
+                        ->whereNumber('id')
+                        ->name('social-automation.action-registry.cms-types.patch');
+                    Route::delete('/cms-types/{id}', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\CmsRegistryController::class, 'destroy'])
+                        ->whereNumber('id')
+                        ->name('social-automation.action-registry.cms-types.destroy');
+                    Route::post('/cms-types/{id}/templates', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\CmsRegistryController::class, 'storeTemplate'])
+                        ->whereNumber('id')
+                        ->name('social-automation.action-registry.cms-types.templates.store');
+                    Route::put('/cms-types/{id}/templates/{templateId}', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\CmsRegistryController::class, 'updateTemplate'])
+                        ->whereNumber('id')
+                        ->whereNumber('templateId')
+                        ->name('social-automation.action-registry.cms-types.templates.update');
+                    Route::delete('/cms-types/{id}/templates/{templateId}', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ActionRegistry\CmsRegistryController::class, 'destroyTemplate'])
+                        ->whereNumber('id')
+                        ->whereNumber('templateId')
+                        ->name('social-automation.action-registry.cms-types.templates.destroy');
                 });
 
                 // CP12A: Staff Script Registry REST (GET only) for React Scripts UI.

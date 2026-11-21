@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace Omnichannel\Addons\SocialAutomation\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\Schema;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
 
 /**
@@ -112,8 +114,28 @@ class SaSite extends Model
         return $normalized;
     }
 
+    /**
+     * @return BelongsTo<SaCmsType, SaSite>
+     */
+    public function cmsTypeDefinition(): BelongsTo
+    {
+        return $this->belongsTo(SaCmsType::class, 'cms_type', 'key');
+    }
+
     public static function isSupportedCmsType(?string $value): bool
     {
-        return $value === null || in_array($value, self::SUPPORTED_CMS_TYPES, true);
+        if ($value === null) {
+            return true;
+        }
+
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+        try {
+            if (Schema::connection($conn)->hasTable('sa_cms_types')) {
+                return SaCmsType::query()->where('key', $value)->exists();
+            }
+        } catch (\Throwable) {
+        }
+
+        return in_array($value, self::SUPPORTED_CMS_TYPES, true);
     }
 }

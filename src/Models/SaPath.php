@@ -24,6 +24,9 @@ class SaPath extends Model
     protected $casts = [
         'path_inputs' => 'array',
         'is_authentication' => 'boolean',
+        'cms_template_id' => 'integer',
+        'is_override' => 'boolean',
+        'template_version' => 'integer',
     ];
 
     protected static function booted(): void

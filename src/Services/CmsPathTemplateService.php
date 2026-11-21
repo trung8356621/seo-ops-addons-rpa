@@ -6,6 +6,8 @@ namespace Omnichannel\Addons\SocialAutomation\Services;
 
 use Illuminate\Support\Facades\Schema;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTag;
+use Omnichannel\Addons\SocialAutomation\Models\SaCmsPathTemplate;
+use Omnichannel\Addons\SocialAutomation\Models\SaCmsType;
 use Omnichannel\Addons\SocialAutomation\Models\SaPath;
 use Omnichannel\Addons\SocialAutomation\Models\SaScriptRequest;
 use Omnichannel\Addons\SocialAutomation\Models\SaSite;
@@ -19,36 +21,84 @@ final class CmsPathTemplateService
 {
     /**
      * @return list<array{
+     *   id: int|null,
      *   key: string,
      *   name: string,
      *   url_pattern: string,
      *   is_authentication: bool,
-     *   description: string
+     *   description: string,
+     *   version: int
      * }>
      */
     public function templatesForCms(?string $cmsType): array
     {
         $normalized = SaSite::normalizeCmsType($cmsType);
+        if ($normalized === null) {
+            return [];
+        }
+
+        if ($this->cmsRegistryTablesReady()) {
+            $cms = SaCmsType::query()->where('key', $normalized)->first();
+            if (! $cms instanceof SaCmsType || ! $cms->is_enabled) {
+                return [];
+            }
+
+            return SaCmsPathTemplate::query()
+                ->where('cms_type_id', $cms->id)
+                ->orderBy('id')
+                ->get()
+                ->map(fn (SaCmsPathTemplate $tpl) => [
+                    'id' => (int) $tpl->id,
+                    'key' => $tpl->key,
+                    'name' => $tpl->name,
+                    'url_pattern' => $tpl->url_pattern,
+                    'is_authentication' => (bool) $tpl->is_authentication,
+                    'description' => (string) ($tpl->description ?? ''),
+                    'version' => (int) ($tpl->version ?? 1),
+                ])
+                ->all();
+        }
+
         if ($normalized === SaSite::CMS_WORDPRESS) {
             return [
                 [
+                    'id' => null,
                     'key' => 'create_post',
                     'name' => 'Create Post',
                     'url_pattern' => '/wp-admin/post-new.php',
                     'is_authentication' => false,
                     'description' => 'WordPress Create Post',
+                    'version' => 1,
                 ],
                 [
+                    'id' => null,
                     'key' => 'login',
                     'name' => 'Login',
                     'url_pattern' => '/wp-login.php',
                     'is_authentication' => true,
                     'description' => 'WordPress Login (Authentication)',
+                    'version' => 1,
                 ],
             ];
         }
 
         return [];
+    }
+
+    public function isCmsTypeEnabled(?string $cmsType): bool
+    {
+        $normalized = SaSite::normalizeCmsType($cmsType);
+        if ($normalized === null) {
+            return true;
+        }
+
+        if ($this->cmsRegistryTablesReady()) {
+            $cms = SaCmsType::query()->where('key', $normalized)->first();
+
+            return $cms instanceof SaCmsType && (bool) $cms->is_enabled;
+        }
+
+        return SaSite::isSupportedCmsType($normalized);
     }
 
     /**
@@ -116,6 +166,7 @@ final class CmsPathTemplateService
     {
         $templates = $this->templatesForCms($site->cms_type ?? null);
         $hasAuthCol = $this->pathAuthenticationColumnReady();
+        $hasTplTracking = $this->pathTemplateTrackingReady();
 
         foreach ($templates as $tpl) {
             $key = $tpl['key'];
@@ -127,23 +178,46 @@ final class CmsPathTemplateService
 
             if ($existingPath instanceof SaPath) {
                 $changed = false;
-                if (isset($override['url_pattern']) && $override['url_pattern'] !== $existingPath->url_pattern) {
-                    $existingPath->url_pattern = $override['url_pattern'];
-                    $existingPath->path_inputs = PathPatternResolver::parseInputs($override['url_pattern']);
+                if ($override !== []) {
+                    if (isset($override['url_pattern']) && $override['url_pattern'] !== $existingPath->url_pattern) {
+                        $existingPath->url_pattern = $override['url_pattern'];
+                        $existingPath->path_inputs = PathPatternResolver::parseInputs($override['url_pattern']);
+                        $changed = true;
+                    }
+                    if (isset($override['name']) && $override['name'] !== $existingPath->name) {
+                        $existingPath->name = $override['name'];
+                        $changed = true;
+                    }
+                    if ($hasAuthCol && array_key_exists('is_authentication', $override)) {
+                        $existingPath->is_authentication = (bool) $override['is_authentication'];
+                        $changed = true;
+                    }
+                    if (array_key_exists('description', $override)) {
+                        $existingPath->description = $override['description'] !== '' ? $override['description'] : null;
+                        $changed = true;
+                    }
+                    if ($hasTplTracking && ! ($existingPath->is_override ?? false)) {
+                        $existingPath->is_override = true;
+                        $changed = true;
+                    }
+                } elseif (
+                    $hasTplTracking
+                    && $existingPath->cms_template_id !== null
+                    && ! ($existingPath->is_override ?? false)
+                    && (int) ($tpl['version'] ?? 1) > (int) ($existingPath->template_version ?? 1)
+                ) {
+                    // Version-safe template propagation for non-overridden inherited paths
+                    $existingPath->url_pattern = $tpl['url_pattern'];
+                    $existingPath->path_inputs = PathPatternResolver::parseInputs($tpl['url_pattern']);
+                    $existingPath->name = $tpl['name'];
+                    if ($hasAuthCol) {
+                        $existingPath->is_authentication = (bool) $tpl['is_authentication'];
+                    }
+                    $existingPath->description = $tpl['description'] !== '' ? $tpl['description'] : null;
+                    $existingPath->template_version = (int) ($tpl['version'] ?? 1);
                     $changed = true;
                 }
-                if (isset($override['name']) && $override['name'] !== $existingPath->name) {
-                    $existingPath->name = $override['name'];
-                    $changed = true;
-                }
-                if ($hasAuthCol && array_key_exists('is_authentication', $override)) {
-                    $existingPath->is_authentication = (bool) $override['is_authentication'];
-                    $changed = true;
-                }
-                if (array_key_exists('description', $override)) {
-                    $existingPath->description = $override['description'] !== '' ? $override['description'] : null;
-                    $changed = true;
-                }
+
                 if ($changed) {
                     $existingPath->save();
                     if ($hasAuthCol) {
@@ -163,10 +237,15 @@ final class CmsPathTemplateService
                 'path_inputs' => PathPatternResolver::parseInputs($urlPattern),
                 'description' => array_key_exists('description', $override)
                     ? ($override['description'] !== '' ? $override['description'] : null)
-                    : $tpl['description'],
+                    : ($tpl['description'] !== '' ? $tpl['description'] : null),
             ];
             if ($hasAuthCol) {
                 $payload['is_authentication'] = $override['is_authentication'] ?? $tpl['is_authentication'];
+            }
+            if ($hasTplTracking) {
+                $payload['cms_template_id'] = $tpl['id'];
+                $payload['is_override'] = $override !== [];
+                $payload['template_version'] = (int) ($tpl['version'] ?? 1);
             }
 
             $createdPath = SaPath::query()->create($payload);
@@ -329,6 +408,32 @@ final class CmsPathTemplateService
         try {
             return Schema::connection($conn)->hasTable('sa_action_tags')
                 && Schema::connection($conn)->hasColumn('sa_action_tags', 'is_enabled');
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    private function cmsRegistryTablesReady(): bool
+    {
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+
+        try {
+            return Schema::connection($conn)->hasTable('sa_cms_types')
+                && Schema::connection($conn)->hasTable('sa_cms_path_templates');
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    private function pathTemplateTrackingReady(): bool
+    {
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+
+        try {
+            return Schema::connection($conn)->hasTable('sa_paths')
+                && Schema::connection($conn)->hasColumn('sa_paths', 'cms_template_id')
+                && Schema::connection($conn)->hasColumn('sa_paths', 'is_override')
+                && Schema::connection($conn)->hasColumn('sa_paths', 'template_version');
         } catch (\Throwable) {
             return false;
         }

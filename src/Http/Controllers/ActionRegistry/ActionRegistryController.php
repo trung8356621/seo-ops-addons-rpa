@@ -12,11 +12,13 @@ use Illuminate\Support\Facades\Schema;
 use Omnichannel\Addons\SocialAutomation\Models\SaAction;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTag;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTagScript;
+use Omnichannel\Addons\SocialAutomation\Models\SaCmsType;
 use Omnichannel\Addons\SocialAutomation\Models\SaPath;
 use Omnichannel\Addons\SocialAutomation\Models\SaScriptRequest;
 use Omnichannel\Addons\SocialAutomation\Models\SaSite;
 use Omnichannel\Addons\SocialAutomation\Services\AuthScriptService;
 use Omnichannel\Addons\SocialAutomation\Services\CmsPathTemplateService;
+use Omnichannel\Addons\SocialAutomation\Services\SiteDeletionService;
 use Omnichannel\Addons\SocialAutomation\Support\PathPatternResolver;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationAccess;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
@@ -69,6 +71,17 @@ final class ActionRegistryController
             ])->all()
             : [];
 
+        $cmsTypes = [];
+        if (Schema::connection($conn)->hasTable('sa_cms_types')) {
+            $cmsCtrl = new CmsRegistryController();
+            $cmsTypes = SaCmsType::query()
+                ->with(['pathTemplates' => fn ($q) => $q->orderBy('id')])
+                ->orderBy('name')
+                ->get()
+                ->map(fn (SaCmsType $c) => $cmsCtrl->serializeCmsType($c))
+                ->all();
+        }
+
         return response()->json([
             'ok' => true,
             'sites' => $sites,
@@ -76,6 +89,7 @@ final class ActionRegistryController
             'actions' => $actions,
             'tags' => $tags,
             'requests' => $requests,
+            'cms_types' => $cmsTypes,
         ]);
     }
 
@@ -96,9 +110,13 @@ final class ActionRegistryController
         $testBaseUrl = SaSite::normalizeBaseUrl((string) $request->input('test_base_url', ''));
         $description = trim((string) $request->input('description', ''));
         $cmsType = SaSite::normalizeCmsType($request->input('cms_type'));
+        $cmsService = app(CmsPathTemplateService::class);
 
         if (! SaSite::isSupportedCmsType($cmsType)) {
             return response()->json(['ok' => false, 'error' => 'invalid_cms_type'], 422);
+        }
+        if ($cmsType !== null && ! $cmsService->isCmsTypeEnabled($cmsType)) {
+            return response()->json(['ok' => false, 'error' => 'cms_type_disabled'], 422);
         }
 
         if ($name === '') {
@@ -120,7 +138,6 @@ final class ActionRegistryController
         }
 
         $conn = SocialAutomationServiceConfig::CONNECTION;
-        $cmsService = app(CmsPathTemplateService::class);
         $pathOverrides = $cmsService->normalizePathOverrides($request->input('path_overrides'));
         $userId = Auth::id();
         $sitePayload = [
@@ -180,10 +197,14 @@ final class ActionRegistryController
             $site->base_url_mode = $mode === SaSite::MODE_DYNAMIC ? SaSite::MODE_DYNAMIC : SaSite::MODE_FIXED;
         }
 
+        $cmsService = app(CmsPathTemplateService::class);
         if ($request->exists('cms_type')) {
             $cmsType = SaSite::normalizeCmsType($request->input('cms_type'));
             if (! SaSite::isSupportedCmsType($cmsType)) {
                 return response()->json(['ok' => false, 'error' => 'invalid_cms_type'], 422);
+            }
+            if ($cmsType !== null && $cmsType !== ($site->cms_type ?? null) && ! $cmsService->isCmsTypeEnabled($cmsType)) {
+                return response()->json(['ok' => false, 'error' => 'cms_type_disabled'], 422);
             }
             if ($this->siteCmsTypeColumnReady()) {
                 $site->cms_type = $cmsType;
@@ -209,7 +230,6 @@ final class ActionRegistryController
         }
 
         $conn = SocialAutomationServiceConfig::CONNECTION;
-        $cmsService = app(CmsPathTemplateService::class);
         $pathOverrides = $cmsService->normalizePathOverrides($request->input('path_overrides'));
         $userId = Auth::id();
 
@@ -245,22 +265,11 @@ final class ActionRegistryController
             return response()->json(['ok' => false, 'error' => 'site_not_found'], 404);
         }
 
-        $dependencies = $this->collectSiteDependencies($site);
-        if (array_sum($dependencies) > 0) {
-            return response()->json([
-                'ok' => false,
-                'error' => 'site_has_dependencies',
-                'message' => 'Không thể xóa Site vì còn Paths, Action Tags, Scripts hoặc Campaigns phụ thuộc.',
-                'dependencies' => $dependencies,
-            ], 422);
-        }
+        $result = app(SiteDeletionService::class)->deleteSafely($site);
+        $status = (int) ($result['status'] ?? ($result['ok'] ? 200 : 422));
+        unset($result['status']);
 
-        $conn = SocialAutomationServiceConfig::CONNECTION;
-        DB::connection($conn)->transaction(function () use ($site): void {
-            $site->delete();
-        });
-
-        return response()->json(['ok' => true]);
+        return response()->json($result, $status);
     }
 
     public function storePath(Request $request): JsonResponse
@@ -395,6 +404,10 @@ final class ActionRegistryController
             }
             $path->is_authentication = filter_var($request->input('is_authentication'), FILTER_VALIDATE_BOOLEAN);
             $authFlagTouched = true;
+        }
+
+        if ($this->pathTemplateTrackingReady() && $path->cms_template_id !== null && $path->isDirty(['name', 'url_pattern', 'is_authentication'])) {
+            $path->is_override = true;
         }
 
         $path->save();
@@ -795,7 +808,30 @@ final class ActionRegistryController
             $row['is_authentication'] = (bool) ($p->is_authentication ?? false);
         }
 
+        if ($this->pathTemplateTrackingReady()) {
+            $tplId = $p->cms_template_id !== null ? (int) $p->cms_template_id : null;
+            $isOverride = (bool) ($p->is_override ?? false);
+            $row['cms_template_id'] = $tplId;
+            $row['is_override'] = $isOverride;
+            $row['is_template_inherited'] = $tplId !== null && ! $isOverride;
+            $row['template_version'] = $p->template_version !== null ? (int) $p->template_version : null;
+        }
+
         return $row;
+    }
+
+    private function pathTemplateTrackingReady(): bool
+    {
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+
+        try {
+            return Schema::connection($conn)->hasTable('sa_paths')
+                && Schema::connection($conn)->hasColumn('sa_paths', 'cms_template_id')
+                && Schema::connection($conn)->hasColumn('sa_paths', 'is_override')
+                && Schema::connection($conn)->hasColumn('sa_paths', 'template_version');
+        } catch (\Throwable) {
+            return false;
+        }
     }
 
     private function pathAuthenticationColumnReady(): bool
