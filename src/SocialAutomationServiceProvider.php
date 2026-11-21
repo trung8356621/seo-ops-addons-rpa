@@ -383,13 +383,18 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                         ->name('social-automation.action-registry.cms-types.templates.destroy');
                 });
 
-                // CP12A: Staff Script Registry REST (GET only) for React Scripts UI.
+                // CP12A: Staff Script Registry REST for React Scripts UI + Global Script sharing/resolution.
                 Route::prefix('api/script-registry')->group(function (): void {
                     Route::get('/', [StaffScriptRegistryController::class, 'index'])
                         ->name('social-automation.script-registry.index');
+                    Route::get('/resolve', [StaffScriptRegistryController::class, 'resolve'])
+                        ->name('social-automation.script-registry.resolve');
                     Route::get('/{id}', [StaffScriptRegistryController::class, 'show'])
                         ->where('id', '^(?!.*\\.\\.)[^/]{1,191}$')
                         ->name('social-automation.script-registry.show');
+                    Route::match(['patch', 'put'], '/{id}/sharing', [StaffScriptRegistryController::class, 'updateSharing'])
+                        ->where('id', '^(?!.*\\.\\.)[^/]{1,191}$')
+                        ->name('social-automation.script-registry.sharing.update');
                 });
 
                 // Client API Key Management for SEO-OPS UI / Staff session

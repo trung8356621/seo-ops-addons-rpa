@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Omnichannel\Addons\SocialAutomation\Services;
 
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignInputSanitizer;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignRecheckPolicy;
@@ -18,6 +19,7 @@ use Omnichannel\Addons\SocialAutomation\Enums\CampaignExecutionMode;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignRunMode;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignStatus;
 use Omnichannel\Addons\SocialAutomation\Models\SaAccount;
+use Omnichannel\Addons\SocialAutomation\Models\SaActionTag;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTagScript;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaign;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaignContent;
@@ -67,7 +69,12 @@ final class CampaignService
             return ['ok' => false, 'errors' => ['contents_invalid']];
         }
 
-        $script = $this->resolveScriptPin($scriptId, isset($input['script_version']) ? (string) $input['script_version'] : null);
+        $targetTagKey = trim((string) ($input['target_tag_key'] ?? ''));
+        $script = $this->resolveScriptPin(
+            $scriptId,
+            isset($input['script_version']) ? (string) $input['script_version'] : null,
+            $targetTagKey !== '' ? $targetTagKey : null,
+        );
         if ($script === null) {
             return ['ok' => false, 'errors' => ['script_not_found']];
         }
@@ -155,6 +162,9 @@ final class CampaignService
                 }
                 if ($pinnedAccount instanceof SaAccount) {
                     $meta['pinned_account_id'] = $pinnedAccount->account_uuid;
+                }
+                if (isset($script['resolution_context']) && is_array($script['resolution_context'])) {
+                    $meta['resolved_script_context'] = $script['resolution_context'];
                 }
                 $attrs = [
                     'campaign_uuid' => (string) Str::uuid(),
@@ -1177,17 +1187,67 @@ final class CampaignService
 
     /**
      * Resolve and pin an exact published Script release.
-     * Accepts package_key, Action Tag key (e.g. mayhopphat.create_post), or manifest script_id.
+     * Accepts package_key, Action Tag key (e.g. mayhopphat.create_post or maytuicanvas.create_post), or manifest script_id.
      *
-     * @return array{script_id: string, version: string, content_digest: string|null, manifest: array<string, mixed>}|null
+     * @return array{script_id: string, version: string, content_digest: string|null, manifest: array<string, mixed>, resolution_context?: array<string, mixed>}|null
      */
-    private function resolveScriptPin(string $scriptId, ?string $version): ?array
+    private function resolveScriptPin(string $scriptId, ?string $version, ?string $targetTagKey = null): ?array
     {
         $wantedVersion = ($version !== null && $version !== '') ? $version : null;
+
+        // If an explicit target_tag_key is given, resolve through the authoritative Global/Site-specific resolver.
+        if ($targetTagKey !== null && $targetTagKey !== '') {
+            $res = app(ScriptResolutionService::class)->resolveForTagKey($targetTagKey, $wantedVersion);
+            if (! ($res['ok'] ?? false)) {
+                return null;
+            }
+            /** @var SaPackage $pkg */
+            $pkg = $res['package'];
+            /** @var SaPackageRelease $rel */
+            $rel = $res['release'];
+
+            return $this->scriptPinDto($pkg, $rel, null, [
+                'resolution_source' => $res['source'],
+                'target_action_tag_key' => $res['target_tag_key'],
+                'source_action_tag_key' => $res['source_action_tag_key'],
+                'target_site_key' => $res['target_site_key'],
+                'target_path_key' => $res['target_path_key'],
+                'cms_scope' => $res['cms_scope'],
+                'package_id' => (int) $pkg->id,
+                'release_id' => (int) $rel->id,
+            ]);
+        }
+
         $package = SaPackage::query()->where('package_key', $scriptId)->first();
         $preferredReleaseId = null;
 
         if (! $package instanceof SaPackage) {
+            // Check Action Tag (supports both Site-specific and CMS Global fallback).
+            if (Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable('sa_action_tags')) {
+                $tag = SaActionTag::query()->where('tag_key', strtolower($scriptId))->first();
+                if ($tag instanceof SaActionTag) {
+                    $res = app(ScriptResolutionService::class)->resolveForTag($tag, $wantedVersion);
+                    if (! ($res['ok'] ?? false)) {
+                        return null;
+                    }
+                    /** @var SaPackage $pkg */
+                    $pkg = $res['package'];
+                    /** @var SaPackageRelease $rel */
+                    $rel = $res['release'];
+
+                    return $this->scriptPinDto($pkg, $rel, null, [
+                        'resolution_source' => $res['source'],
+                        'target_action_tag_key' => $res['target_tag_key'],
+                        'source_action_tag_key' => $res['source_action_tag_key'],
+                        'target_site_key' => $res['target_site_key'],
+                        'target_path_key' => $res['target_path_key'],
+                        'cms_scope' => $res['cms_scope'],
+                        'package_id' => (int) $pkg->id,
+                        'release_id' => (int) $rel->id,
+                    ]);
+                }
+            }
+
             $link = SaActionTagScript::query()
                 ->where('action_tag_key', $scriptId)
                 ->orderByDesc('id')
@@ -1258,16 +1318,22 @@ final class CampaignService
 
     /**
      * @param  array<string, mixed>|null  $manifest
-     * @return array{script_id: string, version: string, content_digest: string|null, manifest: array<string, mixed>}
+     * @param  array<string, mixed>|null  $resolutionContext
+     * @return array{script_id: string, version: string, content_digest: string|null, manifest: array<string, mixed>, resolution_context?: array<string, mixed>}
      */
-    private function scriptPinDto(SaPackage $package, SaPackageRelease $release, ?array $manifest = null): array
+    private function scriptPinDto(SaPackage $package, SaPackageRelease $release, ?array $manifest = null, ?array $resolutionContext = null): array
     {
-        return [
+        $dto = [
             'script_id' => $package->package_key,
             'version' => (string) $release->version,
             'content_digest' => $release->content_digest,
             'manifest' => $manifest ?? (is_array($release->manifest) ? $release->manifest : []),
         ];
+        if ($resolutionContext !== null) {
+            $dto['resolution_context'] = $resolutionContext;
+        }
+
+        return $dto;
     }
 
     private function resolvePinnedAccount(string $accountUuid, string $installationId, string $platform): ?SaAccount

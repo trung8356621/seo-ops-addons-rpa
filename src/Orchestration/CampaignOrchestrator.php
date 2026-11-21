@@ -1067,6 +1067,20 @@ final class CampaignOrchestrator
             return null;
         }
 
+        $campaignMeta = is_array($campaign->meta) ? $campaign->meta : [];
+        $jobPayload = [
+            'input' => $input,
+            'campaign_uuid' => $campaign->campaign_uuid,
+            'content_uuid' => $content->content_uuid,
+            'run_mode' => (string) ($campaign->run_mode ?: CampaignRunMode::Live->value),
+            'execution_mode' => (string) $campaign->execution_mode,
+            'installation_id' => (string) $campaign->installation_id,
+            'script_pin' => $scriptPin,
+        ];
+        if (is_array($campaignMeta['resolved_script_context'] ?? null)) {
+            $jobPayload['resolved_script_context'] = $campaignMeta['resolved_script_context'];
+        }
+
         $job = SaJob::query()->create([
             'job_uuid' => (string) Str::uuid(),
             'task_id' => null,
@@ -1082,15 +1096,7 @@ final class CampaignOrchestrator
             'idempotency_key' => $idem,
             'lease_token' => $leaseToken,
             'fencing_generation' => $fencing,
-            'payload' => [
-                'input' => $input,
-                'campaign_uuid' => $campaign->campaign_uuid,
-                'content_uuid' => $content->content_uuid,
-                'run_mode' => (string) ($campaign->run_mode ?: CampaignRunMode::Live->value),
-                'execution_mode' => (string) $campaign->execution_mode,
-                'installation_id' => (string) $campaign->installation_id,
-                'script_pin' => $scriptPin,
-            ],
+            'payload' => $jobPayload,
             'reserved_at' => now(),
             'lease_expires_at' => now()->addSeconds(self::DEFAULT_LEASE_SECONDS),
             'dispatch_source' => 'campaign',

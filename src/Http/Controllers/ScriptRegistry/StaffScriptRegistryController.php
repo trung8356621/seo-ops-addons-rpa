@@ -6,13 +6,18 @@ namespace Omnichannel\Addons\SocialAutomation\Http\Controllers\ScriptRegistry;
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignScriptVariableSchema;
+use Omnichannel\Addons\SocialAutomation\Models\SaPackage;
+use Omnichannel\Addons\SocialAutomation\Models\SaPath;
+use Omnichannel\Addons\SocialAutomation\Models\SaSite;
 use Omnichannel\Addons\SocialAutomation\PackageRegistry\ScriptRegistryUiService;
+use Omnichannel\Addons\SocialAutomation\Services\ScriptResolutionService;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationAccess;
 
 /**
- * Staff Session read API for React Script Registry (GET only).
- * Reuses ScriptRegistryUiService — no second business catalog.
+ * Staff Session API for React Script Registry.
+ * Reuses ScriptRegistryUiService & ScriptResolutionService — no second business catalog.
  */
 final class StaffScriptRegistryController extends Controller
 {
@@ -23,6 +28,7 @@ final class StaffScriptRegistryController extends Controller
     public function __construct(
         private readonly ScriptRegistryUiService $ui,
         private readonly SocialAutomationAccess $access,
+        private readonly ?ScriptResolutionService $resolver = null,
     ) {}
 
     public function index(): JsonResponse
@@ -69,6 +75,96 @@ final class StaffScriptRegistryController extends Controller
         ]);
     }
 
+    public function updateSharing(Request $request, string $id): JsonResponse
+    {
+        $this->access->assertCanMutate();
+
+        $packageKey = trim($id);
+        if ($packageKey === '' || strlen($packageKey) > 191) {
+            return response()->json(['ok' => false, 'error' => 'not_found'], 404);
+        }
+
+        $package = SaPackage::query()
+            ->where('package_key', $packageKey)
+            ->where('kind', 'script')
+            ->first();
+        if (! $package instanceof SaPackage) {
+            return response()->json(['ok' => false, 'error' => 'not_found'], 404);
+        }
+
+        $mode = strtolower(trim((string) $request->input('sharing_mode', '')));
+        $resolver = $this->resolver ?? app(ScriptResolutionService::class);
+        $result = $resolver->setGlobalSharing($package, $mode);
+        if (! ($result['ok'] ?? false)) {
+            $payload = [
+                'ok' => false,
+                'error' => (string) ($result['error'] ?? 'sharing_update_failed'),
+            ];
+            if (isset($result['conflict'])) {
+                $payload['conflict'] = $result['conflict'];
+            }
+
+            return response()->json($payload, (int) ($result['http'] ?? 422));
+        }
+
+        $detail = $this->ui->scriptDetail($packageKey);
+
+        return response()->json([
+            'ok' => true,
+            'sharing_mode' => $result['sharing_mode'],
+            'global_scope' => $result['global_scope'],
+            'script' => $detail !== null ? self::mapDetail($detail) : null,
+        ]);
+    }
+
+    public function resolve(Request $request): JsonResponse
+    {
+        $this->access->assertCanAccess();
+
+        $resolver = $this->resolver ?? app(ScriptResolutionService::class);
+        $tagKey = trim((string) $request->query('tag_key', ''));
+        $siteKey = strtolower(trim((string) $request->query('site_key', '')));
+        $pathKey = strtolower(trim((string) $request->query('path_key', '')));
+        $actionKey = trim((string) $request->query('action_key', ''));
+        $version = trim((string) $request->query('version', ''));
+        $wantedVersion = $version !== '' ? $version : null;
+
+        if ($tagKey !== '') {
+            $res = $resolver->resolveForTagKey($tagKey, $wantedVersion);
+        } elseif ($siteKey !== '' && $pathKey !== '') {
+            $site = SaSite::query()->where('key', $siteKey)->first();
+            if (! $site instanceof SaSite) {
+                return response()->json(['ok' => false, 'error' => 'site_not_found'], 404);
+            }
+            $path = SaPath::query()->where('site_id', $site->id)->where('key', $pathKey)->first();
+            if (! $path instanceof SaPath) {
+                return response()->json(['ok' => false, 'error' => 'path_not_found'], 404);
+            }
+            $res = $resolver->resolveForSiteAndPath(
+                $site,
+                $path,
+                $actionKey !== '' ? $actionKey : null,
+                $wantedVersion,
+            );
+        } else {
+            return response()->json(['ok' => false, 'error' => 'tag_key_or_site_and_path_required'], 422);
+        }
+
+        return response()->json([
+            'ok' => true,
+            'resolution' => [
+                'source' => (string) ($res['source'] ?? ScriptResolutionService::SOURCE_MISSING),
+                'resolved' => (bool) ($res['resolved'] ?? false),
+                'tag_enabled' => (bool) ($res['tag_enabled'] ?? true),
+                'reason' => $res['reason'] ?? null,
+                'target_tag_key' => $res['target_tag_key'] ?? null,
+                'source_action_tag_key' => $res['source_action_tag_key'] ?? null,
+                'cms_scope' => $res['cms_scope'] ?? null,
+                'script' => $res['script'] ?? null,
+            ],
+        ]);
+    }
+
     /**
      * @param  array<string, mixed>  $row
      * @return array<string, mixed>
@@ -92,6 +188,14 @@ final class StaffScriptRegistryController extends Controller
             'action_tag_key' => isset($row['action_tag_key']) && $row['action_tag_key'] !== null
                 ? (string) $row['action_tag_key']
                 : null,
+            'sharing_mode' => (string) ($row['sharing_mode'] ?? SaPackage::SHARING_SITE_SPECIFIC),
+            'global_scope' => is_array($row['global_scope'] ?? null) ? $row['global_scope'] : null,
+            'global_eligible' => (bool) ($row['global_eligible'] ?? false),
+            'global_ineligible_reason' => isset($row['global_ineligible_reason']) && $row['global_ineligible_reason'] !== null
+                ? (string) $row['global_ineligible_reason']
+                : null,
+            'eligible_global_scope' => is_array($row['eligible_global_scope'] ?? null) ? $row['eligible_global_scope'] : null,
+            'global_conflict' => is_array($row['global_conflict'] ?? null) ? $row['global_conflict'] : null,
             'assets_complete' => (bool) ($row['assets_complete'] ?? false),
             'video_demo_status' => (string) ($row['video_demo_status'] ?? 'missing'),
             'has_playable_video' => (bool) ($row['has_playable_video'] ?? false),
@@ -137,6 +241,14 @@ final class StaffScriptRegistryController extends Controller
             'action_tag_key' => isset($detail['action_tag_key']) && $detail['action_tag_key'] !== null
                 ? (string) $detail['action_tag_key']
                 : null,
+            'sharing_mode' => (string) ($detail['sharing_mode'] ?? SaPackage::SHARING_SITE_SPECIFIC),
+            'global_scope' => is_array($detail['global_scope'] ?? null) ? $detail['global_scope'] : null,
+            'global_eligible' => (bool) ($detail['global_eligible'] ?? false),
+            'global_ineligible_reason' => isset($detail['global_ineligible_reason']) && $detail['global_ineligible_reason'] !== null
+                ? (string) $detail['global_ineligible_reason']
+                : null,
+            'eligible_global_scope' => is_array($detail['eligible_global_scope'] ?? null) ? $detail['eligible_global_scope'] : null,
+            'global_conflict' => is_array($detail['global_conflict'] ?? null) ? $detail['global_conflict'] : null,
             'sync_source' => isset($detail['sync_source']) && $detail['sync_source'] !== null
                 ? (string) $detail['sync_source']
                 : null,

@@ -18,6 +18,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaScriptRequest;
 use Omnichannel\Addons\SocialAutomation\Models\SaSite;
 use Omnichannel\Addons\SocialAutomation\Services\AuthScriptService;
 use Omnichannel\Addons\SocialAutomation\Services\CmsPathTemplateService;
+use Omnichannel\Addons\SocialAutomation\Services\ScriptResolutionService;
 use Omnichannel\Addons\SocialAutomation\Services\SiteDeletionService;
 use Omnichannel\Addons\SocialAutomation\Support\PathPatternResolver;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationAccess;
@@ -927,6 +928,7 @@ final class ActionRegistryController
         $actionName = $t->actionDefinition?->name ?? ($actionKey !== null ? ucfirst($actionKey) : null);
 
         $hasAuthCols = Schema::connection($conn)->hasColumn('sa_action_tags', 'auth_script_id');
+        $resolution = app(ScriptResolutionService::class)->resolveForTag($t);
 
         return [
             'id' => (int) $t->id,
@@ -947,6 +949,11 @@ final class ActionRegistryController
             'auth_release_id' => $hasAuthCols && $t->auth_release_id !== null ? (int) $t->auth_release_id : null,
             'scripts_count' => $linksCount,
             'ready' => $linksCount > 0,
+            'effective_ready' => (bool) ($resolution['resolved'] ?? false),
+            'resolution_source' => (string) ($resolution['source'] ?? ScriptResolutionService::SOURCE_MISSING),
+            'resolution_reason' => $resolution['reason'] ?? null,
+            'cms_scope' => $resolution['cms_scope'] ?? null,
+            'effective_script' => $resolution['script'] ?? null,
             'latest_request_status' => $latestRequest?->status,
             'latest_request_id' => $latestRequest?->request_id,
         ];

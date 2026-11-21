@@ -10,6 +10,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaActionTagScript;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackage;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageDependency;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
+use Omnichannel\Addons\SocialAutomation\Services\ScriptResolutionService;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
 use Throwable;
 
@@ -32,6 +33,7 @@ final class ScriptRegistryUiService
         }
 
         $media = $this->media ?? app(ScriptReleaseMediaService::class);
+        $resolver = app(ScriptResolutionService::class);
         $userLabels = [];
         $out = [];
         $hasTagScripts = Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasTable('sa_action_tag_scripts');
@@ -59,6 +61,7 @@ final class ScriptRegistryUiService
             $actionTagKey = isset($manifest['action_tag_key']) && trim((string) $manifest['action_tag_key']) !== ''
                 ? (string) $manifest['action_tag_key']
                 : ($tagScripts['pkg_'.$package->id] ?? $tagScripts['sid_'.$scriptId] ?? null);
+            $sharing = $resolver->sharingMetadataForPackage($package);
             $out[] = [
                 'package_key' => (string) $package->package_key,
                 'script_id' => $scriptId,
@@ -66,6 +69,12 @@ final class ScriptRegistryUiService
                 'description' => $package->description !== null ? (string) $package->description : null,
                 'is_authentication' => (bool) ($package->is_authentication ?? false),
                 'action_tag_key' => $actionTagKey,
+                'sharing_mode' => $sharing['sharing_mode'],
+                'global_scope' => $sharing['global_scope'],
+                'global_eligible' => $sharing['global_eligible'],
+                'global_ineligible_reason' => $sharing['global_ineligible_reason'],
+                'eligible_global_scope' => $sharing['eligible_global_scope'],
+                'global_conflict' => $sharing['global_conflict'],
                 'version' => (string) $latest->version,
                 'release_id' => (int) $latest->id,
                 'source' => (string) ($latest->sync_source ?? $package->sync_source ?? 'unknown'),
@@ -123,6 +132,7 @@ final class ScriptRegistryUiService
         }
 
         $media = $this->media ?? app(ScriptReleaseMediaService::class);
+        $resolver = app(ScriptResolutionService::class);
         $userLabels = [];
         $releases = SaPackageRelease::query()
             ->where('package_id', $package->id)
@@ -160,6 +170,7 @@ final class ScriptRegistryUiService
             ->all();
 
         $scriptId = (string) ($latestManifest['script_id'] ?? $package->package_key);
+        $sharing = app(ScriptResolutionService::class)->sharingMetadataForPackage($package);
 
         return [
             'package_key' => (string) $package->package_key,
@@ -167,6 +178,12 @@ final class ScriptRegistryUiService
             'name' => (string) $package->name,
             'is_authentication' => (bool) ($package->is_authentication ?? false),
             'action_tag_key' => $actionTagKey,
+            'sharing_mode' => $sharing['sharing_mode'],
+            'global_scope' => $sharing['global_scope'],
+            'global_eligible' => $sharing['global_eligible'],
+            'global_ineligible_reason' => $sharing['global_ineligible_reason'],
+            'eligible_global_scope' => $sharing['eligible_global_scope'],
+            'global_conflict' => $sharing['global_conflict'],
             'description' => $package->description,
             'sync_source' => $package->sync_source,
             'created_by_user_id' => $package->created_by_user_id,
