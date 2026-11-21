@@ -97,8 +97,14 @@ final class KeepAliveAckPolicy
             $bySeq[$seq] = $ev;
         }
 
-        $expectedCount = $lastContiguousSequence - $currentCursor;
-        if (count($bySeq) !== $expectedCount) {
+        $seqs = array_keys($bySeq);
+        $minSeq = min($seqs);
+        $maxSeq = max($seqs);
+        if ($maxSeq !== $lastContiguousSequence) {
+            return ['ok' => false, 'errors' => [self::ERROR_ACK_SEQUENCE_MISMATCH]];
+        }
+
+        if ($minSeq < 1 || count($bySeq) !== ($lastContiguousSequence - $minSeq + 1)) {
             return ['ok' => false, 'errors' => [self::ERROR_ACK_NON_CONTIGUOUS]];
         }
 
@@ -108,10 +114,7 @@ final class KeepAliveAckPolicy
             }
         }
 
-        $maxSeq = max(array_keys($bySeq));
-        if ($maxSeq !== $lastContiguousSequence) {
-            return ['ok' => false, 'errors' => [self::ERROR_ACK_SEQUENCE_MISMATCH]];
-        }
+        $expectedCount = $lastContiguousSequence - $currentCursor;
 
         return [
             'ok' => true,

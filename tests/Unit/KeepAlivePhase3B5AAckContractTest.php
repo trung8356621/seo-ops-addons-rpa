@@ -375,6 +375,124 @@ final class KeepAlivePhase3B5AAckContractTest extends TestCase
         self::assertSame(1, $body['acked_through_sequence']);
     }
 
+    public function test_cumulative_and_restart_retry_contiguous_ack_1_to_10(): void
+    {
+        for ($i = 4; $i <= 10; $i++) {
+            $this->feedStore->seedJobEvent([
+                'job_id' => 501,
+                'event_type' => 'ack',
+                'to_status' => 'running',
+                'occurred_at' => sprintf('2026-11-20T01:%02d:00+00:00', $i),
+                'attempt_no' => 1,
+            ]);
+        }
+        $this->feedStore->projectDurableEvents('tenant-alpha', 100, $this->campaignUuid);
+        $tenIds = array_column(
+            $this->feedStore->listEvents('tenant-alpha', $this->campaignUuid, 0, null, 20),
+            'event_id',
+        );
+        self::assertCount(10, $tenIds);
+
+        // 1. Initial contiguous ACK #1-#10
+        $genB = (int) $this->nodes->findNode('tenant-alpha', 'node-b')['assignment_generation'];
+        $initial = $this->acks->ackEvents($this->key, [
+            'node_id' => 'node-b',
+            'assignment_generation' => $genB,
+            'campaign_id' => $this->campaignUuid,
+            'event_ids' => $tenIds,
+            'last_contiguous_sequence' => 10,
+        ]);
+        self::assertTrue($initial['ok']);
+        self::assertSame(10, $initial['data']['acked_through_sequence']);
+        self::assertSame(10, $initial['data']['acked_event_count']);
+        self::assertSame(10, $initial['data']['acked_event_count_total']);
+        self::assertFalse($initial['data']['idempotent']);
+
+        // 2. Duplicate ACK idempotency
+        $dup = $this->acks->ackEvents($this->key, [
+            'node_id' => 'node-b',
+            'assignment_generation' => $genB,
+            'campaign_id' => $this->campaignUuid,
+            'event_ids' => $tenIds,
+            'last_contiguous_sequence' => 10,
+        ]);
+        self::assertTrue($dup['ok']);
+        self::assertTrue($dup['data']['idempotent']);
+        self::assertSame(10, $dup['data']['acked_through_sequence']);
+        self::assertSame(0, $dup['data']['acked_event_count']);
+        self::assertSame(10, $dup['data']['acked_event_count_total']);
+
+        // 3. Cursor regression does not lower cursor & negative sequence is rejected
+        $regress = $this->acks->ackEvents($this->key, [
+            'node_id' => 'node-b',
+            'assignment_generation' => $genB,
+            'campaign_id' => $this->campaignUuid,
+            'event_ids' => array_slice($tenIds, 0, 5),
+            'last_contiguous_sequence' => 5,
+        ]);
+        self::assertTrue($regress['ok']);
+        self::assertTrue($regress['data']['idempotent']);
+        self::assertSame(10, $regress['data']['acked_through_sequence']);
+        self::assertSame(10, $this->ackStore->getEventAckCursor('tenant-alpha', 'node-b', $this->campaignUuid)['acked_through_sequence']);
+
+        $negative = $this->acks->ackEvents($this->key, [
+            'node_id' => 'node-b',
+            'assignment_generation' => $genB,
+            'campaign_id' => $this->campaignUuid,
+            'event_ids' => $tenIds,
+            'last_contiguous_sequence' => -1,
+        ]);
+        self::assertFalse($negative['ok']);
+        self::assertContains(KeepAliveAckPolicy::ERROR_LAST_CONTIGUOUS_REQUIRED, $negative['errors']);
+
+        // 4. Missing event rejection (gap #9 omitted in #1..#10, and unknown event ID)
+        $nineIds = array_slice($tenIds, 0, 9);
+        $ack9 = $this->acks->ackEvents($this->key, [
+            'node_id' => 'node-a',
+            'assignment_generation' => $this->gen,
+            'campaign_id' => $this->campaignUuid,
+            'event_ids' => $nineIds,
+            'last_contiguous_sequence' => 9,
+        ]);
+        self::assertTrue($ack9['ok']);
+        self::assertSame(9, $ack9['data']['acked_through_sequence']);
+
+        $gapIds = array_merge(array_slice($tenIds, 0, 8), [$tenIds[9]]);
+        $gap = $this->acks->ackEvents($this->key, [
+            'node_id' => 'node-a',
+            'assignment_generation' => $this->gen,
+            'campaign_id' => $this->campaignUuid,
+            'event_ids' => $gapIds,
+            'last_contiguous_sequence' => 10,
+        ]);
+        self::assertFalse($gap['ok']);
+        self::assertContains(KeepAliveAckPolicy::ERROR_ACK_NON_CONTIGUOUS, $gap['errors']);
+
+        $unknown = $this->acks->ackEvents($this->key, [
+            'node_id' => 'node-a',
+            'assignment_generation' => $this->gen,
+            'campaign_id' => $this->campaignUuid,
+            'event_ids' => array_merge($nineIds, ['missing-event-id']),
+            'last_contiguous_sequence' => 10,
+        ]);
+        self::assertFalse($unknown['ok']);
+        self::assertContains(KeepAliveAckPolicy::ERROR_EVENT_IDS_INVALID, $unknown['errors']);
+
+        // 5. Restart/retry ACK: cursor at 9, client sends cumulative #1-#10
+        $retry = $this->acks->ackEvents($this->key, [
+            'node_id' => 'node-a',
+            'assignment_generation' => $this->gen,
+            'campaign_id' => $this->campaignUuid,
+            'event_ids' => $tenIds,
+            'last_contiguous_sequence' => 10,
+        ]);
+        self::assertTrue($retry['ok']);
+        self::assertFalse($retry['data']['idempotent']);
+        self::assertSame(10, $retry['data']['acked_through_sequence']);
+        self::assertSame(1, $retry['data']['acked_event_count']);
+        self::assertSame(10, $retry['data']['acked_event_count_total']);
+    }
+
     private function registerNode(string $nodeId): void
     {
         $this->nodeService->register($this->key, [
