@@ -886,4 +886,122 @@ final class GlobalScriptSharingAndResolutionTest extends TestCase
         $resJson = $resolveResp->getData(true);
         self::assertSame('missing', $resJson['resolution']['source']);
     }
+
+    public function test_wordpress_login_global_eligibility_and_legacy_metadata(): void
+    {
+        $seed = $this->seedScenario();
+        $resolver = app(ScriptResolutionService::class);
+        $ctrl = new StaffScriptRegistryController(app(ScriptRegistryUiService::class), app(SocialAutomationAccess::class), $resolver);
+
+        // Add Ghost login path + tag to verify CMS isolation for login
+        $ghost = SaCmsType::query()->where('key', 'ghost')->firstOrFail();
+        $ghostLoginTpl = SaCmsPathTemplate::query()->create([
+            'cms_type_id' => $ghost->id,
+            'cms_type_key' => 'ghost',
+            'key' => 'login',
+            'name' => 'Login',
+            'url_pattern' => '/ghost/#/signin',
+            'is_authentication' => true,
+            'version' => 1,
+        ]);
+        $ghostSite = SaSite::query()->where('key', 'ghostblog')->firstOrFail();
+        app(CmsPathTemplateService::class)->syncSiteCmsPathsAndTags($ghostSite);
+
+        // 1. Legacy Login metadata: package.is_authentication=false & manifest omits is_authentication,
+        // while mayhopphat.login path has is_authentication=true and auth_script_id is pinned.
+        [$legacyLoginPkg] = $this->publishScript('mayhopphat.login', '1', 'mayhopphat.login', isAuth: false);
+        SaActionTag::query()->where('tag_key', 'mayhopphat.login')->update([
+            'auth_script_id' => $legacyLoginPkg->id,
+        ]);
+
+        // Remains site_specific by default until operator explicitly enables Global
+        self::assertSame(SaPackage::SHARING_SITE_SPECIFIC, $legacyLoginPkg->fresh()->sharing_mode);
+        $meta = $resolver->sharingMetadataForPackage($legacyLoginPkg);
+        self::assertTrue($meta['global_eligible']);
+        self::assertNull($meta['global_ineligible_reason']);
+        self::assertSame('wordpress:login', $meta['eligible_global_scope']['scope_key']);
+
+        // Before enabling Global, maytuicanvas.login is missing
+        $beforeEnable = $resolver->resolveForTagKey('maytuicanvas.login');
+        self::assertFalse($beforeEnable['resolved']);
+        self::assertSame(ScriptResolutionService::SOURCE_MISSING, $beforeEnable['source']);
+
+        // Enable Global for legacy WordPress Login script
+        $enableResp = $ctrl->updateSharing(
+            Request::create('/social-automation/api/script-registry/mayhopphat.login/sharing', 'PATCH', ['sharing_mode' => 'cms_global']),
+            'mayhopphat.login',
+        );
+        self::assertSame(200, $enableResp->getStatusCode());
+
+        // Resolves for other WordPress sites (maytuicanvas.login, congtybalo.login)
+        $resTuiLogin = $resolver->resolveForTagKey('maytuicanvas.login');
+        self::assertTrue($resTuiLogin['resolved']);
+        self::assertSame(ScriptResolutionService::SOURCE_CMS_GLOBAL, $resTuiLogin['source']);
+        self::assertSame('mayhopphat.login', $resTuiLogin['script']['package_key']);
+        self::assertSame('wordpress:login', $resTuiLogin['cms_scope']['scope_key']);
+
+        // Isolated from different CMS (ghostblog.login) and different Path (maytuicanvas.create_post)
+        $resGhostLogin = $resolver->resolveForTagKey('ghostblog.login');
+        self::assertFalse($resGhostLogin['resolved']);
+        self::assertSame(ScriptResolutionService::SOURCE_MISSING, $resGhostLogin['source']);
+
+        $resCreatePost = $resolver->resolveForTagKey('maytuicanvas.create_post');
+        self::assertFalse($resCreatePost['resolved']);
+        self::assertSame(ScriptResolutionService::SOURCE_MISSING, $resCreatePost['source']);
+
+        // Existing create_post Global still works independently alongside login Global
+        $enablePost = $ctrl->updateSharing(
+            Request::create('/social-automation/api/script-registry/mayhopphat.create_post/sharing', 'PATCH', ['sharing_mode' => 'cms_global']),
+            'mayhopphat.create_post',
+        );
+        self::assertSame(200, $enablePost->getStatusCode());
+        $resPostAfter = $resolver->resolveForTagKey('maytuicanvas.create_post');
+        self::assertTrue($resPostAfter['resolved']);
+        self::assertSame('mayhopphat.create_post', $resPostAfter['script']['package_key']);
+
+        // 2. Explicit non-auth Script (manifest.is_authentication = false) rejected for Auth Path (login)
+        $nonAuthManifest = [
+            'script_id' => 'congtybalo.login',
+            'action_tag_key' => 'congtybalo.login',
+            'is_authentication' => false,
+            'variables' => [],
+            'steps' => [],
+        ];
+        $nonAuthPkg = SaPackage::query()->create([
+            'package_key' => 'congtybalo.login',
+            'kind' => 'script',
+            'name' => 'congtybalo.login',
+            'is_enabled' => true,
+            'is_authentication' => false,
+            'sharing_mode' => SaPackage::SHARING_SITE_SPECIFIC,
+        ]);
+        $nonAuthRel = SaPackageRelease::query()->create([
+            'package_id' => $nonAuthPkg->id,
+            'version' => '1',
+            'content_digest' => PackageDigest::sha256OfCanonicalJson($nonAuthManifest),
+            'schema_version' => 1,
+            'manifest' => $nonAuthManifest,
+            'status' => 'published',
+            'published_at' => now(),
+        ]);
+        $baloLoginTag = SaActionTag::query()->where('tag_key', 'congtybalo.login')->firstOrFail();
+        SaActionTagScript::query()->create([
+            'action_tag_id' => $baloLoginTag->id,
+            'action_tag_key' => 'congtybalo.login',
+            'package_id' => $nonAuthPkg->id,
+            'release_id' => $nonAuthRel->id,
+            'script_id' => 'congtybalo.login',
+            'script_version' => '1',
+        ]);
+
+        $nonAuthMeta = $resolver->sharingMetadataForPackage($nonAuthPkg);
+        self::assertFalse($nonAuthMeta['global_eligible']);
+        self::assertSame('authentication_flag_mismatch', $nonAuthMeta['global_ineligible_reason']);
+
+        // 3. Explicit auth Script (is_authentication = true) on non-auth path (create_post) rejected
+        [$badAuthPkg] = $this->publishScript('congtybalo.create_post', '1', 'congtybalo.create_post', isAuth: true);
+        $badAuthMeta = $resolver->sharingMetadataForPackage($badAuthPkg);
+        self::assertFalse($badAuthMeta['global_eligible']);
+        self::assertSame('authentication_flag_mismatch', $badAuthMeta['global_ineligible_reason']);
+    }
 }

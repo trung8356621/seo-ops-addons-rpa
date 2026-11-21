@@ -89,7 +89,7 @@ final class ScriptResolutionService
         /** @var array{cms_type: string, cms_template_id: int, path_key: string, scope_key: string, is_authentication: bool} $resolved */
         $resolved = $scope['scope'];
 
-        if ((bool) ($package->is_authentication ?? false) !== $resolved['is_authentication']) {
+        if ($this->effectiveIsAuthentication($package, $latestPublished, $tag, $path) !== $resolved['is_authentication']) {
             return ['ok' => false, 'error' => 'authentication_flag_mismatch'];
         }
 
@@ -424,16 +424,19 @@ final class ScriptResolutionService
             return $this->missingResult($targetTagKey, true, 'global_script_disabled', $cmsScope);
         }
 
-        if ((bool) ($package->is_authentication ?? false) !== $scope['is_authentication']) {
-            return $this->missingResult($targetTagKey, true, 'script_compatibility_mismatch', $cmsScope);
-        }
-
         $release = $this->findPublishedRelease($package, $wantedVersion);
         if (! $release instanceof SaPackageRelease) {
             return $this->missingResult($targetTagKey, true, 'published_release_not_found', $cmsScope);
         }
 
         $sourceTag = $this->resolveSourceTagForPackage($package, $release);
+        $sourceSite = $sourceTag instanceof SaActionTag ? $this->resolveSiteForTag($sourceTag) : null;
+        $sourcePath = $sourceTag instanceof SaActionTag ? $this->resolvePathForTag($sourceTag, $sourceSite) : null;
+
+        if ($this->effectiveIsAuthentication($package, $release, $sourceTag, $sourcePath) !== $scope['is_authentication']) {
+            return $this->missingResult($targetTagKey, true, 'script_compatibility_mismatch', $cmsScope);
+        }
+
         $manifest = is_array($release->manifest) ? $release->manifest : [];
         $sourceTagKey = $sourceTag instanceof SaActionTag
             ? (string) $sourceTag->tag_key
@@ -608,6 +611,37 @@ final class ScriptResolutionService
         $siteKey = trim((string) ($tag->site_key ?: $tag->platform));
 
         return $siteKey !== '' ? SaSite::query()->where('key', $siteKey)->first() : null;
+    }
+
+    /**
+     * Resolve effective authentication flag for a Script package.
+     * Supports legacy auth scripts where sa_packages.is_authentication=0 and manifest omits is_authentication,
+     * when the source Path is an authentication path or the Action Tag pins auth_script_id to this package.
+     */
+    private function effectiveIsAuthentication(
+        SaPackage $package,
+        ?SaPackageRelease $release,
+        ?SaActionTag $sourceTag,
+        ?SaPath $sourcePath,
+    ): bool {
+        if ((bool) ($package->is_authentication ?? false)) {
+            return true;
+        }
+
+        $manifest = ($release instanceof SaPackageRelease && is_array($release->manifest)) ? $release->manifest : [];
+        if (array_key_exists('is_authentication', $manifest) && $manifest['is_authentication'] !== null) {
+            return (bool) $manifest['is_authentication'];
+        }
+
+        if ($sourcePath instanceof SaPath && (bool) ($sourcePath->is_authentication ?? false)) {
+            return true;
+        }
+
+        if ($sourceTag instanceof SaActionTag && (int) ($sourceTag->auth_script_id ?? 0) === (int) $package->id) {
+            return true;
+        }
+
+        return false;
     }
 
     private function resolvePathForTag(SaActionTag $tag, ?SaSite $site): ?SaPath
