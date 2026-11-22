@@ -176,7 +176,7 @@ final class CampaignV2UnconditionalStartAndSchedulerTest extends TestCase
         self::assertSame('waiting_resources', $contents[1]->status);
 
         // 8. Remains Running across multiple cycles with 0 resources
-        $cycle1 = $this->orchestrator->recheckDueCampaigns(now()->addSeconds(120));
+        $cycle1 = $this->orchestrator->recheckDueCampaigns(now()->addMinutes(61));
         self::assertSame(1, $cycle1['checked']);
         self::assertSame(0, $cycle1['dispatched']);
         self::assertSame('running', SaCampaign::query()->where('campaign_uuid', $uuid)->value('status'));
@@ -184,7 +184,7 @@ final class CampaignV2UnconditionalStartAndSchedulerTest extends TestCase
         // 3. Client for Site A added later -> next cycle dispatches Site A Article automatically without manual restart!
         $agentA = $this->seedOnlineClientForSite('site_a', 'acc_site_a');
 
-        $cycle2 = $this->orchestrator->recheckDueCampaigns(now()->addSeconds(240));
+        $cycle2 = $this->orchestrator->recheckDueCampaigns(now()->addMinutes(122));
         self::assertSame(1, $cycle2['checked']);
         self::assertSame(1, $cycle2['dispatched']);
         self::assertSame(1, SaJob::query()->count());
@@ -195,13 +195,13 @@ final class CampaignV2UnconditionalStartAndSchedulerTest extends TestCase
 
         // 4. Client for Site B added offline -> Site B Article remains waiting
         $agentB = $this->seedOnlineClientForSite('site_b', 'acc_site_b', online: false);
-        $cycle3 = $this->orchestrator->recheckDueCampaigns(now()->addSeconds(360));
+        $cycle3 = $this->orchestrator->recheckDueCampaigns(now()->addMinutes(183));
         self::assertSame(0, $cycle3['dispatched']);
         self::assertSame('waiting_resources', SaCampaignContent::query()->find($contents[1]->id)->status);
 
         // Bring Site B online -> next cycle dispatches Site B Article
         $agentB->update(['last_heartbeat_at' => now()]);
-        $cycle4 = $this->orchestrator->recheckDueCampaigns(now()->addSeconds(430));
+        $cycle4 = $this->orchestrator->recheckDueCampaigns(now()->addMinutes(244));
         self::assertSame(1, $cycle4['dispatched']);
         self::assertSame(2, SaJob::query()->count());
     }

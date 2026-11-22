@@ -442,6 +442,14 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                 Route::get('/api/browsers', [SocialAutomationBrowserInventoryController::class, 'index'])
                     ->name('social-automation.browsers.index');
 
+                // Global installation-level Social Automation settings
+                Route::prefix('api/settings')->group(function (): void {
+                    Route::get('/', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\StaffSettingsController::class, 'show'])
+                        ->name('social-automation.settings.show');
+                    Route::put('/', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\StaffSettingsController::class, 'update'])
+                        ->name('social-automation.settings.update');
+                });
+
                 // CP19A: Campaign CRUD + lifecycle (Owner/Admin session + CSRF)
                 Route::prefix('api/campaigns')->group(function (): void {
                     Route::get('/', [StaffCampaignController::class, 'index'])

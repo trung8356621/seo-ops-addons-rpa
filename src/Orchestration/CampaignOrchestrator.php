@@ -44,6 +44,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaJobEvent;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
 use Omnichannel\Addons\SocialAutomation\Models\SaSessionAccount;
 use Omnichannel\Addons\SocialAutomation\Services\ActionScriptDistributionService;
+use Omnichannel\Addons\SocialAutomation\Services\SocialAutomationSettingsService;
 use Omnichannel\Addons\SocialAutomation\Support\JobObservability;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationSchema;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
@@ -72,6 +73,7 @@ final class CampaignOrchestrator
         private readonly ActionScriptDistributionService $actionScripts = new ActionScriptDistributionService,
         private readonly CampaignShortcodePipeline $shortcodePipeline = new CampaignShortcodePipeline,
         private readonly CampaignScriptVariableSchema $variableSchema = new CampaignScriptVariableSchema,
+        private readonly SocialAutomationSettingsService $settings = new SocialAutomationSettingsService,
     ) {}
 
     /**
@@ -411,8 +413,9 @@ final class CampaignOrchestrator
                         CampaignContentStatus::WaitingResources->value,
                     ])->exists();
 
+                $intervalSeconds = $this->settings->getSchedulerIntervalSeconds((string) $locked->installation_id);
                 $locked->next_recheck_at = $waitingLeft
-                    ? $this->recheck->nextRecheckAt($cycleNow, (int) $locked->resource_recheck_seconds)
+                    ? $this->recheck->nextRecheckAt($cycleNow, $intervalSeconds)
                     : null;
                 $locked->save();
                 $this->maybeCompleteCampaign($locked);
@@ -1182,12 +1185,14 @@ final class CampaignOrchestrator
                     'verified' => (bool) $account->verified,
                     'identity_source' => $account->identity_source,
                 ],
-                'capabilities' => is_array($session->capabilities) ? $session->capabilities : [],
+                'capabilities' => (is_array($session->capabilities) && $session->capabilities !== [])
+                    ? $session->capabilities
+                    : $agent['capabilities'],
                 'account_id' => $accountId,
             ];
         }
 
-        $result = $this->eligibility->select($agents, $sessions, [
+        $criteria = [
             'platform' => $planTag instanceof SaCampaignActionTag
                 ? trim((string) ($planTag->platform ?: $planTag->site_key))
                 : $campaign->platform,
@@ -1195,11 +1200,61 @@ final class CampaignOrchestrator
             // Hard pin already enforces exact account_id + installation + platform + bind.
             // Inventory/site accounts often lack social platform_account_id.
             'require_strong_identity' => $requiredAccountId === null && $planTag === null,
-        ]);
+        ];
+        if ($planTag instanceof SaCampaignActionTag) {
+            $compat = $this->resolveV2RuntimeCompatibility($planTag);
+            if ($compat['runtime_min'] !== null) {
+                $criteria['runtime_min'] = $compat['runtime_min'];
+            }
+            if ($compat['required_capabilities'] !== []) {
+                $criteria['required_capabilities'] = $compat['required_capabilities'];
+            }
+            $criteria['strict_runtime_check'] = true;
+        }
+
+        $result = $this->eligibility->select($agents, $sessions, $criteria);
 
         return [
             'selected' => $result['selected'],
             'skip_reasons' => $result['skip_reasons'],
+        ];
+    }
+
+    /**
+     * Extract documented runtime_compatibility fields from the pinned Script Release.
+     *
+     * @return array{runtime_min: string|null, required_capabilities: list<string>}
+     */
+    private function resolveV2RuntimeCompatibility(SaCampaignActionTag $planTag): array
+    {
+        $compat = [];
+        if ($planTag->release_id > 0) {
+            $rel = SaPackageRelease::query()->find((int) $planTag->release_id);
+            if ($rel instanceof SaPackageRelease && is_array($rel->runtime_compatibility)) {
+                $compat = $rel->runtime_compatibility;
+            }
+        }
+        if ($compat === [] && is_array($planTag->manifest_snapshot['runtime_compatibility'] ?? null)) {
+            $compat = $planTag->manifest_snapshot['runtime_compatibility'];
+        }
+
+        $runtimeMinRaw = $compat['runtime_min'] ?? $compat['min_runtime_version'] ?? null;
+        $runtimeMin = is_string($runtimeMinRaw) && trim($runtimeMinRaw) !== '' ? trim($runtimeMinRaw) : null;
+
+        $capsRaw = $compat['required_capabilities'] ?? [];
+        $requiredCaps = [];
+        if (is_array($capsRaw)) {
+            foreach ($capsRaw as $cap) {
+                $c = trim((string) $cap);
+                if ($c !== '') {
+                    $requiredCaps[] = $c;
+                }
+            }
+        }
+
+        return [
+            'runtime_min' => $runtimeMin,
+            'required_capabilities' => array_values(array_unique($requiredCaps)),
         ];
     }
 

@@ -36,6 +36,7 @@ use Omnichannel\Addons\SocialAutomation\Enums\SessionReadyStatus;
  *     domain?: string|null,
  *     required_capabilities?: list<string>,
  *     runtime_min?: string|null,
+ *     strict_runtime_check?: bool,
  *     target_count: int,
  *     require_strong_identity?: bool
  * }
@@ -142,9 +143,15 @@ final class EligibilitySelector
 
             $runtimeMin = trim((string) ($criteria['runtime_min'] ?? ''));
             $runtimeHave = trim((string) ($agent['runtime_version'] ?? ''));
-            if ($runtimeMin !== '' && $runtimeHave !== '' && version_compare($runtimeHave, $runtimeMin, '<')) {
-                $skipReasons[] = 'runtime_incompatible';
-                continue;
+            if ($runtimeMin !== '') {
+                if ($runtimeHave === '' && ($criteria['strict_runtime_check'] ?? false) === true) {
+                    $skipReasons[] = 'runtime_version_missing';
+                    continue;
+                }
+                if ($runtimeHave !== '' && version_compare($runtimeHave, $runtimeMin, '<')) {
+                    $skipReasons[] = 'runtime_incompatible';
+                    continue;
+                }
             }
 
             $eligible[] = $session;
