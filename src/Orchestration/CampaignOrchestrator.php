@@ -43,6 +43,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaJobAttempt;
 use Omnichannel\Addons\SocialAutomation\Models\SaJobEvent;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
 use Omnichannel\Addons\SocialAutomation\Models\SaSessionAccount;
+use Omnichannel\Addons\SocialAutomation\Services\ActionEntryUrlResolver;
 use Omnichannel\Addons\SocialAutomation\Services\ActionScriptDistributionService;
 use Omnichannel\Addons\SocialAutomation\Services\SocialAutomationSettingsService;
 use Omnichannel\Addons\SocialAutomation\Support\JobObservability;
@@ -74,6 +75,7 @@ final class CampaignOrchestrator
         private readonly CampaignShortcodePipeline $shortcodePipeline = new CampaignShortcodePipeline,
         private readonly CampaignScriptVariableSchema $variableSchema = new CampaignScriptVariableSchema,
         private readonly SocialAutomationSettingsService $settings = new SocialAutomationSettingsService,
+        private readonly ActionEntryUrlResolver $actionEntryUrls = new ActionEntryUrlResolver,
     ) {}
 
     /**
@@ -1861,6 +1863,8 @@ final class CampaignOrchestrator
         $contentDigest = $scriptPin['content_digest'] ?? ($job->content_digest !== null ? (string) $job->content_digest : null);
         $executionDigest = $scriptPin['execution_digest'] ?? null;
 
+        $executionContext = $this->actionEntryUrls->resolveForJob($job, $account, $campaign);
+
         $out = [
             'job_id' => $job->job_uuid,
             'attempt_id' => $attempt?->attempt_uuid,
@@ -1881,6 +1885,7 @@ final class CampaignOrchestrator
             'run_mode' => $runMode,
             'execution_mode' => (string) ($payload['execution_mode'] ?? $campaign?->execution_mode),
             'input' => $input,
+            'execution_context' => $executionContext,
             'lease_token' => $job->lease_token ?? $attempt?->lease_token,
             'lease_expires_at' => ($job->lease_expires_at ?? $attempt?->lease_expires_at)?->toIso8601String(),
         ];

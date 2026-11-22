@@ -23,6 +23,7 @@ final class ActionScriptDistributionService
     public function __construct(
         private readonly ScriptReleaseAssetReader $assets = new ScriptReleaseAssetReader,
         private readonly AttemptFencePolicy $fence = new AttemptFencePolicy,
+        private readonly ActionEntryUrlResolver $entryUrls = new ActionEntryUrlResolver,
     ) {}
 
     /**
@@ -60,10 +61,16 @@ final class ActionScriptDistributionService
         $package = $authz['package'];
         /** @var SaPackageRelease $release */
         $release = $authz['release'];
+        /** @var SaJob $job */
+        $job = $authz['job'];
+        $account = $job->account_id ? SaAccount::query()->find((int) $job->account_id) : null;
+
+        $releasePayload = $this->clientReleasePayload($package, $release, includeManifest: true);
+        $releasePayload['execution_context'] = $this->entryUrls->resolveForJob($job, $account);
 
         return [
             'ok' => true,
-            'release' => $this->clientReleasePayload($package, $release, includeManifest: true),
+            'release' => $releasePayload,
         ];
     }
 
