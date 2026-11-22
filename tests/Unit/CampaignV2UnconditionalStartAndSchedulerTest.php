@@ -281,6 +281,74 @@ final class CampaignV2UnconditionalStartAndSchedulerTest extends TestCase
         self::assertSame(0, SaJob::query()->count());
     }
 
+    public function test_10_claim_payload_preserves_v2_identity_and_unknown_result_blocks_repost(): void
+    {
+        $this->seedSiteFixtures();
+        $agent = $this->seedOnlineClientForSite('site_a', 'acc_site_a');
+        $session = SaBrowserSession::query()->where('agent_id', $agent->id)->firstOrFail();
+
+        $uuid = $this->createV2Draft('Claim & Unknown Audit', [
+            ['external_ref' => 'art-claim-1', 'raw_source' => '[t]Audit Title[/t]', 'assignments' => [['action_tag_key' => 'site_a.post']]],
+        ], 60);
+
+        $startResp = $this->controller->start($uuid);
+        self::assertSame(200, $startResp->getStatusCode());
+
+        // Client claims the reserved V2 job
+        $claim = $this->orchestrator->claimNext(
+            (string) $agent->agent_uuid,
+            [(string) $session->session_uuid],
+            null,
+            'inst-v2-exec-test',
+        );
+        self::assertTrue($claim['ok']);
+        $payload = $claim['data'];
+        self::assertIsArray($payload);
+        self::assertSame(2, $payload['plan_version']);
+        self::assertSame('site_a', $payload['site_key']);
+        self::assertSame('site_a.post', $payload['action_tag_key']);
+        self::assertNotEmpty($payload['plan_tag_id']);
+        self::assertSame('site_a.post', $payload['script_id']);
+        self::assertSame('1.0.0', $payload['version']);
+        self::assertIsInt($payload['release_id']);
+        self::assertSame(['title' => 'Audit Title'], $payload['input']);
+        self::assertNotEmpty($payload['lease_token']);
+
+        // Client acknowledges (Claimed -> Running)
+        $ack = $this->orchestrator->acknowledge(
+            (string) $payload['job_id'],
+            [
+                'attempt_id' => $payload['attempt_id'],
+                'lease_token' => $payload['lease_token'],
+            ],
+            null,
+            'inst-v2-exec-test',
+        );
+        self::assertTrue($ack['ok']);
+
+        // Client reports 'unknown' result -> Content & Assignment become unknown, never auto-reposted
+        $res = $this->orchestrator->result(
+            (string) $payload['job_id'],
+            [
+                'status' => 'unknown',
+                'attempt_id' => $payload['attempt_id'],
+                'lease_token' => $payload['lease_token'],
+                'error_code' => 'network_timeout',
+            ],
+            null,
+            'inst-v2-exec-test',
+        );
+        self::assertTrue($res['ok'], (string) json_encode($res));
+        self::assertSame('unknown', SaCampaignContent::query()->first()->status);
+        // Campaign stays Running (not Completed) because unknown is not terminal
+        self::assertSame('running', SaCampaign::query()->where('campaign_uuid', $uuid)->value('status'));
+
+        // Next scheduler cycle must NOT re-dispatch the unknown content
+        $cycle = $this->orchestrator->recheckDueCampaigns(now()->addMinutes(5));
+        self::assertSame(0, $cycle['dispatched']);
+        self::assertSame(1, SaJob::query()->count());
+    }
+
     /**
      * @param  list<array<string, mixed>>  $contents
      */
@@ -534,8 +602,14 @@ final class CampaignV2UnconditionalStartAndSchedulerTest extends TestCase
             $table->string('status', 32)->default('reserved');
             $table->string('idempotency_key', 191)->unique();
             $table->json('payload')->nullable();
+            $table->json('result')->nullable();
             $table->timestamp('reserved_at')->nullable();
+            $table->timestamp('claimed_at')->nullable();
+            $table->timestamp('started_at')->nullable();
+            $table->timestamp('finished_at')->nullable();
             $table->timestamp('lease_expires_at')->nullable();
+            $table->string('error_code', 64)->nullable();
+            $table->text('error_message')->nullable();
             $table->string('dispatch_source', 32)->nullable();
             $table->timestamps();
         });
@@ -548,6 +622,7 @@ final class CampaignV2UnconditionalStartAndSchedulerTest extends TestCase
             $table->string('status', 32)->default('queued');
             $table->string('error_code', 64)->nullable();
             $table->json('result')->nullable();
+            $table->timestamp('started_at')->nullable();
             $table->timestamp('finished_at')->nullable();
             $table->timestamps();
         });
@@ -555,10 +630,12 @@ final class CampaignV2UnconditionalStartAndSchedulerTest extends TestCase
         $schema->create('sa_job_events', function (Blueprint $table): void {
             $table->id();
             $table->unsignedBigInteger('job_id');
+            $table->unsignedBigInteger('attempt_id')->nullable();
             $table->string('event_type', 64);
             $table->string('from_status', 32)->nullable();
             $table->string('to_status', 32)->nullable();
             $table->json('payload')->nullable();
+            $table->json('result')->nullable();
             $table->timestamp('occurred_at')->nullable();
             $table->timestamps();
         });

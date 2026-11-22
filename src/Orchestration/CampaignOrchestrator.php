@@ -946,6 +946,11 @@ final class CampaignOrchestrator
                             $content->current_job_id = null;
                             // Mode A assignment stays — account was reserved for this content.
                             $content->save();
+                            if (SocialAutomationSchema::campaignV2Ready()) {
+                                SaCampaignContentAssignment::query()
+                                    ->where('campaign_content_id', $content->id)
+                                    ->update(['status' => CampaignContentStatus::WaitingResources->value]);
+                            }
                         }
                         $count++;
 
@@ -973,6 +978,11 @@ final class CampaignOrchestrator
                         $content->last_error_code = 'lease_expired';
                         $content->last_error_message = 'Agent lease expired during execution; outcome unknown';
                         $content->save();
+                        if (SocialAutomationSchema::campaignV2Ready()) {
+                            SaCampaignContentAssignment::query()
+                                ->where('campaign_content_id', $content->id)
+                                ->update(['status' => CampaignContentStatus::Unknown->value]);
+                        }
                     }
                     // Do NOT release account lease for unknown — prevents concurrent re-execution.
                     $count++;
@@ -1746,7 +1756,7 @@ final class CampaignOrchestrator
         $contentDigest = $scriptPin['content_digest'] ?? ($job->content_digest !== null ? (string) $job->content_digest : null);
         $executionDigest = $scriptPin['execution_digest'] ?? null;
 
-        return [
+        $out = [
             'job_id' => $job->job_uuid,
             'attempt_id' => $attempt?->attempt_uuid,
             'campaign_id' => $campaign?->campaign_uuid,
@@ -1759,7 +1769,7 @@ final class CampaignOrchestrator
             // Exact Action Script pin for pull/asset (no latest inference).
             'package_key' => $packageKey,
             'package_id' => $scriptPin['package_id'] ?? null,
-            'release_id' => $scriptPin['release_id'] ?? null,
+            'release_id' => $scriptPin['release_id'] ?? ($payload['release_id'] ?? null),
             'version' => $version,
             'content_digest' => $contentDigest,
             'execution_digest' => $executionDigest,
@@ -1769,6 +1779,15 @@ final class CampaignOrchestrator
             'lease_token' => $job->lease_token ?? $attempt?->lease_token,
             'lease_expires_at' => ($job->lease_expires_at ?? $attempt?->lease_expires_at)?->toIso8601String(),
         ];
+
+        if (($payload['plan_version'] ?? null) === 2 || ($campaign !== null && (int) ($campaign->plan_version ?? 1) >= 2)) {
+            $out['plan_version'] = 2;
+            $out['plan_tag_id'] = $payload['plan_tag_id'] ?? null;
+            $out['action_tag_key'] = $payload['action_tag_key'] ?? null;
+            $out['site_key'] = $payload['site_key'] ?? null;
+        }
+
+        return $out;
     }
 
     /**
