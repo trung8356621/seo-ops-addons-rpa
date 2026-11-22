@@ -28,7 +28,17 @@ final class CampaignV2ExecutionPolicy
         }
 
         if (function_exists('app') && app()->bound('config')) {
-            return (bool) config(self::CONFIG_KEY, false);
+            $configured = config(self::CONFIG_KEY);
+            if ($configured !== null) {
+                return (bool) $configured;
+            }
+        }
+
+        if (function_exists('env')) {
+            $laravelEnv = env(self::ENV_KEY);
+            if ($laravelEnv !== null) {
+                return filter_var($laravelEnv, FILTER_VALIDATE_BOOLEAN);
+            }
         }
 
         $env = getenv(self::ENV_KEY);
