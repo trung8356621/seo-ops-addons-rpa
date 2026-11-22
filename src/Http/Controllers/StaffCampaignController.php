@@ -75,6 +75,18 @@ final class StaffCampaignController extends Controller
         $this->access->assertCanManageCampaigns();
         $result = $this->campaigns->update($id, $this->installation->resolveInstallationId(), $request->all());
         if (! ($result['ok'] ?? false)) {
+            if (isset($result['field_errors'])) {
+                $code = in_array('campaign_not_found', $result['errors'] ?? [], true)
+                    ? 404
+                    : (int) ($result['http'] ?? 422);
+
+                return response()->json([
+                    'ok' => false,
+                    'message' => $result['message'] ?? 'Validation failed.',
+                    'errors' => $result['field_errors'],
+                    'error_codes' => $result['errors'] ?? ['update_failed'],
+                ], $code);
+            }
             $code = in_array('campaign_not_found', $result['errors'] ?? [], true) ? 404 : 422;
 
             return response()->json(['ok' => false, 'errors' => $result['errors'] ?? ['update_failed']], $code);

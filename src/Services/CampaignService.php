@@ -256,7 +256,7 @@ final class CampaignService
 
     /**
      * @param  array<string, mixed>  $input
-     * @return array{ok: bool, data?: array<string, mixed>, errors?: list<string>}
+     * @return array{ok: bool, http?: int, data?: array<string, mixed>, errors?: list<string>, field_errors?: array<string, list<string>>, message?: string}
      */
     public function update(string $campaignUuid, string $installationId, array $input): array
     {
@@ -265,7 +265,16 @@ final class CampaignService
             return ['ok' => false, 'errors' => ['campaign_not_found']];
         }
         if ((int) ($campaign->plan_version ?? 1) >= 2) {
-            return ['ok' => false, 'errors' => ['v2_campaign_update_unsupported']];
+            return $this->v2Plan->updateDraft($campaign, $input);
+        }
+        if ((int) ($input['plan_version'] ?? 1) === 2 || array_key_exists('action_tags', $input)) {
+            return [
+                'ok' => false,
+                'http' => 422,
+                'errors' => ['plan_version_immutable'],
+                'field_errors' => ['plan_version' => ['Legacy V1 campaign cannot be converted to V2 via PUT.']],
+                'message' => 'Legacy V1 campaign cannot be converted to V2 via PUT.',
+            ];
         }
         if ((string) $campaign->status !== CampaignStatus::Draft->value) {
             // After start: only name is mutable; execution_mode/script/mapping immutable.
