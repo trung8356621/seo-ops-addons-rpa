@@ -14,6 +14,7 @@ use Omnichannel\Addons\SocialAutomation\Domain\CampaignShortcodeMappingValidator
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignShortcodeMockGenerator;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignShortcodePipeline;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignTestScriptPolicy;
+use Omnichannel\Addons\SocialAutomation\Domain\CampaignV2ExecutionPolicy;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignContentStatus;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignExecutionMode;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignRunMode;
@@ -22,7 +23,9 @@ use Omnichannel\Addons\SocialAutomation\Models\SaAccount;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTag;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTagScript;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaign;
+use Omnichannel\Addons\SocialAutomation\Models\SaCampaignActionTag;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaignContent;
+use Omnichannel\Addons\SocialAutomation\Models\SaCampaignContentAssignment;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackage;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
 use Omnichannel\Addons\SocialAutomation\Orchestration\CampaignOrchestrator;
@@ -351,7 +354,8 @@ final class CampaignService
         if ($campaign === null) {
             return ['ok' => false, 'errors' => ['campaign_not_found']];
         }
-        if ((int) ($campaign->plan_version ?? 1) >= 2) {
+        $isV2 = (int) ($campaign->plan_version ?? 1) >= 2;
+        if ($isV2 && ! CampaignV2ExecutionPolicy::isEnabled()) {
             return ['ok' => false, 'errors' => ['v2_campaign_execution_unsupported']];
         }
         $status = CampaignStatus::tryFrom((string) $campaign->status);
@@ -363,7 +367,9 @@ final class CampaignService
             return ['ok' => false, 'errors' => ['invalid_campaign_status']];
         }
 
-        $gate = $this->assertActionableContents($campaign);
+        $gate = $isV2
+            ? $this->assertActionableV2Contents($campaign)
+            : $this->assertActionableContents($campaign);
         if (! ($gate['ok'] ?? false)) {
             return ['ok' => false, 'errors' => $gate['errors'] ?? ['no_actionable_content']];
         }
@@ -408,7 +414,7 @@ final class CampaignService
         if ($campaign === null) {
             return ['ok' => false, 'errors' => ['campaign_not_found']];
         }
-        if ((int) ($campaign->plan_version ?? 1) >= 2) {
+        if ((int) ($campaign->plan_version ?? 1) >= 2 && ! CampaignV2ExecutionPolicy::isEnabled()) {
             return ['ok' => false, 'errors' => ['v2_campaign_execution_unsupported']];
         }
         if ((string) $campaign->status !== CampaignStatus::Paused->value) {
@@ -1065,6 +1071,89 @@ final class CampaignService
                     return ['ok' => false, 'errors' => $validated['errors'] ?? ['content_input_invalid']];
                 }
             }
+            $actionable++;
+        }
+
+        if ($actionable < 1) {
+            return ['ok' => false, 'errors' => ['no_actionable_content']];
+        }
+
+        return ['ok' => true];
+    }
+
+    /**
+     * Validate V2 Campaign plan & article assignments before unconditional Start.
+     * Does NOT check Client/Account/Browser availability.
+     *
+     * @return array{ok: bool, errors?: list<string>}
+     */
+    private function assertActionableV2Contents(SaCampaign $campaign): array
+    {
+        if (! SocialAutomationSchema::campaignV2Ready()) {
+            return ['ok' => false, 'errors' => ['schema_unavailable']];
+        }
+
+        $planTags = SaCampaignActionTag::query()
+            ->where('campaign_id', $campaign->id)
+            ->get()
+            ->keyBy('id');
+        if ($planTags->isEmpty()) {
+            return ['ok' => false, 'errors' => ['action_tags_required']];
+        }
+
+        $contents = SaCampaignContent::query()
+            ->where('campaign_id', $campaign->id)
+            ->orderBy('sort_order')
+            ->orderBy('id')
+            ->get();
+        if ($contents->isEmpty()) {
+            return ['ok' => false, 'errors' => ['no_actionable_content']];
+        }
+
+        $actionable = 0;
+        foreach ($contents as $content) {
+            $st = CampaignContentStatus::tryFrom((string) $content->status);
+            if ($st === null || ! $st->isDispatchable()) {
+                continue;
+            }
+
+            $assignments = SaCampaignContentAssignment::query()
+                ->where('campaign_content_id', $content->id)
+                ->get();
+            if ($assignments->isEmpty()) {
+                return ['ok' => false, 'errors' => ['content_assignment_required']];
+            }
+            if ($assignments->count() > 1) {
+                return ['ok' => false, 'errors' => ['v2_multi_tag_content_unsupported']];
+            }
+
+            /** @var SaCampaignContentAssignment $assignment */
+            $assignment = $assignments->first();
+            /** @var SaCampaignActionTag|null $planTag */
+            $planTag = $planTags->get($assignment->campaign_action_tag_id);
+            if (! $planTag instanceof SaCampaignActionTag || ! $planTag->is_enabled) {
+                return ['ok' => false, 'errors' => ['action_tag_disabled']];
+            }
+
+            $manifest = is_array($planTag->manifest_snapshot) ? $planTag->manifest_snapshot : null;
+            if ($manifest === null) {
+                $rel = SaPackageRelease::query()->find((int) $planTag->release_id);
+                $manifest = ($rel instanceof SaPackageRelease && is_array($rel->manifest)) ? $rel->manifest : [];
+            }
+
+            $schema = $this->variableSchema->fromManifest($manifest);
+            if (! ($schema['ok'] ?? false)) {
+                return ['ok' => false, 'errors' => $schema['errors'] ?? ['script_variables_invalid']];
+            }
+            $variables = $schema['variables'] ?? [];
+            $input = is_array($assignment->input) ? $assignment->input : [];
+            if ($variables !== []) {
+                $validated = $this->shortcodePipeline->validateStoredInput($input, $variables);
+                if (! ($validated['ok'] ?? false)) {
+                    return ['ok' => false, 'errors' => $validated['errors'] ?? ['content_input_invalid']];
+                }
+            }
+
             $actionable++;
         }
 
