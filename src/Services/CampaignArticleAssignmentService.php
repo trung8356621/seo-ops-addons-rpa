@@ -15,6 +15,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaCampaignActionTag;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaignContent;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaignContentAssignment;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
+use Omnichannel\Addons\SocialAutomation\Models\SaScriptVariantGroup;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationSchema;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
 
@@ -358,6 +359,38 @@ final class CampaignArticleAssignmentService
                 $planTag->script_content_digest = $planTag->script_content_digest ?? $rel->content_digest;
                 $planTag->script_execution_digest = $planTag->script_execution_digest ?? $rel->execution_digest;
                 $planTag->save();
+            }
+            if (SocialAutomationSchema::scriptVariantGroupsReady()
+                && $planTag->variant_group_id !== null
+                && ! is_array($planTag->pinned_variants)) {
+                $vg = SaScriptVariantGroup::query()->with(['items.package', 'items.release'])->find((int) $planTag->variant_group_id);
+                if ($vg instanceof SaScriptVariantGroup && $vg->is_enabled) {
+                    $pinned = [];
+                    foreach ($vg->items->sortBy('priority') as $item) {
+                        if (! $item->is_enabled || ! $item->package || ! $item->release) {
+                            continue;
+                        }
+                        if ((string) $item->release->status !== 'published') {
+                            continue;
+                        }
+                        $pinned[] = [
+                            'variant_id' => (string) $item->variant_uuid,
+                            'priority' => (int) $item->priority,
+                            'language_label' => (string) $item->language_label,
+                            'package_id' => (int) $item->package_id,
+                            'package_key' => (string) $item->package_key,
+                            'release_id' => (int) $item->release_id,
+                            'script_version' => (string) $item->script_version,
+                            'content_digest' => $item->content_digest,
+                            'execution_digest' => $item->execution_digest,
+                        ];
+                    }
+                    if ($pinned !== []) {
+                        $planTag->variant_group_uuid = $planTag->variant_group_uuid ?? (string) $vg->group_uuid;
+                        $planTag->pinned_variants = $pinned;
+                        $planTag->save();
+                    }
+                }
             }
         }
 

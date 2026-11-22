@@ -67,6 +67,13 @@ final class ActionScriptDistributionService
 
         $releasePayload = $this->clientReleasePayload($package, $release, includeManifest: true);
         $releasePayload['execution_context'] = $this->entryUrls->resolveForJob($job, $account);
+        if (isset($authz['variant_context']) && is_array($authz['variant_context'])) {
+            $releasePayload['variant_context'] = $authz['variant_context'];
+        }
+        $jobPayload = is_array($job->payload) ? $job->payload : [];
+        if (isset($jobPayload['fallback_policy']) && is_array($jobPayload['fallback_policy'])) {
+            $releasePayload['fallback_policy'] = $jobPayload['fallback_policy'];
+        }
 
         return [
             'ok' => true,
@@ -269,9 +276,26 @@ final class ActionScriptDistributionService
         if ($pin === null) {
             return ['ok' => false, 'errors' => ['job_script_pin_missing'], 'http' => 422];
         }
-        if ((string) $pin['package_key'] !== $packageKey
-            || (string) $pin['version'] !== $version
-            || (int) $pin['release_id'] !== $releaseId) {
+
+        $matchedPrimary = (string) $pin['package_key'] === $packageKey
+            && (string) $pin['version'] === $version
+            && (int) $pin['release_id'] === $releaseId;
+
+        $matchedVariant = null;
+        $variants = is_array($payload['script_variants'] ?? null) ? $payload['script_variants'] : [];
+        foreach ($variants as $v) {
+            if (! is_array($v)) {
+                continue;
+            }
+            if ((string) ($v['package_key'] ?? '') === $packageKey
+                && (string) ($v['script_version'] ?? '') === $version
+                && (int) ($v['release_id'] ?? 0) === $releaseId) {
+                $matchedVariant = $v;
+                break;
+            }
+        }
+
+        if (! $matchedPrimary && $matchedVariant === null) {
             return ['ok' => false, 'errors' => ['release_not_pinned_to_job'], 'http' => 403];
         }
 
@@ -289,8 +313,11 @@ final class ActionScriptDistributionService
         if ((string) $release->status !== 'published') {
             return ['ok' => false, 'errors' => ['release_unpublished'], 'http' => 403];
         }
-        if ($pin['content_digest'] !== null && $release->content_digest !== null
-            && ! PackageDigest::equals((string) $pin['content_digest'], (string) $release->content_digest)) {
+        $expectedDigest = (! $matchedPrimary && $matchedVariant !== null)
+            ? ($matchedVariant['content_digest'] ?? null)
+            : $pin['content_digest'];
+        if ($expectedDigest !== null && $release->content_digest !== null
+            && ! PackageDigest::equals((string) $expectedDigest, (string) $release->content_digest)) {
             return ['ok' => false, 'errors' => ['content_digest_mismatch'], 'http' => 403];
         }
 
@@ -300,6 +327,7 @@ final class ActionScriptDistributionService
             'attempt' => $attempt,
             'package' => $package,
             'release' => $release,
+            'variant_context' => $matchedVariant,
         ];
     }
 

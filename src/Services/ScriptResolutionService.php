@@ -13,7 +13,10 @@ use Omnichannel\Addons\SocialAutomation\Models\SaCmsType;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackage;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
 use Omnichannel\Addons\SocialAutomation\Models\SaPath;
+use Omnichannel\Addons\SocialAutomation\Models\SaScriptVariantGroup;
+use Omnichannel\Addons\SocialAutomation\Models\SaScriptVariantGroupItem;
 use Omnichannel\Addons\SocialAutomation\Models\SaSite;
+use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationSchema;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationServiceConfig;
 
 /**
@@ -166,13 +169,49 @@ final class ScriptResolutionService
                 return ['ok' => false, 'http' => 404, 'error' => 'not_found'];
             }
 
-            $conflict = SaPackage::query()
+            $owningGroup = SocialAutomationSchema::scriptVariantGroupsReady()
+                ? SaScriptVariantGroup::query()
+                    ->where('scope_type', SaScriptVariantGroup::SCOPE_CMS_GLOBAL)
+                    ->where('global_scope_key', $scope['scope_key'])
+                    ->where('is_enabled', true)
+                    ->first()
+                : null;
+
+            $allowedGroupPackageIds = [];
+            if ($owningGroup instanceof SaScriptVariantGroup) {
+                $allowedGroupPackageIds = SaScriptVariantGroupItem::query()
+                    ->where('group_id', $owningGroup->id)
+                    ->pluck('package_id')
+                    ->map(static fn ($id): int => (int) $id)
+                    ->all();
+
+                if (! in_array((int) $locked->id, $allowedGroupPackageIds, true)) {
+                    $conflictPkg = SaPackage::query()
+                        ->whereIn('id', $allowedGroupPackageIds)
+                        ->first();
+
+                    return [
+                        'ok' => false,
+                        'http' => 409,
+                        'error' => 'global_scope_conflict',
+                        'conflict' => [
+                            'package_key' => (string) ($conflictPkg?->package_key ?? $owningGroup->group_uuid),
+                            'script_id' => (string) ($conflictPkg?->package_key ?? $owningGroup->group_uuid),
+                            'name' => (string) ($conflictPkg?->name ?? $owningGroup->name),
+                        ],
+                    ];
+                }
+            }
+
+            $conflictQuery = SaPackage::query()
                 ->where('kind', 'script')
                 ->where('sharing_mode', SaPackage::SHARING_CMS_GLOBAL)
                 ->where('global_scope_key', $scope['scope_key'])
-                ->where('id', '!=', $locked->id)
-                ->lockForUpdate()
-                ->first();
+                ->where('id', '!=', $locked->id);
+            if ($allowedGroupPackageIds !== []) {
+                $conflictQuery->whereNotIn('id', $allowedGroupPackageIds);
+            }
+            $conflict = $conflictQuery->lockForUpdate()->first();
 
             if ($conflict instanceof SaPackage) {
                 return [
@@ -238,17 +277,38 @@ final class ScriptResolutionService
 
         $conflict = null;
         if ($this->sharingSchemaReady() && $eligibleScope !== null) {
-            $other = SaPackage::query()
+            $owningGroup = SocialAutomationSchema::scriptVariantGroupsReady()
+                ? SaScriptVariantGroup::query()
+                    ->where('scope_type', SaScriptVariantGroup::SCOPE_CMS_GLOBAL)
+                    ->where('global_scope_key', $eligibleScope['scope_key'])
+                    ->where('is_enabled', true)
+                    ->first()
+                : null;
+            $groupPkgIds = $owningGroup instanceof SaScriptVariantGroup
+                ? SaScriptVariantGroupItem::query()->where('group_id', $owningGroup->id)->pluck('package_id')->map(static fn ($id): int => (int) $id)->all()
+                : [];
+            $isInOwningGroup = $owningGroup instanceof SaScriptVariantGroup && in_array((int) $package->id, $groupPkgIds, true);
+
+            $otherQuery = SaPackage::query()
                 ->where('kind', 'script')
                 ->where('sharing_mode', SaPackage::SHARING_CMS_GLOBAL)
                 ->where('global_scope_key', $eligibleScope['scope_key'])
-                ->where('id', '!=', $package->id)
-                ->first();
+                ->where('id', '!=', $package->id);
+            if ($isInOwningGroup) {
+                $otherQuery->whereNotIn('id', $groupPkgIds);
+            }
+            $other = $otherQuery->first();
             if ($other instanceof SaPackage) {
                 $conflict = [
                     'package_key' => (string) $other->package_key,
                     'script_id' => (string) $other->package_key,
                     'name' => (string) $other->name,
+                ];
+            } elseif ($owningGroup instanceof SaScriptVariantGroup && ! $isInOwningGroup) {
+                $conflict = [
+                    'package_key' => (string) $owningGroup->group_uuid,
+                    'script_id' => (string) $owningGroup->group_uuid,
+                    'name' => (string) $owningGroup->name,
                 ];
             }
         }
@@ -343,7 +403,7 @@ final class ScriptResolutionService
                 'scope_key' => $scope['scope']['scope_key'],
             ] : null;
 
-            return $this->foundResult(
+            $res = $this->foundResult(
                 self::SOURCE_SITE_SPECIFIC,
                 $tagKey,
                 $tagKey,
@@ -353,6 +413,46 @@ final class ScriptResolutionService
                 $site,
                 $path,
             );
+            if (SocialAutomationSchema::scriptVariantGroupsReady()) {
+                $siteGroup = SaScriptVariantGroup::query()
+                    ->with(['items.package', 'items.release'])
+                    ->where('scope_type', SaScriptVariantGroup::SCOPE_SITE_ACTION)
+                    ->where('action_tag_key', strtolower($tagKey))
+                    ->where('is_enabled', true)
+                    ->first();
+                if ($siteGroup instanceof SaScriptVariantGroup) {
+                    $enabledVariants = [];
+                    foreach ($siteGroup->items->sortBy('priority') as $item) {
+                        if (! $item->is_enabled || ! $item->package instanceof SaPackage || ! ($item->package->is_enabled ?? true)) {
+                            continue;
+                        }
+                        if (! $item->release instanceof SaPackageRelease || (string) $item->release->status !== 'published') {
+                            continue;
+                        }
+                        $enabledVariants[] = [
+                            'variant_id' => (string) $item->variant_uuid,
+                            'priority' => (int) $item->priority,
+                            'language_label' => (string) $item->language_label,
+                            'package_id' => (int) $item->package->id,
+                            'package_key' => (string) $item->package->package_key,
+                            'release_id' => (int) $item->release->id,
+                            'script_version' => (string) $item->release->version,
+                            'content_digest' => $item->release->content_digest,
+                            'execution_digest' => $item->release->execution_digest,
+                        ];
+                    }
+                    if ($enabledVariants !== []) {
+                        $res['variant_group'] = [
+                            'group_id' => (int) $siteGroup->id,
+                            'group_uuid' => (string) $siteGroup->group_uuid,
+                            'name' => (string) $siteGroup->name,
+                            'variants' => $enabledVariants,
+                        ];
+                    }
+                }
+            }
+
+            return $res;
         }
 
         // Priority 3: Otherwise select compatible CMS Global Published Script.
@@ -410,6 +510,77 @@ final class ScriptResolutionService
             ->where('global_scope_key', $scope['scope_key'])
             ->orderBy('id')
             ->get();
+
+        if (SocialAutomationSchema::scriptVariantGroupsReady()) {
+            $group = SaScriptVariantGroup::query()
+                ->with(['items.package', 'items.release'])
+                ->where('scope_type', SaScriptVariantGroup::SCOPE_CMS_GLOBAL)
+                ->where('global_scope_key', $scope['scope_key'])
+                ->where('is_enabled', true)
+                ->first();
+
+            if ($group instanceof SaScriptVariantGroup) {
+                $groupPkgIds = $group->items->pluck('package_id')->map(static fn ($id): int => (int) $id)->all();
+                foreach ($candidates as $cand) {
+                    if (! in_array((int) $cand->id, $groupPkgIds, true)) {
+                        return $this->missingResult($targetTagKey, true, 'ambiguous_global_script', $cmsScope);
+                    }
+                }
+
+                $enabledVariants = [];
+                $primaryPackage = null;
+                $primaryRelease = null;
+                foreach ($group->items->sortBy('priority') as $item) {
+                    if (! $item->is_enabled) {
+                        continue;
+                    }
+                    $vPkg = $item->package;
+                    $vRel = $item->release;
+                    if (! $vPkg instanceof SaPackage || ! ($vPkg->is_enabled ?? true)) {
+                        continue;
+                    }
+                    if (! $vRel instanceof SaPackageRelease || (string) $vRel->status !== 'published') {
+                        continue;
+                    }
+                    if ($primaryPackage === null) {
+                        $primaryPackage = $vPkg;
+                        $primaryRelease = $vRel;
+                    }
+                    $enabledVariants[] = [
+                        'variant_id' => (string) $item->variant_uuid,
+                        'priority' => (int) $item->priority,
+                        'language_label' => (string) $item->language_label,
+                        'package_id' => (int) $vPkg->id,
+                        'package_key' => (string) $vPkg->package_key,
+                        'release_id' => (int) $vRel->id,
+                        'script_version' => (string) $vRel->version,
+                        'content_digest' => $vRel->content_digest,
+                        'execution_digest' => $vRel->execution_digest,
+                    ];
+                }
+
+                if ($primaryPackage instanceof SaPackage && $primaryRelease instanceof SaPackageRelease) {
+                    $result = $this->foundResult(
+                        self::SOURCE_CMS_GLOBAL,
+                        $targetTagKey,
+                        null,
+                        $primaryPackage,
+                        $primaryRelease,
+                        $cmsScope,
+                        $site,
+                        $path,
+                    );
+                    $result['variant_group'] = [
+                        'group_id' => (int) $group->id,
+                        'group_uuid' => (string) $group->group_uuid,
+                        'name' => (string) $group->name,
+                        'variants' => $enabledVariants,
+                    ];
+
+                    return $result;
+                }
+            }
+        }
 
         if ($candidates->count() > 1) {
             return $this->missingResult($targetTagKey, true, 'ambiguous_global_script', $cmsScope);

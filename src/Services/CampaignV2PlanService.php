@@ -214,7 +214,7 @@ final class CampaignV2PlanService
 
                 $tagModelsByIdx = [];
                 foreach ($preparedTags as $idx => $tagData) {
-                    $tagModelsByIdx[$idx] = SaCampaignActionTag::query()->create([
+                    $tagAttrs = [
                         'plan_tag_uuid' => (string) Str::uuid(),
                         'campaign_id' => $campaign->id,
                         'action_tag_id' => $tagData['action_tag_id'],
@@ -238,7 +238,13 @@ final class CampaignV2PlanService
                         'shortcode_mapping_version' => $tagData['shortcode_mapping_version'],
                         'is_enabled' => true,
                         'sort_order' => $idx,
-                    ]);
+                    ];
+                    if (SocialAutomationSchema::scriptVariantGroupsReady()) {
+                        $tagAttrs['variant_group_id'] = $tagData['variant_group_id'] ?? null;
+                        $tagAttrs['variant_group_uuid'] = $tagData['variant_group_uuid'] ?? null;
+                        $tagAttrs['pinned_variants'] = $tagData['pinned_variants'] ?? null;
+                    }
+                    $tagModelsByIdx[$idx] = SaCampaignActionTag::query()->create($tagAttrs);
                 }
 
                 foreach ($preparedContents as $cRow) {
@@ -787,6 +793,8 @@ final class CampaignV2PlanService
                 'script_id' => (string) $pt->script_id,
                 'script_name' => $pt->script_name,
                 'release_id' => (int) $pt->release_id,
+                'variant_group_id' => SocialAutomationSchema::scriptVariantGroupsReady() ? $pt->variant_group_uuid : null,
+                'pinned_variants' => SocialAutomationSchema::scriptVariantGroupsReady() ? $pt->pinned_variants : null,
                 'script_version' => (string) $pt->script_version,
                 'script_content_digest' => $pt->script_content_digest,
                 'script_execution_digest' => $pt->script_execution_digest,
@@ -1115,6 +1123,9 @@ final class CampaignV2PlanService
                 'source_action_tag_key' => $res['source_action_tag_key'] ?? null,
                 'cms_scope' => $cmsScope,
                 'manifest_snapshot' => $manifest,
+                'variant_group_id' => is_array($res['variant_group'] ?? null) ? ($res['variant_group']['group_id'] ?? null) : null,
+                'variant_group_uuid' => is_array($res['variant_group'] ?? null) ? ($res['variant_group']['group_uuid'] ?? null) : null,
+                'pinned_variants' => is_array($res['variant_group'] ?? null) ? ($res['variant_group']['variants'] ?? null) : null,
                 'variables' => $variables,
                 'shortcode_mapping' => $mappingDoc,
                 'shortcode_mapping_version' => $mappingVersion,
@@ -1266,6 +1277,9 @@ final class CampaignV2PlanService
                 'source_action_tag_key' => $existing->source_action_tag_key,
                 'cms_scope' => $existing->cms_scope,
                 'manifest_snapshot' => $manifest,
+                'variant_group_id' => $existing->variant_group_id ?? null,
+                'variant_group_uuid' => $existing->variant_group_uuid ?? null,
+                'pinned_variants' => $existing->pinned_variants ?? null,
                 'variables' => $variables,
                 'shortcode_mapping' => $mappingDoc,
                 'shortcode_mapping_version' => $mappingVersion,

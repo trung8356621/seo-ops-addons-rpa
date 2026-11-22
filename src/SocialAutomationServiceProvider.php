@@ -33,6 +33,7 @@ use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaAdmin\RpaAdminSpaCon
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaClientApiController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaClientApiKeyManagementController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ScriptRegistry\StaffScriptRegistryController;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\ScriptRegistry\StaffScriptVariantGroupController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ScriptReleaseMediaController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\SocialAutomationBootstrapController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\SocialAutomationBrowserInventoryController;
@@ -391,6 +392,29 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                         ->name('social-automation.script-registry.index');
                     Route::get('/resolve', [StaffScriptRegistryController::class, 'resolve'])
                         ->name('social-automation.script-registry.resolve');
+                    Route::prefix('variant-groups')->group(function (): void {
+                        Route::get('/', [StaffScriptVariantGroupController::class, 'index'])
+                            ->name('social-automation.script-registry.variant-groups.index');
+                        Route::post('/', [StaffScriptVariantGroupController::class, 'store'])
+                            ->name('social-automation.script-registry.variant-groups.store');
+                        Route::get('/{id}', [StaffScriptVariantGroupController::class, 'show'])
+                            ->whereUuid('id')
+                            ->name('social-automation.script-registry.variant-groups.show');
+                        Route::post('/{id}/variants', [StaffScriptVariantGroupController::class, 'addVariant'])
+                            ->whereUuid('id')
+                            ->name('social-automation.script-registry.variant-groups.variants.store');
+                        Route::patch('/{id}/variants/{variantId}', [StaffScriptVariantGroupController::class, 'updateVariant'])
+                            ->whereUuid('id')
+                            ->whereUuid('variantId')
+                            ->name('social-automation.script-registry.variant-groups.variants.update');
+                        Route::delete('/{id}/variants/{variantId}', [StaffScriptVariantGroupController::class, 'removeVariant'])
+                            ->whereUuid('id')
+                            ->whereUuid('variantId')
+                            ->name('social-automation.script-registry.variant-groups.variants.destroy');
+                        Route::put('/{id}/reorder', [StaffScriptVariantGroupController::class, 'reorder'])
+                            ->whereUuid('id')
+                            ->name('social-automation.script-registry.variant-groups.reorder');
+                    });
                     Route::get('/{id}', [StaffScriptRegistryController::class, 'show'])
                         ->where('id', '^(?!.*\\.\\.)[^/]{1,191}$')
                         ->name('social-automation.script-registry.show');

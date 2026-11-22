@@ -394,6 +394,8 @@ final class CampaignOrchestrator
                         'action_tag_key' => (string) $planTag->action_tag_key,
                         'site_key' => (string) $planTag->site_key,
                         'release_id' => (int) $planTag->release_id,
+                        'variant_group_id' => $planTag->variant_group_uuid ?? null,
+                        'script_variants' => is_array($planTag->pinned_variants ?? null) ? $planTag->pinned_variants : null,
                     ]);
                     if ($job === null) {
                         $content->status = CampaignContentStatus::WaitingResources->value;
@@ -1408,6 +1410,16 @@ final class CampaignOrchestrator
             $jobPayload['action_tag_key'] = $v2Override['action_tag_key'] ?? null;
             $jobPayload['site_key'] = $v2Override['site_key'] ?? null;
             $jobPayload['release_id'] = $v2Override['release_id'] ?? null;
+            if (! empty($v2Override['script_variants']) && is_array($v2Override['script_variants'])) {
+                $jobPayload['variant_group_id'] = $v2Override['variant_group_id'] ?? null;
+                $jobPayload['script_variants'] = array_values($v2Override['script_variants']);
+                $jobPayload['fallback_policy'] = [
+                    'allowed_only_on' => 'first_step_not_found_before_mutation',
+                    'single_attempt_identity' => true,
+                    'success_screenshots' => 1,
+                    'failure_screenshots_per_attempted_variant' => 1,
+                ];
+            }
         }
         if (is_array($campaignMeta['resolved_script_context'] ?? null)) {
             $jobPayload['resolved_script_context'] = $campaignMeta['resolved_script_context'];
@@ -1895,6 +1907,16 @@ final class CampaignOrchestrator
             $out['plan_tag_id'] = $payload['plan_tag_id'] ?? null;
             $out['action_tag_key'] = $payload['action_tag_key'] ?? null;
             $out['site_key'] = $payload['site_key'] ?? null;
+            if (! empty($payload['script_variants']) && is_array($payload['script_variants'])) {
+                $out['variant_group_id'] = $payload['variant_group_id'] ?? null;
+                $out['script_variants'] = array_values($payload['script_variants']);
+                $out['fallback_policy'] = $payload['fallback_policy'] ?? [
+                    'allowed_only_on' => 'first_step_not_found_before_mutation',
+                    'single_attempt_identity' => true,
+                    'success_screenshots' => 1,
+                    'failure_screenshots_per_attempted_variant' => 1,
+                ];
+            }
         }
 
         return $out;
@@ -1997,6 +2019,20 @@ final class CampaignOrchestrator
                 }
                 $meta['proves_publication'] = false;
                 $meta['intent'] = $meta['intent'] ?? 'pre_publish_stop';
+            }
+
+            foreach (['variant_id', 'language_label', 'package_key', 'screenshot_role'] as $strField) {
+                if (isset($row[$strField]) && ! isset($meta[$strField])) {
+                    $meta[$strField] = (string) $row[$strField];
+                }
+            }
+            foreach (['release_id', 'priority'] as $intField) {
+                if (isset($row[$intField]) && ! isset($meta[$intField])) {
+                    $meta[$intField] = (int) $row[$intField];
+                }
+            }
+            if (array_key_exists('failed_step', $row) && ! array_key_exists('failed_step', $meta)) {
+                $meta['failed_step'] = $row['failed_step'];
             }
 
             $refs[] = [

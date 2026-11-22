@@ -107,6 +107,28 @@ final class SocialAutomationSchema
     }
 
     /**
+     * Script Variant Groups + Campaign V2 variant pinning columns present.
+     */
+    public static function scriptVariantGroupsReady(): bool
+    {
+        if (! self::has('sa_script_variant_groups') || ! self::has('sa_script_variant_group_items')) {
+            return false;
+        }
+        try {
+            $conn = SocialAutomationServiceConfig::CONNECTION;
+            if (self::has('sa_campaign_action_tags')) {
+                return (bool) @Schema::connection($conn)->hasColumn('sa_campaign_action_tags', 'variant_group_id')
+                    && (bool) @Schema::connection($conn)->hasColumn('sa_campaign_action_tags', 'variant_group_uuid')
+                    && (bool) @Schema::connection($conn)->hasColumn('sa_campaign_action_tags', 'pinned_variants');
+            }
+
+            return true;
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    /**
      * Keep Alive Node registration + explicit Campaign assignment tables.
      */
     public static function keepaliveReady(): bool
