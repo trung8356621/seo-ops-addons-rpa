@@ -355,13 +355,22 @@ final class CampaignOrchestrator
                         continue;
                     }
 
+                    $requiredAccountId = $content->assigned_account_id ? (int) $content->assigned_account_id : null;
+                    $blockedAssigned = $assignedIds;
+                    if ($mode === CampaignExecutionMode::OneAccountOneJob && $requiredAccountId !== null) {
+                        $blockedAssigned = array_values(array_filter(
+                            $assignedIds,
+                            static fn ($id): bool => (int) $id !== $requiredAccountId
+                        ));
+                    }
+
                     $selection = $this->selectEligibleForCampaign(
                         $locked,
                         $mode,
-                        $assignedIds,
+                        $blockedAssigned,
                         $busyInCampaign,
                         1,
-                        null,
+                        $requiredAccountId,
                         $planTag,
                     );
                     if ($selection['selected'] === []) {
@@ -936,18 +945,59 @@ final class CampaignOrchestrator
                     }
                     $from = JobStatus::from((string) $locked->status);
                     if ($from === JobStatus::Reserved) {
-                        // Never claimed — release locks, content back to waiting_resources (not failed).
+                        // Never claimed — release locks & reservation assignment, content back to waiting_resources (not failed).
+                        $attempt = $this->activeAttempt($locked);
+                        if ($attempt instanceof SaJobAttempt && (string) $attempt->status === CampaignAttemptStatus::Queued->value) {
+                            $attempt->status = CampaignAttemptStatus::Cancelled->value;
+                            $attempt->finished_at = now();
+                            $attempt->error_code = 'lease_expired_unclaimed';
+                            $attempt->save();
+                        }
+
                         $this->releaseJobLocks($locked);
                         $locked->status = JobStatus::Cancelled->value;
                         $locked->finished_at = now();
                         $locked->error_code = 'lease_expired_unclaimed';
                         $locked->save();
+
                         $content = SaCampaignContent::query()->where('id', $locked->campaign_content_id)->lockForUpdate()->first();
                         if ($content instanceof SaCampaignContent
                             && (string) $content->status === CampaignContentStatus::Running->value) {
+                            $hasOtherExecutionForAccount = $locked->campaign_id && $locked->account_id
+                                ? SaJob::query()
+                                    ->where('campaign_id', $locked->campaign_id)
+                                    ->where('account_id', $locked->account_id)
+                                    ->where('id', '!=', $locked->id)
+                                    ->where(function ($q): void {
+                                        $q->whereIn('status', [
+                                            JobStatus::Reserved->value,
+                                            JobStatus::Claimed->value,
+                                            JobStatus::Running->value,
+                                            JobStatus::Completed->value,
+                                            JobStatus::Unknown->value,
+                                        ])->orWhereNotNull('claimed_at');
+                                    })
+                                    ->exists()
+                                : false;
+
+                            if (! $hasOtherExecutionForAccount && $locked->campaign_id && $locked->account_id) {
+                                SaCampaignAccountAssignment::query()
+                                    ->where('campaign_id', $locked->campaign_id)
+                                    ->where('account_id', $locked->account_id)
+                                    ->where('content_id', $content->id)
+                                    ->lockForUpdate()
+                                    ->delete();
+
+                                $campaign = SaCampaign::query()->find($locked->campaign_id);
+                                $meta = $campaign instanceof SaCampaign && is_array($campaign->meta) ? $campaign->meta : [];
+                                $hasCampaignPin = trim((string) ($meta['pinned_account_id'] ?? '')) !== '';
+                                if (! $hasCampaignPin && (int) $content->assigned_account_id === (int) $locked->account_id) {
+                                    $content->assigned_account_id = null;
+                                }
+                            }
+
                             $content->status = CampaignContentStatus::WaitingResources->value;
                             $content->current_job_id = null;
-                            // Mode A assignment stays — account was reserved for this content.
                             $content->save();
                             if (SocialAutomationSchema::campaignV2Ready()) {
                                 SaCampaignContentAssignment::query()
