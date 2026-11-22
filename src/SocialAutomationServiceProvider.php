@@ -45,6 +45,8 @@ use Omnichannel\Addons\SocialAutomation\Http\Middleware\EnsureSocialAutomationDo
 use Omnichannel\Addons\SocialAutomation\Http\Middleware\RenderRpaAdminRateLimitJson;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ClientCampaignJobController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ClientKeepAliveController;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\StaffArticleController;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\StaffCampaignArticleController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\StaffCampaignContentController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\StaffCampaignController;
 use Omnichannel\Addons\SocialAutomation\Orchestration\CampaignOrchestrator;
@@ -450,6 +452,25 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                         ->name('social-automation.settings.update');
                 });
 
+                // Independent Article Library CRUD (Owner/Admin session + CSRF)
+                Route::prefix('api/articles')->group(function (): void {
+                    Route::get('/', [StaffArticleController::class, 'index'])
+                        ->name('social-automation.articles.index');
+                    Route::get('/compatible', [StaffArticleController::class, 'compatible'])
+                        ->name('social-automation.articles.compatible');
+                    Route::post('/', [StaffArticleController::class, 'store'])
+                        ->name('social-automation.articles.store');
+                    Route::get('/{id}', [StaffArticleController::class, 'show'])
+                        ->whereUuid('id')
+                        ->name('social-automation.articles.show');
+                    Route::put('/{id}', [StaffArticleController::class, 'update'])
+                        ->whereUuid('id')
+                        ->name('social-automation.articles.update');
+                    Route::delete('/{id}', [StaffArticleController::class, 'destroy'])
+                        ->whereUuid('id')
+                        ->name('social-automation.articles.destroy');
+                });
+
                 // CP19A: Campaign CRUD + lifecycle (Owner/Admin session + CSRF)
                 Route::prefix('api/campaigns')->group(function (): void {
                     Route::get('/', [StaffCampaignController::class, 'index'])
@@ -490,6 +511,16 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                         ->whereUuid('id')
                         ->whereUuid('contentId')
                         ->name('social-automation.campaigns.contents.update');
+                    Route::get('/{id}/articles', [StaffCampaignArticleController::class, 'index'])
+                        ->whereUuid('id')
+                        ->name('social-automation.campaigns.articles.index');
+                    Route::post('/{id}/articles', [StaffCampaignArticleController::class, 'store'])
+                        ->whereUuid('id')
+                        ->name('social-automation.campaigns.articles.store');
+                    Route::delete('/{id}/articles/{articleOrContentId}', [StaffCampaignArticleController::class, 'destroy'])
+                        ->whereUuid('id')
+                        ->whereUuid('articleOrContentId')
+                        ->name('social-automation.campaigns.articles.destroy');
                 });
                 Route::prefix('api/campaign-contents')->group(function (): void {
                     Route::post('/{id}/retry', [StaffCampaignContentController::class, 'retry'])

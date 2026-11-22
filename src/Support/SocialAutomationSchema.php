@@ -87,6 +87,26 @@ final class SocialAutomationSchema
     }
 
     /**
+     * Independent Article Library + Campaign snapshot columns present.
+     */
+    public static function articleLibraryReady(): bool
+    {
+        if (! self::campaignV2Ready() || ! self::has('sa_articles')) {
+            return false;
+        }
+        try {
+            $conn = SocialAutomationServiceConfig::CONNECTION;
+
+            return (bool) @Schema::connection($conn)->hasColumn('sa_campaign_contents', 'article_id')
+                && (bool) @Schema::connection($conn)->hasColumn('sa_campaign_contents', 'article_uuid')
+                && (bool) @Schema::connection($conn)->hasColumn('sa_campaign_contents', 'snapshot_at')
+                && (bool) @Schema::connection($conn)->hasColumn('sa_campaign_contents', 'snapshot_payload');
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    /**
      * Keep Alive Node registration + explicit Campaign assignment tables.
      */
     public static function keepaliveReady(): bool

@@ -868,6 +868,10 @@ final class CampaignV2PlanService
                 $row['raw_source'] = $c->raw_source;
                 $row['mapping_version'] = $c->mapping_version !== null ? (int) $c->mapping_version : null;
             }
+            if (SocialAutomationSchema::articleLibraryReady()) {
+                $row['article_id'] = $c->article_uuid;
+                $row['snapshot_at'] = $c->snapshot_at?->toIso8601String();
+            }
             $contentsDto[] = $row;
         }
 

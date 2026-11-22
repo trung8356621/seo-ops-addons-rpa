@@ -45,6 +45,7 @@ final class CampaignService
         private readonly CampaignScriptVariableSchema $variableSchema = new CampaignScriptVariableSchema,
         private readonly CampaignShortcodeMockGenerator $mockGenerator = new CampaignShortcodeMockGenerator,
         private readonly CampaignV2PlanService $v2Plan = new CampaignV2PlanService,
+        private readonly CampaignArticleAssignmentService $articleAssignments = new CampaignArticleAssignmentService,
     ) {}
 
     /**
@@ -350,35 +351,62 @@ final class CampaignService
      */
     public function start(string $campaignUuid, string $installationId): array
     {
-        $campaign = $this->findOwned($campaignUuid, $installationId);
-        if ($campaign === null) {
-            return ['ok' => false, 'errors' => ['campaign_not_found']];
-        }
-        $isV2 = (int) ($campaign->plan_version ?? 1) >= 2;
-        if ($isV2 && ! CampaignV2ExecutionPolicy::isEnabled()) {
-            return ['ok' => false, 'errors' => ['v2_campaign_execution_unsupported']];
-        }
-        $status = CampaignStatus::tryFrom((string) $campaign->status);
-        if ($status !== CampaignStatus::Draft && $status !== CampaignStatus::Paused) {
-            if ($status === CampaignStatus::Running) {
-                return ['ok' => true, 'data' => $this->detailDto($campaign)];
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+
+        $txResult = DB::connection($conn)->transaction(function () use ($campaignUuid, $installationId): array {
+            $campaign = SaCampaign::query()
+                ->where('campaign_uuid', $campaignUuid)
+                ->where('installation_id', $installationId)
+                ->lockForUpdate()
+                ->first();
+            if (! $campaign instanceof SaCampaign) {
+                return ['ok' => false, 'errors' => ['campaign_not_found']];
+            }
+            $isV2 = (int) ($campaign->plan_version ?? 1) >= 2;
+            if ($isV2 && ! CampaignV2ExecutionPolicy::isEnabled()) {
+                return ['ok' => false, 'errors' => ['v2_campaign_execution_unsupported']];
+            }
+            $status = CampaignStatus::tryFrom((string) $campaign->status);
+            if ($status !== CampaignStatus::Draft && $status !== CampaignStatus::Paused) {
+                if ($status === CampaignStatus::Running) {
+                    return ['ok' => true, 'already_running' => true, 'campaign' => $campaign];
+                }
+
+                return ['ok' => false, 'errors' => ['invalid_campaign_status']];
             }
 
-            return ['ok' => false, 'errors' => ['invalid_campaign_status']];
+            if ($isV2) {
+                $snapshot = $this->articleAssignments->snapshotAndPinAtStart($campaign);
+                if (! ($snapshot['ok'] ?? false)) {
+                    return ['ok' => false, 'errors' => $snapshot['errors'] ?? ['snapshot_failed']];
+                }
+            }
+
+            $gate = $isV2
+                ? $this->assertActionableV2Contents($campaign)
+                : $this->assertActionableContents($campaign);
+            if (! ($gate['ok'] ?? false)) {
+                return ['ok' => false, 'errors' => $gate['errors'] ?? ['no_actionable_content']];
+            }
+
+            $campaign->status = CampaignStatus::Running->value;
+            $campaign->started_at = $campaign->started_at ?? now();
+            $campaign->paused_at = null;
+            $campaign->next_recheck_at = now();
+            $campaign->save();
+
+            return ['ok' => true, 'already_running' => false, 'campaign' => $campaign];
+        });
+
+        if (! ($txResult['ok'] ?? false)) {
+            return ['ok' => false, 'errors' => $txResult['errors'] ?? ['start_failed']];
         }
 
-        $gate = $isV2
-            ? $this->assertActionableV2Contents($campaign)
-            : $this->assertActionableContents($campaign);
-        if (! ($gate['ok'] ?? false)) {
-            return ['ok' => false, 'errors' => $gate['errors'] ?? ['no_actionable_content']];
+        /** @var SaCampaign $campaign */
+        $campaign = $txResult['campaign'];
+        if ($txResult['already_running'] ?? false) {
+            return ['ok' => true, 'data' => $this->detailDto($campaign)];
         }
-
-        $campaign->status = CampaignStatus::Running->value;
-        $campaign->started_at = $campaign->started_at ?? now();
-        $campaign->paused_at = null;
-        $campaign->next_recheck_at = now();
-        $campaign->save();
 
         $this->orchestrator->dispatchCampaign($campaign);
 
@@ -994,6 +1022,10 @@ final class CampaignService
             $dto['source_format'] = (string) ($content->source_format ?? 'legacy_input');
             $dto['raw_source'] = $content->raw_source;
             $dto['mapping_version'] = $content->mapping_version !== null ? (int) $content->mapping_version : null;
+        }
+        if (SocialAutomationSchema::articleLibraryReady()) {
+            $dto['article_id'] = $content->article_uuid;
+            $dto['snapshot_at'] = $content->snapshot_at?->toIso8601String();
         }
 
         return $dto;
