@@ -529,6 +529,10 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                         ->whereUuid('id')
                         ->whereUuid('planTagId')
                         ->name('social-automation.campaigns.action-tags.manual-test');
+                    Route::patch('/{id}/action-tags/{planTagId}/interval', [StaffCampaignController::class, 'updateActionTagInterval'])
+                        ->whereUuid('id')
+                        ->whereUuid('planTagId')
+                        ->name('social-automation.campaigns.action-tags.interval.update');
                     Route::delete('/{id}', [StaffCampaignController::class, 'destroy'])
                         ->whereUuid('id')
                         ->name('social-automation.campaigns.destroy');

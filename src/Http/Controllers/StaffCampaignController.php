@@ -15,6 +15,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaCampaignActionTag;
 use Omnichannel\Addons\SocialAutomation\Models\SaJob;
 use Omnichannel\Addons\SocialAutomation\Orchestration\CampaignOrchestrator;
 use Omnichannel\Addons\SocialAutomation\Services\CampaignService;
+use Omnichannel\Addons\SocialAutomation\Services\CampaignV2PlanService;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationAccess;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationInstallationResolver;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationSchema;
@@ -258,6 +259,43 @@ final class StaffCampaignController extends Controller
         }
 
         return response()->json(['ok' => true, 'job' => $result['job']], 201);
+    }
+
+    public function updateActionTagInterval(Request $request, string $id, string $planTagId): JsonResponse
+    {
+        $this->access->assertCanManageCampaigns();
+        if (! SocialAutomationSchema::campaignV2Ready()) {
+            return response()->json(['ok' => false, 'errors' => ['schema_unavailable']], 503);
+        }
+
+        if (! $request->exists('interval_minutes')) {
+            return response()->json(['ok' => false, 'errors' => ['interval_minutes_required']], 422);
+        }
+
+        $raw = $request->input('interval_minutes');
+        if (is_bool($raw) || is_array($raw) || filter_var($raw, FILTER_VALIDATE_INT) === false) {
+            return response()->json(['ok' => false, 'errors' => ['invalid_interval_minutes']], 422);
+        }
+        $interval = (int) $raw;
+        if ($interval < 0 || $interval > 4_294_967_295) {
+            return response()->json(['ok' => false, 'errors' => ['invalid_interval_minutes']], 422);
+        }
+
+        $result = app(CampaignV2PlanService::class)->updateActionTagInterval(
+            $id,
+            $planTagId,
+            $interval,
+            $this->installation->resolveInstallationId(),
+        );
+
+        if (! ($result['ok'] ?? false)) {
+            return response()->json([
+                'ok' => false,
+                'errors' => $result['errors'] ?? ['interval_update_failed'],
+            ], (int) ($result['http'] ?? 422));
+        }
+
+        return response()->json($result['data'], 200);
     }
 
     /**

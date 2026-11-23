@@ -1004,6 +1004,94 @@ final class CampaignV2PlanService
     }
 
     /**
+     * Operational update of a single Action Tag's posting interval (Draft/Running/Paused/Completed).
+     * Never dispatches jobs, unlocks gates, or mutates pinning/history.
+     *
+     * @return array{ok: bool, http?: int, data?: array<string, mixed>, errors?: list<string>}
+     */
+    public function updateActionTagInterval(
+        string $campaignUuid,
+        string $planTagUuid,
+        int $intervalMinutes,
+        string $installationId,
+    ): array {
+        if ($intervalMinutes < 0 || $intervalMinutes > 4_294_967_295) {
+            return ['ok' => false, 'http' => 422, 'errors' => ['invalid_interval_minutes']];
+        }
+
+        if (! Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasColumn('sa_campaign_action_tags', 'interval_minutes')) {
+            return ['ok' => false, 'http' => 503, 'errors' => ['interval_schema_unavailable']];
+        }
+
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+
+        return DB::connection($conn)->transaction(function () use ($campaignUuid, $planTagUuid, $intervalMinutes, $installationId): array {
+            $campaign = SaCampaign::query()
+                ->notDeleted()
+                ->where('campaign_uuid', $campaignUuid)
+                ->where('installation_id', $installationId)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $campaign instanceof SaCampaign) {
+                return ['ok' => false, 'http' => 404, 'errors' => ['campaign_not_found']];
+            }
+            if ((int) ($campaign->plan_version ?? 1) < 2) {
+                return ['ok' => false, 'http' => 422, 'errors' => ['v2_campaign_required']];
+            }
+
+            $status = CampaignStatus::tryFrom((string) $campaign->status);
+            if (! in_array($status, [
+                CampaignStatus::Draft,
+                CampaignStatus::Running,
+                CampaignStatus::Paused,
+                CampaignStatus::Completed,
+            ], true)) {
+                return ['ok' => false, 'http' => 409, 'errors' => ['campaign_not_editable']];
+            }
+
+            $planTag = SaCampaignActionTag::query()
+                ->where('campaign_id', $campaign->id)
+                ->where('plan_tag_uuid', $planTagUuid)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $planTag instanceof SaCampaignActionTag) {
+                return ['ok' => false, 'http' => 404, 'errors' => ['action_tag_not_found']];
+            }
+
+            $planTag->interval_minutes = $intervalMinutes;
+            $planTag->save();
+            $persistedInterval = max(0, (int) $planTag->interval_minutes);
+
+            $lastSuccessByTag = $this->lastSuccessByActionTag($campaign);
+            $lastSuccessAt = $lastSuccessByTag[(int) $planTag->id] ?? null;
+            $nextRunAt = $lastSuccessAt !== null
+                ? $lastSuccessAt->copy()->addMinutes($persistedInterval)
+                : null;
+
+            if ($status === CampaignStatus::Running && $nextRunAt !== null) {
+                if ($campaign->next_recheck_at === null || $nextRunAt->lt($campaign->next_recheck_at)) {
+                    $campaign->next_recheck_at = $nextRunAt->isPast() ? now() : $nextRunAt;
+                    $campaign->save();
+                }
+            }
+
+            return [
+                'ok' => true,
+                'data' => [
+                    'ok' => true,
+                    'campaign_id' => (string) $campaign->campaign_uuid,
+                    'plan_tag_id' => (string) $planTag->plan_tag_uuid,
+                    'interval_minutes' => $persistedInterval,
+                    'last_success_at' => $lastSuccessAt?->toIso8601String(),
+                    'next_run_at' => $nextRunAt?->toIso8601String(),
+                ],
+            ];
+        });
+    }
+
+    /**
      * @param  array<string, mixed>  $tagRow
      * @return array<string, mixed>
      */

@@ -929,4 +929,211 @@ final class ActionTagSequentialQueueAndRecoveryTest extends TestCase
         self::assertTrue($ok['ok'], json_encode($ok));
         self::assertSame(1440, $ok['data']['action_tags'][0]['interval_minutes']);
     }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     */
+    private function patchInterval(string $campaignUuid, string $planTagUuid, array $payload): \Illuminate\Http\JsonResponse
+    {
+        $req = Request::create(
+            "/social-automation/api/campaigns/{$campaignUuid}/action-tags/{$planTagUuid}/interval",
+            'PATCH',
+            $payload
+        );
+
+        return $this->controller->updateActionTagInterval($req, $campaignUuid, $planTagUuid);
+    }
+
+    public function test_update_action_tag_interval_status_gates_isolation_validation_and_auth(): void
+    {
+        $tFb = $this->seedActionTagAndScript('facebook', 'facebook.create_post');
+        $setup = $this->createV2RunningCampaign([
+            ['tag' => $tFb['tag'], 'pkg' => $tFb['pkg'], 'rel' => $tFb['rel'], 'count' => 1, 'interval_minutes' => 60],
+        ]);
+        $camp = $setup['campaign'];
+        $camp->update(['status' => CampaignStatus::Draft->value]);
+        $pt = $setup['plan_tags']['facebook.create_post'];
+
+        // Draft -> 200
+        $resDraft = $this->patchInterval($camp->campaign_uuid, $pt->plan_tag_uuid, ['interval_minutes' => 90]);
+        self::assertSame(200, $resDraft->getStatusCode());
+        $draftData = $resDraft->getData(true);
+        self::assertTrue($draftData['ok']);
+        self::assertSame($camp->campaign_uuid, $draftData['campaign_id']);
+        self::assertSame($pt->plan_tag_uuid, $draftData['plan_tag_id']);
+        self::assertSame(90, $draftData['interval_minutes']);
+        self::assertNull($draftData['last_success_at']);
+        self::assertNull($draftData['next_run_at']);
+        self::assertSame(90, (int) $pt->fresh()->interval_minutes);
+
+        // Running -> 200
+        $camp->update(['status' => CampaignStatus::Running->value]);
+        $resRun = $this->patchInterval($camp->campaign_uuid, $pt->plan_tag_uuid, ['interval_minutes' => 120]);
+        self::assertSame(200, $resRun->getStatusCode());
+        self::assertSame(120, (int) $pt->fresh()->interval_minutes);
+
+        // Paused -> 200
+        $camp->update(['status' => CampaignStatus::Paused->value]);
+        $resPause = $this->patchInterval($camp->campaign_uuid, $pt->plan_tag_uuid, ['interval_minutes' => 180]);
+        self::assertSame(200, $resPause->getStatusCode());
+        self::assertSame(180, (int) $pt->fresh()->interval_minutes);
+
+        // Completed -> 200
+        $camp->update(['status' => CampaignStatus::Completed->value]);
+        $resComp = $this->patchInterval($camp->campaign_uuid, $pt->plan_tag_uuid, ['interval_minutes' => 240]);
+        self::assertSame(200, $resComp->getStatusCode());
+        self::assertSame(240, (int) $pt->fresh()->interval_minutes);
+
+        // Idempotent same-value PATCH -> 200
+        $resSame = $this->patchInterval($camp->campaign_uuid, $pt->plan_tag_uuid, ['interval_minutes' => 240]);
+        self::assertSame(200, $resSame->getStatusCode());
+        self::assertSame(240, $resSame->getData(true)['interval_minutes']);
+
+        // Validation 422 cases
+        $invalidPayloads = [
+            [],
+            ['interval_minutes' => null],
+            ['interval_minutes' => ''],
+            ['interval_minutes' => -1],
+            ['interval_minutes' => 12.5],
+            ['interval_minutes' => '12.5'],
+            ['interval_minutes' => true],
+            ['interval_minutes' => false],
+            ['interval_minutes' => [60]],
+            ['interval_minutes' => 'abc'],
+            ['interval_minutes' => 4_294_967_296],
+        ];
+        foreach ($invalidPayloads as $badPayload) {
+            $badRes = $this->patchInterval($camp->campaign_uuid, $pt->plan_tag_uuid, $badPayload);
+            self::assertSame(422, $badRes->getStatusCode(), 'Expected 422 for '.json_encode($badPayload));
+            self::assertFalse($badRes->getData(true)['ok']);
+        }
+        self::assertSame(240, (int) $pt->fresh()->interval_minutes);
+
+        // Cancelled -> 409
+        $camp->update(['status' => CampaignStatus::Cancelled->value]);
+        $resCancel = $this->patchInterval($camp->campaign_uuid, $pt->plan_tag_uuid, ['interval_minutes' => 30]);
+        self::assertSame(409, $resCancel->getStatusCode());
+        self::assertSame(240, (int) $pt->fresh()->interval_minutes);
+
+        // Soft-deleted -> 404
+        $camp->update(['status' => CampaignStatus::Running->value, 'deleted_at' => now()]);
+        $resDeleted = $this->patchInterval($camp->campaign_uuid, $pt->plan_tag_uuid, ['interval_minutes' => 30]);
+        self::assertSame(404, $resDeleted->getStatusCode());
+        $camp->update(['deleted_at' => null]);
+
+        // Foreign installation -> 404
+        $camp->update(['installation_id' => 'other-inst']);
+        self::assertSame(404, $this->patchInterval($camp->campaign_uuid, $pt->plan_tag_uuid, ['interval_minutes' => 30])->getStatusCode());
+        $camp->update(['installation_id' => $this->installationId]);
+
+        // Foreign / missing planTagUuid -> 404
+        $otherSetup = $this->createV2RunningCampaign([
+            ['tag' => $tFb['tag'], 'pkg' => $tFb['pkg'], 'rel' => $tFb['rel'], 'count' => 1, 'interval_minutes' => 60],
+        ]);
+        $otherPt = $otherSetup['plan_tags']['facebook.create_post'];
+        self::assertSame(404, $this->patchInterval($camp->campaign_uuid, $otherPt->plan_tag_uuid, ['interval_minutes' => 30])->getStatusCode());
+        self::assertSame(404, $this->patchInterval($camp->campaign_uuid, (string) \Illuminate\Support\Str::uuid(), ['interval_minutes' => 30])->getStatusCode());
+
+        // Staff auth gate (403 AuthorizationException)
+        $deniedAccess = new class extends \Omnichannel\Addons\SocialAutomation\Support\SocialAutomationAccess
+        {
+            public function __construct() {}
+
+            public function assertCanManageCampaigns(?\App\Models\User $user = null): void
+            {
+                throw new \Illuminate\Auth\Access\AuthorizationException('forbidden');
+            }
+        };
+        $deniedController = new StaffCampaignController(
+            $this->campaigns,
+            $deniedAccess,
+            app(\Omnichannel\Addons\SocialAutomation\Support\SocialAutomationInstallationResolver::class),
+        );
+        $this->expectException(\Illuminate\Auth\Access\AuthorizationException::class);
+        $deniedController->updateActionTagInterval(
+            Request::create('/', 'PATCH', ['interval_minutes' => 15]),
+            $camp->campaign_uuid,
+            $pt->plan_tag_uuid
+        );
+    }
+
+    public function test_update_action_tag_interval_recalculates_next_run_without_dispatch_or_side_effects(): void
+    {
+        $tFb = $this->seedActionTagAndScript('facebook', 'facebook.create_post');
+        $tWp = $this->seedActionTagAndScript('wordpress', 'wordpress.create_post');
+        $cFb = $this->seedClient('facebook', 'fb-acc');
+        $cWp = $this->seedClient('wordpress', 'wp-acc');
+
+        $setup = $this->createV2RunningCampaign([
+            ['tag' => $tFb['tag'], 'pkg' => $tFb['pkg'], 'rel' => $tFb['rel'], 'count' => 3, 'interval_minutes' => 120],
+            ['tag' => $tWp['tag'], 'pkg' => $tWp['pkg'], 'rel' => $tWp['rel'], 'count' => 2, 'interval_minutes' => 60],
+        ]);
+
+        $camp = $setup['campaign'];
+        $fbItems = $setup['contents']['facebook.create_post'];
+        $wpItems = $setup['contents']['wordpress.create_post'];
+        $ptFb = $setup['plan_tags']['facebook.create_post'];
+        $ptWp = $setup['plan_tags']['wordpress.create_post'];
+        $origReleaseId = $ptFb->release_id;
+        $origContentDigest = $ptFb->script_content_digest;
+
+        $t0 = \Carbon\CarbonImmutable::now()->subMinutes(90)->startOfSecond();
+        $this->orchestrator->dispatchCampaign($camp, $t0);
+        $this->claimAndFinish($cFb['agent'], $cFb['session'], 'succeeded');
+        SaJob::query()->where('campaign_content_id', $fbItems[0]->id)->update(['finished_at' => $t0]);
+        $this->orchestrator->dispatchCampaign($camp->fresh(), $t0->addMinutes(10));
+        self::assertSame(CampaignContentStatus::Running->value, $wpItems[0]->fresh()->status);
+
+        // Increasing FB interval from 120 -> 240 shifts next_run_at forward; WP stays 60; WP running job unaffected
+        $resUp = $this->patchInterval($camp->campaign_uuid, $ptFb->plan_tag_uuid, ['interval_minutes' => 240]);
+        self::assertSame(200, $resUp->getStatusCode());
+        $upData = $resUp->getData(true);
+        self::assertSame($t0->toIso8601String(), $upData['last_success_at']);
+        self::assertSame($t0->addMinutes(240)->toIso8601String(), $upData['next_run_at']);
+        self::assertSame(60, (int) $ptWp->fresh()->interval_minutes);
+        self::assertSame(CampaignContentStatus::Running->value, $wpItems[0]->fresh()->status);
+
+        // At t0 + 150m (elapsed past old 120m, before new 240m), scheduler still holds FB item 1
+        $this->orchestrator->dispatchCampaign($camp->fresh(), $t0->addMinutes(150));
+        self::assertSame(CampaignContentStatus::Pending->value, $fbItems[1]->fresh()->status);
+
+        // Decreasing FB interval from 240 -> 30 shifts next_run_at to t0+30 (already past!) and updates next_recheck_at,
+        // WITHOUT directly dispatching FB item 1 inside PATCH
+        $camp->update(['next_recheck_at' => $t0->addMinutes(240)]);
+        $resDown = $this->patchInterval($camp->campaign_uuid, $ptFb->plan_tag_uuid, ['interval_minutes' => 30]);
+        self::assertSame(200, $resDown->getStatusCode());
+        $downData = $resDown->getData(true);
+        self::assertSame(30, $downData['interval_minutes']);
+        self::assertSame($t0->addMinutes(30)->toIso8601String(), $downData['next_run_at']);
+        self::assertSame(CampaignContentStatus::Pending->value, $fbItems[1]->fresh()->status);
+        self::assertSame(0, SaJob::query()->where('campaign_content_id', $fbItems[1]->id)->count());
+        self::assertTrue($camp->fresh()->next_recheck_at->lte(now()->addSeconds(5)));
+
+        // Subsequent scheduler tick dispatches exactly 1 FB job (item 1, preserving order)
+        $this->orchestrator->dispatchCampaign($camp->fresh(), now());
+        self::assertSame(CampaignContentStatus::Running->value, $fbItems[1]->fresh()->status);
+        self::assertSame(CampaignContentStatus::Pending->value, $fbItems[2]->fresh()->status);
+
+        // While FB item 1 fails -> queue blocked by failure; updating interval must NOT unlock gate
+        $this->claimAndFinish($cFb['agent'], $cFb['session'], 'failed', 'ERR_BOOM');
+        $resWhileBlocked = $this->patchInterval($camp->campaign_uuid, $ptFb->plan_tag_uuid, ['interval_minutes' => 0]);
+        self::assertSame(200, $resWhileBlocked->getStatusCode());
+        $this->orchestrator->dispatchCampaign($camp->fresh(), now()->addMinutes(10));
+        self::assertSame(CampaignContentStatus::FailedLocked->value, $fbItems[1]->fresh()->status);
+        self::assertSame(CampaignContentStatus::Pending->value, $fbItems[2]->fresh()->status);
+
+        // Pinning & sort_order preserved
+        $ptFbFresh = $ptFb->fresh();
+        self::assertSame($origReleaseId, $ptFbFresh->release_id);
+        self::assertSame($origContentDigest, $ptFbFresh->script_content_digest);
+        self::assertSame([1, 2, 3], SaCampaignContent::query()
+            ->where('campaign_id', $camp->id)
+            ->whereIn('id', [$fbItems[0]->id, $fbItems[1]->id, $fbItems[2]->id])
+            ->orderBy('sort_order')
+            ->orderBy('id')
+            ->pluck('sort_order')
+            ->map(fn ($v) => (int) $v)
+            ->all());
+    }
 }
