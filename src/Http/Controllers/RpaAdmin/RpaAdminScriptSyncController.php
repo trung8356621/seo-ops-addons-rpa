@@ -15,6 +15,7 @@ use Omnichannel\Addons\SocialAutomation\PackageRegistry\PackageRegistryService;
 use Omnichannel\Addons\SocialAutomation\PackageRegistry\ScriptCatalogService;
 use Omnichannel\Addons\SocialAutomation\PackageRegistry\ScriptReleaseMediaService;
 use Omnichannel\Addons\SocialAutomation\PackageRegistry\ScriptSyncPlanner;
+use Omnichannel\Addons\SocialAutomation\PackageRegistry\ScriptSyncService;
 use Omnichannel\Addons\SocialAutomation\PackageRegistry\ScriptTombstoneService;
 use Omnichannel\Addons\SocialAutomation\PackageRegistry\RpaAdminBackupService;
 use Omnichannel\Addons\SocialAutomation\Models\SaRpaExecutionReport;
@@ -40,6 +41,7 @@ final class RpaAdminScriptSyncController extends Controller
         private readonly ScriptTombstoneService $tombstones,
         private readonly ScriptReleaseMediaService $media,
         private readonly RpaAdminBackupService $backups,
+        private readonly ?ScriptSyncService $syncService = null,
     ) {}
 
     public function backup(Request $request): JsonResponse
@@ -173,6 +175,30 @@ final class RpaAdminScriptSyncController extends Controller
         ]);
 
         return response()->json($result->toArray(), $result->httpStatus());
+    }
+
+    public function sync(Request $request): JsonResponse
+    {
+        /** @var User|null $user */
+        $user = $request->attributes->get(RpaAdminSessionService::REQUEST_USER_KEY);
+        $payload = $request->all();
+        if (! is_array($payload)) {
+            $payload = [];
+        }
+        unset($payload['user_id'], $payload['id'], $payload['_simulate_failure_before_disable']);
+
+        $idemHeader = trim((string) $request->header('Idempotency-Key', ''));
+        if ($idemHeader !== '' && ! isset($payload['idempotency_key'])) {
+            $payload['idempotency_key'] = $idemHeader;
+        }
+
+        $service = $this->syncService ?? app(ScriptSyncService::class);
+        $result = $service->sync($payload, [
+            'user_id' => $user instanceof User ? (int) $user->id : null,
+            'sync_source' => 'rpa_admin',
+        ]);
+
+        return response()->json($result['body'], $result['http']);
     }
 
     public function pull(Request $request): JsonResponse

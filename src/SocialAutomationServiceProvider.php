@@ -681,6 +681,8 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                         ->name('social-automation.rpa-admin.scripts.catalog');
                     Route::post('/scripts/sync/plan', [RpaAdminScriptSyncController::class, 'plan'])
                         ->name('social-automation.rpa-admin.scripts.sync.plan');
+                    Route::post('/scripts/sync', [RpaAdminScriptSyncController::class, 'sync'])
+                        ->name('social-automation.rpa-admin.scripts.sync');
                     Route::post('/scripts/publish', [RpaAdminScriptSyncController::class, 'publish'])
                         ->name('social-automation.rpa-admin.scripts.publish');
                     Route::post('/scripts/pull', [RpaAdminScriptSyncController::class, 'pull'])

@@ -32,10 +32,11 @@ final class PackageRegistryService
     /**
      * @param  array<string, mixed>  $input
      * @param  array{user_id?: int|null, sync_source?: string|null}  $audit
+     * @param  array{allow_missing_video_demo?: bool}  $options
      */
-    public function publish(array $input, array $audit = []): PackagePublishResult
+    public function publish(array $input, array $audit = [], array $options = []): PackagePublishResult
     {
-        $validated = $this->validator->validate($input);
+        $validated = $this->validator->validate($input, $options);
         if (! ($validated['ok'] ?? false)) {
             return new PackagePublishResult(
                 PackagePublishResult::OUTCOME_VALIDATION,

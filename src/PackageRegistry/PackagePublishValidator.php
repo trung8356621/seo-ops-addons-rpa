@@ -33,9 +33,10 @@ final class PackagePublishValidator
 
     /**
      * @param  array<string, mixed>  $input
+     * @param  array{allow_missing_video_demo?: bool}  $options
      * @return array{ok: true, data: array<string, mixed>}|array{ok: false, errors: list<string>}
      */
-    public function validate(array $input): array
+    public function validate(array $input, array $options = []): array
     {
         $errors = [];
 
@@ -143,7 +144,8 @@ final class PackagePublishValidator
                 $errors[] = $err;
             }
         } elseif ($kind === 'script') {
-            foreach ($this->validateScriptManifest($manifest) as $err) {
+            $allowMissingVideoDemo = (bool) ($options['allow_missing_video_demo'] ?? false);
+            foreach ($this->validateScriptManifest($manifest, $allowMissingVideoDemo) as $err) {
                 $errors[] = $err;
             }
         }
@@ -189,7 +191,7 @@ final class PackagePublishValidator
      * @param  array<string, mixed>  $manifest
      * @return list<string>
      */
-    private function validateScriptManifest(array $manifest): array
+    private function validateScriptManifest(array $manifest, bool $allowMissingVideoDemo = false): array
     {
         $errors = [];
         $scriptId = trim((string) ($manifest['script_id'] ?? ''));
@@ -255,7 +257,9 @@ final class PackagePublishValidator
 
         $video = $manifest['video_demo'] ?? null;
         if ($video === null) {
-            $errors[] = 'script_video_demo_required';
+            if (! $allowMissingVideoDemo) {
+                $errors[] = 'script_video_demo_required';
+            }
         } elseif (! is_array($video)) {
             $errors[] = 'script_video_demo_invalid';
         } else {
