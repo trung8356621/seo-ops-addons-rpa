@@ -533,14 +533,24 @@ final class CampaignOrchestrator
                 }
                 $sessionIds = $sessions->pluck('id')->all();
 
-                $job = SaJob::query()
+                $reservedJobs = SaJob::query()
                     ->where('agent_id', $agent->id)
                     ->whereIn('browser_session_id', $sessionIds)
                     ->whereNotNull('campaign_content_id')
                     ->where('status', JobStatus::Reserved->value)
                     ->orderBy('id')
                     ->lockForUpdate()
-                    ->first();
+                    ->get();
+
+                $job = $reservedJobs->first(function (SaJob $candidate): bool {
+                    if ($candidate->campaign_id === null) {
+                        return true;
+                    }
+                    $campaign = SaCampaign::query()->notDeleted()->find($candidate->campaign_id);
+
+                    return $campaign instanceof SaCampaign
+                        && ! CampaignStatus::tryFrom((string) $campaign->status)?->isTerminal();
+                });
 
                 if (! $job instanceof SaJob) {
                     // Idempotent re-claim of already claimed/running for same agent

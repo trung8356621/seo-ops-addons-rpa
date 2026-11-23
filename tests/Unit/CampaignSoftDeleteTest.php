@@ -12,7 +12,6 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Events\Dispatcher;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Facade;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
@@ -52,6 +51,8 @@ final class CampaignSoftDeleteTest extends TestCase
     private StaffCampaignController $controller;
 
     private CampaignService $campaigns;
+
+    private CampaignOrchestrator $orchestrator;
 
     private bool $denyAccess = false;
 
@@ -135,8 +136,8 @@ final class CampaignSoftDeleteTest extends TestCase
         $this->runMigration($this->root.'/database/migrations/2026_11_23_000000_create_sa_article_library_tables.php');
         $this->runMigration($this->root.'/database/migrations/2026_11_23_030000_add_soft_delete_to_sa_campaigns.php');
 
-        $orchestrator = new CampaignOrchestrator;
-        $this->campaigns = new CampaignService($orchestrator);
+        $this->orchestrator = new CampaignOrchestrator;
+        $this->campaigns = new CampaignService($this->orchestrator);
         $this->controller = new StaffCampaignController($this->campaigns, $access, $installation);
     }
 
@@ -163,17 +164,11 @@ final class CampaignSoftDeleteTest extends TestCase
         return $this->denyManage;
     }
 
-    public function test_01_07_08_10_12_cancelled_campaign_with_terminal_jobs_soft_deletes_and_preserves_evidence(): void
+    public function test_01_cancelled_campaign_with_no_jobs_soft_deletes(): void
     {
-        [$campaign, $content, $job, $attempt, $lease, $artifact, $tag] = $this->seedCancelledCampaignWithEvidence(
-            JobStatus::Completed,
-            CampaignAttemptStatus::Succeeded,
-            'released',
-        );
+        $campaign = $this->createCampaign(CampaignStatus::Cancelled);
 
-        // 1. Delete succeeds
-        $req = $this->makeStaffDeleteRequest(77);
-        $res = $this->controller->destroy($req, $campaign->campaign_uuid);
+        $res = $this->controller->destroy($this->makeStaffDeleteRequest(77), $campaign->campaign_uuid);
         self::assertSame(200, $res->getStatusCode());
         $body = $res->getData(true);
         self::assertTrue($body['ok']);
@@ -181,14 +176,51 @@ final class CampaignSoftDeleteTest extends TestCase
         self::assertSame($campaign->campaign_uuid, $body['campaign_id']);
         self::assertNotEmpty($body['deleted_at']);
 
-        // Verify DB metadata & status untouched
+        $fresh = SaCampaign::query()->find($campaign->id);
+        self::assertNotNull($fresh?->deleted_at);
+        self::assertSame(77, $fresh?->deleted_by_user_id);
+        self::assertSame(CampaignStatus::Cancelled->value, $fresh?->status);
+
+        // Repeated delete returns explicit documented conflict
+        $repeatRes = $this->controller->destroy($this->makeStaffDeleteRequest(77), $campaign->campaign_uuid);
+        self::assertSame(409, $repeatRes->getStatusCode());
+        self::assertSame('campaign_already_deleted', $repeatRes->getData(true)['reason']);
+    }
+
+    public function test_02_03_04_07_08_09_11_cancelled_campaign_with_unknown_job_active_lease_and_queued_attempt_soft_deletes_without_mutating_evidence(): void
+    {
+        [$campaign, $content, $job, $attempt, $lease, $artifact, $tag, $agent, $session] = $this->seedCancelledCampaignWithEvidence(
+            JobStatus::Unknown,
+            CampaignAttemptStatus::Queued,
+            'active',
+        );
+
+        // Also add a second unknown attempt on the same job
+        $attempt2 = SaJobAttempt::query()->create([
+            'attempt_uuid' => (string) Str::uuid(),
+            'job_id' => $job->id,
+            'attempt_no' => 2,
+            'status' => CampaignAttemptStatus::Unknown->value,
+            'agent_id' => $agent->id,
+            'browser_session_id' => $session->id,
+            'started_at' => now()->subMinutes(2),
+            'finished_at' => null,
+        ]);
+
+        // 2, 3, 4. Soft delete succeeds despite Unknown Job, active-status Lease, and queued/unknown Attempts
+        $res = $this->controller->destroy($this->makeStaffDeleteRequest(77), $campaign->campaign_uuid);
+        self::assertSame(200, $res->getStatusCode());
+        $body = $res->getData(true);
+        self::assertTrue($body['success']);
+        self::assertSame($campaign->campaign_uuid, $body['campaign_id']);
+
         $fresh = SaCampaign::query()->find($campaign->id);
         self::assertInstanceOf(SaCampaign::class, $fresh);
         self::assertSame(CampaignStatus::Cancelled->value, $fresh->status);
         self::assertNotNull($fresh->deleted_at);
         self::assertSame(77, $fresh->deleted_by_user_id);
 
-        // Audit log recorded
+        // 9. Audit event recorded
         $audit = SaAuditLog::query()->where('subject_id', $campaign->id)->where('action', 'campaign.soft_deleted')->first();
         self::assertInstanceOf(SaAuditLog::class, $audit);
         self::assertSame(77, (int) $audit->actor_id);
@@ -196,41 +228,32 @@ final class CampaignSoftDeleteTest extends TestCase
         // 7. Hidden from default list and detail
         $listRes = $this->controller->index();
         self::assertSame(200, $listRes->getStatusCode());
-        $listData = $listRes->getData(true)['data'];
-        self::assertCount(0, $listData);
+        self::assertCount(0, $listRes->getData(true)['data']);
+        self::assertSame(404, $this->controller->show($campaign->campaign_uuid)->getStatusCode());
 
-        $showRes = $this->controller->show($campaign->campaign_uuid);
-        self::assertSame(404, $showRes->getStatusCode());
+        // 8. Job, Attempt, Lease, Artifact, Content, ActionTag counts and states completely unchanged
+        self::assertSame(1, SaJob::query()->where('campaign_id', $campaign->id)->count());
+        self::assertSame(2, SaJobAttempt::query()->where('job_id', $job->id)->count());
+        self::assertSame(1, SaAccountExecutionLease::query()->where('job_id', $job->id)->count());
+        self::assertSame(1, SaArtifact::query()->where('job_id', $job->id)->count());
 
-        // 8. Historical Jobs, Attempts, Leases, Artifacts, Contents, ActionTags unchanged & history intact
-        $freshJob = SaJob::query()->find($job->id);
-        $freshAttempt = SaJobAttempt::query()->find($attempt->id);
-        $freshLease = SaAccountExecutionLease::query()->find($lease->id);
-        $freshArtifact = SaArtifact::query()->find($artifact->id);
+        self::assertSame(JobStatus::Unknown->value, SaJob::query()->find($job->id)?->status);
+        self::assertSame(CampaignAttemptStatus::Queued->value, SaJobAttempt::query()->find($attempt->id)?->status);
+        self::assertSame(CampaignAttemptStatus::Unknown->value, SaJobAttempt::query()->find($attempt2->id)?->status);
+        self::assertSame('active', SaAccountExecutionLease::query()->find($lease->id)?->status);
+        self::assertNull(SaAccountExecutionLease::query()->find($lease->id)?->released_at);
+        self::assertSame($artifact->artifact_uuid, SaArtifact::query()->find($artifact->id)?->artifact_uuid);
+        self::assertSame($tag->plan_tag_uuid, SaCampaignActionTag::query()->find($tag->id)?->plan_tag_uuid);
+
+        // 11. Existing history and audit relationships remain available
         $freshContent = SaCampaignContent::query()->find($content->id);
-        $freshTag = SaCampaignActionTag::query()->find($tag->id);
-
-        self::assertSame(JobStatus::Completed->value, $freshJob?->status);
-        self::assertSame(CampaignAttemptStatus::Succeeded->value, $freshAttempt?->status);
-        self::assertSame('released', $freshLease?->status);
-        self::assertSame($artifact->artifact_uuid, $freshArtifact?->artifact_uuid);
-        self::assertSame(CampaignContentStatus::Success->value, $freshContent?->status);
-        self::assertSame($tag->plan_tag_uuid, $freshTag?->plan_tag_uuid);
         self::assertSame($campaign->id, $freshContent?->campaign?->id);
-
         $history = (new CampaignContentHistoryService)->attemptsByContentId($fresh, [$freshContent]);
-        self::assertCount(1, $history[$content->id] ?? []);
+        self::assertCount(2, $history[$content->id] ?? []);
         self::assertSame($attempt->attempt_uuid, $history[$content->id][0]['attempt_uuid']);
+        self::assertSame($attempt2->attempt_uuid, $history[$content->id][1]['attempt_uuid']);
 
-        // 10. Repeated delete returns explicit documented conflict
-        $repeatRes = $this->controller->destroy($req, $campaign->campaign_uuid);
-        self::assertSame(409, $repeatRes->getStatusCode());
-        $repeatBody = $repeatRes->getData(true);
-        self::assertFalse($repeatBody['success']);
-        self::assertSame('CAMPAIGN_DELETE_BLOCKED', $repeatBody['code']);
-        self::assertSame('campaign_already_deleted', $repeatBody['reason']);
-
-        // 12. Existing start/resume/pause/cancel/update APIs reject deleted Campaigns
+        // Existing start/resume/pause/cancel/update APIs reject deleted Campaigns
         self::assertSame(404, $this->controller->start($campaign->campaign_uuid)->getStatusCode());
         self::assertSame(404, $this->controller->resume($campaign->campaign_uuid)->getStatusCode());
         self::assertSame(404, $this->controller->pause($campaign->campaign_uuid)->getStatusCode());
@@ -238,88 +261,25 @@ final class CampaignSoftDeleteTest extends TestCase
         self::assertSame(404, $this->controller->update(Request::create('/', 'PUT', ['name' => 'Updated']), $campaign->campaign_uuid)->getStatusCode());
     }
 
-    public function test_02_running_campaign_rejected(): void
+    public function test_05_06_non_cancelled_campaigns_rejected(): void
     {
-        $campaign = $this->createCampaign(CampaignStatus::Running);
-        $res = $this->controller->destroy($this->makeStaffDeleteRequest(77), $campaign->campaign_uuid);
+        foreach ([CampaignStatus::Running, CampaignStatus::Paused, CampaignStatus::Draft, CampaignStatus::Completed] as $status) {
+            $campaign = $this->createCampaign($status);
+            $res = $this->controller->destroy($this->makeStaffDeleteRequest(77), $campaign->campaign_uuid);
 
-        self::assertSame(409, $res->getStatusCode());
-        $body = $res->getData(true);
-        self::assertFalse($body['success']);
-        self::assertSame('CAMPAIGN_DELETE_BLOCKED', $body['code']);
-        self::assertSame('campaign_not_cancelled', $body['reason']);
-        self::assertNull(SaCampaign::query()->find($campaign->id)?->deleted_at);
+            self::assertSame(409, $res->getStatusCode(), "Expected 409 for status {$status->value}");
+            $body = $res->getData(true);
+            self::assertFalse($body['success']);
+            self::assertSame('CAMPAIGN_DELETE_BLOCKED', $body['code']);
+            self::assertSame('campaign_not_cancelled', $body['reason']);
+            self::assertNull(SaCampaign::query()->find($campaign->id)?->deleted_at);
+        }
     }
 
-    public function test_03_paused_campaign_rejected(): void
-    {
-        $campaign = $this->createCampaign(CampaignStatus::Paused);
-        $res = $this->controller->destroy($this->makeStaffDeleteRequest(77), $campaign->campaign_uuid);
-
-        self::assertSame(409, $res->getStatusCode());
-        $body = $res->getData(true);
-        self::assertFalse($body['success']);
-        self::assertSame('CAMPAIGN_DELETE_BLOCKED', $body['code']);
-        self::assertSame('campaign_not_cancelled', $body['reason']);
-        self::assertNull(SaCampaign::query()->find($campaign->id)?->deleted_at);
-    }
-
-    public function test_04_cancelled_campaign_with_unknown_job_rejected_and_job_untouched(): void
-    {
-        [$campaign, , $job] = $this->seedCancelledCampaignWithEvidence(
-            JobStatus::Unknown,
-            CampaignAttemptStatus::Failed,
-            'released',
-        );
-
-        $res = $this->controller->destroy($this->makeStaffDeleteRequest(77), $campaign->campaign_uuid);
-        self::assertSame(409, $res->getStatusCode());
-        $body = $res->getData(true);
-        self::assertSame('CAMPAIGN_DELETE_BLOCKED', $body['code']);
-        self::assertSame('unknown_jobs_exist', $body['reason']);
-        self::assertSame(JobStatus::Unknown->value, SaJob::query()->find($job->id)?->status);
-        self::assertNull(SaCampaign::query()->find($campaign->id)?->deleted_at);
-    }
-
-    public function test_05_cancelled_campaign_with_active_lease_rejected_and_lease_untouched(): void
-    {
-        [$campaign, , , , $lease] = $this->seedCancelledCampaignWithEvidence(
-            JobStatus::Failed,
-            CampaignAttemptStatus::Failed,
-            'active',
-        );
-
-        $res = $this->controller->destroy($this->makeStaffDeleteRequest(77), $campaign->campaign_uuid);
-        self::assertSame(409, $res->getStatusCode());
-        $body = $res->getData(true);
-        self::assertSame('CAMPAIGN_DELETE_BLOCKED', $body['code']);
-        self::assertSame('active_leases_exist', $body['reason']);
-        self::assertSame('active', SaAccountExecutionLease::query()->find($lease->id)?->status);
-        self::assertNull(SaCampaign::query()->find($campaign->id)?->deleted_at);
-    }
-
-    public function test_06_cancelled_campaign_with_unresolved_attempt_rejected_and_attempt_untouched(): void
-    {
-        [$campaign, , , $attempt] = $this->seedCancelledCampaignWithEvidence(
-            JobStatus::Failed,
-            CampaignAttemptStatus::Running,
-            'released',
-        );
-
-        $res = $this->controller->destroy($this->makeStaffDeleteRequest(77), $campaign->campaign_uuid);
-        self::assertSame(409, $res->getStatusCode());
-        $body = $res->getData(true);
-        self::assertSame('CAMPAIGN_DELETE_BLOCKED', $body['code']);
-        self::assertSame('unresolved_attempts_exist', $body['reason']);
-        self::assertSame(CampaignAttemptStatus::Running->value, SaJobAttempt::query()->find($attempt->id)?->status);
-        self::assertNull(SaCampaign::query()->find($campaign->id)?->deleted_at);
-    }
-
-    public function test_09_unauthorized_and_csrf_protection_enforced(): void
+    public function test_10_unauthorized_and_csrf_protection_enforced(): void
     {
         $campaign = $this->createCampaign(CampaignStatus::Cancelled);
 
-        // Unauthorized staff/user rejected with 403
         $this->denyManage = true;
         try {
             $this->controller->destroy($this->makeStaffDeleteRequest(77), $campaign->campaign_uuid);
@@ -331,36 +291,53 @@ final class CampaignSoftDeleteTest extends TestCase
         }
         self::assertNull(SaCampaign::query()->find($campaign->id)?->deleted_at);
 
-        // Route registration includes VerifyCsrfToken + Authenticate middleware
         $providerSource = file_get_contents($this->root.'/src/SocialAutomationServiceProvider.php');
         self::assertIsString($providerSource);
-        self::assertStringContainsString("VerifyCsrfToken::class", $providerSource);
+        self::assertStringContainsString('VerifyCsrfToken::class', $providerSource);
         self::assertStringContainsString("Route::delete('/{id}', [StaffCampaignController::class, 'destroy'])", $providerSource);
     }
 
-    public function test_11_concurrent_eligibility_change_cannot_bypass_safety_checks(): void
+    public function test_12_no_new_dispatch_or_claim_from_cancelled_or_deleted_campaign(): void
     {
-        [$campaign, , $job] = $this->seedCancelledCampaignWithEvidence(
-            JobStatus::Completed,
-            CampaignAttemptStatus::Succeeded,
-            'released',
+        [$campaign, $content, $job, , , , , $agent, $session] = $this->seedCancelledCampaignWithEvidence(
+            JobStatus::Reserved,
+            CampaignAttemptStatus::Queued,
+            'active',
         );
 
-        // Simulate a concurrent state change right as the delete transaction inspects the campaign/jobs
-        $simulatedRaceFired = false;
-        DB::connection(SocialAutomationServiceConfig::CONNECTION)->listen(function ($query) use ($job, &$simulatedRaceFired): void {
-            if (! $simulatedRaceFired && str_contains($query->sql, 'from "sa_campaigns"') && str_contains($query->sql, 'campaign_uuid')) {
-                $simulatedRaceFired = true;
-                SaJob::query()->where('id', $job->id)->update(['status' => JobStatus::Running->value]);
-            }
-        });
-
+        // Soft-delete the cancelled campaign
         $res = $this->controller->destroy($this->makeStaffDeleteRequest(77), $campaign->campaign_uuid);
-        self::assertSame(409, $res->getStatusCode());
-        $body = $res->getData(true);
-        self::assertSame('CAMPAIGN_DELETE_BLOCKED', $body['code']);
-        self::assertSame('nonterminal_jobs_exist', $body['reason']);
-        self::assertNull(SaCampaign::query()->find($campaign->id)?->deleted_at);
+        self::assertSame(200, $res->getStatusCode());
+
+        // Add a pending content row to ensure dispatch/recheck ignores cancelled+deleted campaigns
+        SaCampaignContent::query()->create([
+            'content_uuid' => (string) Str::uuid(),
+            'campaign_id' => $campaign->id,
+            'external_ref' => 'ext-pending',
+            'sort_order' => 2,
+            'status' => CampaignContentStatus::Pending->value,
+            'input' => ['title' => 'Should Never Dispatch'],
+        ]);
+
+        // Dispatch & scheduler recheck must not touch cancelled/deleted campaign
+        $dispatchRes = $this->orchestrator->dispatchCampaign($campaign->fresh());
+        self::assertFalse($dispatchRes['ok']);
+        self::assertSame(0, $dispatchRes['dispatched']);
+
+        $recheckRes = $this->orchestrator->recheckDueCampaigns();
+        self::assertSame(0, $recheckRes['checked']);
+        self::assertSame(0, $recheckRes['dispatched']);
+
+        // Claim must NOT claim a leftover Reserved job belonging to a cancelled/deleted campaign
+        $claimRes = $this->orchestrator->claimNext(
+            $agent->agent_uuid,
+            [$session->session_uuid],
+            null,
+            'inst-soft-delete-test',
+        );
+        self::assertTrue($claimRes['ok']);
+        self::assertNull($claimRes['data']);
+        self::assertSame(JobStatus::Reserved->value, SaJob::query()->find($job->id)?->status);
     }
 
     private function makeStaffDeleteRequest(int $userId): Request
@@ -394,7 +371,7 @@ final class CampaignSoftDeleteTest extends TestCase
     }
 
     /**
-     * @return array{0: SaCampaign, 1: SaCampaignContent, 2: SaJob, 3: SaJobAttempt, 4: SaAccountExecutionLease, 5: SaArtifact, 6: SaCampaignActionTag}
+     * @return array{0: SaCampaign, 1: SaCampaignContent, 2: SaJob, 3: SaJobAttempt, 4: SaAccountExecutionLease, 5: SaArtifact, 6: SaCampaignActionTag, 7: SaAgent, 8: SaBrowserSession}
      */
     private function seedCancelledCampaignWithEvidence(
         JobStatus $jobStatus,
@@ -415,6 +392,7 @@ final class CampaignSoftDeleteTest extends TestCase
             'installation_id' => 'inst-soft-delete-test',
             'name' => 'Agent 1',
             'status' => 'online',
+            'availability' => 'available',
         ]);
         $session = SaBrowserSession::query()->create([
             'session_uuid' => (string) Str::uuid(),
@@ -495,7 +473,7 @@ final class CampaignSoftDeleteTest extends TestCase
             'checksum_sha256' => hash('sha256', 'evidence'),
         ]);
 
-        return [$campaign, $content, $job, $attempt, $lease, $artifact, $tag];
+        return [$campaign, $content, $job, $attempt, $lease, $artifact, $tag, $agent, $session];
     }
 
     private function createBaseSchema(): void
@@ -509,6 +487,8 @@ final class CampaignSoftDeleteTest extends TestCase
             $table->string('installation_id', 128)->nullable();
             $table->string('name', 128)->nullable();
             $table->string('status', 32)->default('offline');
+            $table->string('availability', 32)->default('available');
+            $table->unsignedBigInteger('client_api_key_id')->nullable();
             $table->timestamps();
         });
 

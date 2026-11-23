@@ -15,14 +15,11 @@ use Omnichannel\Addons\SocialAutomation\Domain\CampaignShortcodeMockGenerator;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignShortcodePipeline;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignTestScriptPolicy;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignV2ExecutionPolicy;
-use Omnichannel\Addons\SocialAutomation\Enums\CampaignAttemptStatus;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignContentStatus;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignExecutionMode;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignRunMode;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignStatus;
-use Omnichannel\Addons\SocialAutomation\Enums\JobStatus;
 use Omnichannel\Addons\SocialAutomation\Models\SaAccount;
-use Omnichannel\Addons\SocialAutomation\Models\SaAccountExecutionLease;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTag;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTagScript;
 use Omnichannel\Addons\SocialAutomation\Models\SaAuditLog;
@@ -30,8 +27,6 @@ use Omnichannel\Addons\SocialAutomation\Models\SaCampaign;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaignActionTag;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaignContent;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaignContentAssignment;
-use Omnichannel\Addons\SocialAutomation\Models\SaJob;
-use Omnichannel\Addons\SocialAutomation\Models\SaJobAttempt;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackage;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
 use Omnichannel\Addons\SocialAutomation\Orchestration\CampaignOrchestrator;
@@ -545,50 +540,6 @@ final class CampaignService
 
             if ((string) $campaign->status !== CampaignStatus::Cancelled->value) {
                 return $this->deleteBlocked('campaign_not_cancelled');
-            }
-
-            $jobs = SaJob::query()
-                ->where('campaign_id', $campaign->id)
-                ->lockForUpdate()
-                ->get(['id', 'status']);
-
-            $jobIds = [];
-            foreach ($jobs as $job) {
-                $jobIds[] = (int) $job->id;
-                $jobStatus = JobStatus::tryFrom((string) $job->status);
-                if ($jobStatus === JobStatus::Unknown) {
-                    return $this->deleteBlocked('unknown_jobs_exist');
-                }
-                if ($jobStatus === null || ! $jobStatus->isTerminal()) {
-                    return $this->deleteBlocked('nonterminal_jobs_exist');
-                }
-            }
-
-            if ($jobIds !== [] && SocialAutomationSchema::has('sa_account_execution_leases')) {
-                $hasUnresolvedLease = SaAccountExecutionLease::query()
-                    ->whereIn('job_id', $jobIds)
-                    ->where(function ($q): void {
-                        $q->where('status', 'active')
-                            ->orWhereNotIn('status', ['released', 'expired', 'revoked']);
-                    })
-                    ->lockForUpdate()
-                    ->exists();
-                if ($hasUnresolvedLease) {
-                    return $this->deleteBlocked('active_leases_exist');
-                }
-            }
-
-            if ($jobIds !== [] && SocialAutomationSchema::has('sa_job_attempts')) {
-                $attempts = SaJobAttempt::query()
-                    ->whereIn('job_id', $jobIds)
-                    ->lockForUpdate()
-                    ->get(['id', 'status']);
-                foreach ($attempts as $attempt) {
-                    $attemptStatus = CampaignAttemptStatus::tryFrom((string) $attempt->status);
-                    if ($attemptStatus === null || ! $attemptStatus->isTerminal()) {
-                        return $this->deleteBlocked('unresolved_attempts_exist');
-                    }
-                }
             }
 
             $now = now();
