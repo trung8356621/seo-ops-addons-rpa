@@ -277,7 +277,7 @@ final class StaffCampaignController extends Controller
             return response()->json(['ok' => false, 'errors' => ['invalid_interval_minutes']], 422);
         }
         $interval = (int) $raw;
-        if ($interval < 0 || $interval > 4_294_967_295) {
+        if ($interval < 0 || $interval > CampaignV2PlanService::MAX_INTERVAL_MINUTES) {
             return response()->json(['ok' => false, 'errors' => ['invalid_interval_minutes']], 422);
         }
 

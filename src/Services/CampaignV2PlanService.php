@@ -32,6 +32,8 @@ use Throwable;
 
 final class CampaignV2PlanService
 {
+    public const MAX_INTERVAL_MINUTES = 10_080;
+
     public function __construct(
         private readonly ScriptResolutionService $scriptResolver = new ScriptResolutionService,
         private readonly CampaignRecheckPolicy $recheck = new CampaignRecheckPolicy,
@@ -1015,7 +1017,7 @@ final class CampaignV2PlanService
         int $intervalMinutes,
         string $installationId,
     ): array {
-        if ($intervalMinutes < 0 || $intervalMinutes > 4_294_967_295) {
+        if ($intervalMinutes < 0 || $intervalMinutes > self::MAX_INTERVAL_MINUTES) {
             return ['ok' => false, 'http' => 422, 'errors' => ['invalid_interval_minutes']];
         }
 
@@ -1786,15 +1788,24 @@ final class CampaignV2PlanService
         }
 
         $raw = $tagRow['interval_minutes'];
-        if (is_bool($raw) || filter_var($raw, FILTER_VALIDATE_INT) === false || (int) $raw < 0) {
+        if (is_bool($raw) || is_array($raw) || filter_var($raw, FILTER_VALIDATE_INT) === false) {
             return $this->fail(
                 422,
                 ['invalid_interval_minutes'],
-                ["action_tags.{$index}.interval_minutes" => ['interval_minutes must be a non-negative integer.']]
+                ["action_tags.{$index}.interval_minutes" => ['interval_minutes must be an integer between 0 and '.self::MAX_INTERVAL_MINUTES.'.']]
             );
         }
 
-        return ['ok' => true, 'value' => (int) $raw];
+        $value = (int) $raw;
+        if ($value < 0 || $value > self::MAX_INTERVAL_MINUTES) {
+            return $this->fail(
+                422,
+                ['invalid_interval_minutes'],
+                ["action_tags.{$index}.interval_minutes" => ['interval_minutes must be between 0 and '.self::MAX_INTERVAL_MINUTES.'.']]
+            );
+        }
+
+        return ['ok' => true, 'value' => $value];
     }
 
     /**

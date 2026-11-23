@@ -909,25 +909,62 @@ final class ActionTagSequentialQueueAndRecoveryTest extends TestCase
 
     public function test_v2_plan_service_validates_and_persists_interval_minutes(): void
     {
-        $t = $this->seedActionTagAndScript('threads', 'threads.create_post');
+        $this->seedActionTagAndScript('threads', 'threads.create_post');
 
-        $bad = $this->campaigns->create([
-            'name' => 'Bad Interval',
+        foreach ([-1, 1.5, 10081, 525600, true, [60], 'abc'] as $badInterval) {
+            $bad = $this->campaigns->create([
+                'name' => 'Bad Interval',
+                'plan_version' => 2,
+                'action_tags' => [['action_tag_key' => 'threads.create_post', 'interval_minutes' => $badInterval]],
+                'contents' => [],
+            ], $this->installationId, 1);
+            self::assertFalse($bad['ok'], 'Expected create rejection for '.json_encode($badInterval));
+            self::assertSame(422, $bad['http'] ?? null);
+            self::assertContains('invalid_interval_minutes', $bad['errors']);
+        }
+
+        $okZero = $this->campaigns->create([
+            'name' => 'Threads 0m',
             'plan_version' => 2,
-            'action_tags' => [['action_tag_key' => 'threads.create_post', 'interval_minutes' => -5]],
+            'action_tags' => [['action_tag_key' => 'threads.create_post', 'interval_minutes' => 0]],
             'contents' => [],
         ], $this->installationId, 1);
-        self::assertFalse($bad['ok']);
-        self::assertContains('invalid_interval_minutes', $bad['errors']);
+        self::assertTrue($okZero['ok'], json_encode($okZero));
+        self::assertSame(0, $okZero['data']['action_tags'][0]['interval_minutes']);
 
-        $ok = $this->campaigns->create([
+        $okMax = $this->campaigns->create([
+            'name' => 'Threads 10080m',
+            'plan_version' => 2,
+            'action_tags' => [['action_tag_key' => 'threads.create_post', 'interval_minutes' => 10080]],
+            'contents' => [],
+        ], $this->installationId, 1);
+        self::assertTrue($okMax['ok'], json_encode($okMax));
+        self::assertSame(10080, $okMax['data']['action_tags'][0]['interval_minutes']);
+
+        $campUuid = $okMax['data']['id'];
+        $planTagUuid = $okMax['data']['action_tags'][0]['id'];
+
+        // Update rejects 10081 and 525600, accepts 1440 and 10080
+        foreach ([10081, 525600, -1, 1.5] as $badUpdate) {
+            $badUpd = $this->campaigns->update($campUuid, $this->installationId, [
+                'name' => 'Threads 10080m',
+                'plan_version' => 2,
+                'action_tags' => [['id' => $planTagUuid, 'action_tag_key' => 'threads.create_post', 'interval_minutes' => $badUpdate]],
+                'contents' => [],
+            ]);
+            self::assertFalse($badUpd['ok'], 'Expected update rejection for '.json_encode($badUpdate));
+            self::assertSame(422, $badUpd['http'] ?? null);
+            self::assertContains('invalid_interval_minutes', $badUpd['errors'], json_encode($badUpd));
+        }
+
+        $okUpd = $this->campaigns->update($campUuid, $this->installationId, [
             'name' => 'Threads 1440m',
             'plan_version' => 2,
-            'action_tags' => [['action_tag_key' => 'threads.create_post', 'interval_minutes' => 1440]],
+            'action_tags' => [['id' => $planTagUuid, 'action_tag_key' => 'threads.create_post', 'interval_minutes' => 1440]],
             'contents' => [],
-        ], $this->installationId, 1);
-        self::assertTrue($ok['ok'], json_encode($ok));
-        self::assertSame(1440, $ok['data']['action_tags'][0]['interval_minutes']);
+        ]);
+        self::assertTrue($okUpd['ok'], json_encode($okUpd));
+        self::assertSame(1440, $okUpd['data']['action_tags'][0]['interval_minutes']);
     }
 
     /**
@@ -984,10 +1021,19 @@ final class ActionTagSequentialQueueAndRecoveryTest extends TestCase
         self::assertSame(200, $resComp->getStatusCode());
         self::assertSame(240, (int) $pt->fresh()->interval_minutes);
 
+        // Boundary 0 and 10080 -> 200
+        $resZero = $this->patchInterval($camp->campaign_uuid, $pt->plan_tag_uuid, ['interval_minutes' => 0]);
+        self::assertSame(200, $resZero->getStatusCode());
+        self::assertSame(0, $resZero->getData(true)['interval_minutes']);
+
+        $resMax = $this->patchInterval($camp->campaign_uuid, $pt->plan_tag_uuid, ['interval_minutes' => 10080]);
+        self::assertSame(200, $resMax->getStatusCode());
+        self::assertSame(10080, $resMax->getData(true)['interval_minutes']);
+
         // Idempotent same-value PATCH -> 200
-        $resSame = $this->patchInterval($camp->campaign_uuid, $pt->plan_tag_uuid, ['interval_minutes' => 240]);
+        $resSame = $this->patchInterval($camp->campaign_uuid, $pt->plan_tag_uuid, ['interval_minutes' => 10080]);
         self::assertSame(200, $resSame->getStatusCode());
-        self::assertSame(240, $resSame->getData(true)['interval_minutes']);
+        self::assertSame(10080, $resSame->getData(true)['interval_minutes']);
 
         // Validation 422 cases
         $invalidPayloads = [
@@ -995,26 +1041,27 @@ final class ActionTagSequentialQueueAndRecoveryTest extends TestCase
             ['interval_minutes' => null],
             ['interval_minutes' => ''],
             ['interval_minutes' => -1],
-            ['interval_minutes' => 12.5],
-            ['interval_minutes' => '12.5'],
+            ['interval_minutes' => 1.5],
+            ['interval_minutes' => '1.5'],
             ['interval_minutes' => true],
             ['interval_minutes' => false],
             ['interval_minutes' => [60]],
             ['interval_minutes' => 'abc'],
-            ['interval_minutes' => 4_294_967_296],
+            ['interval_minutes' => 10081],
+            ['interval_minutes' => 525600],
         ];
         foreach ($invalidPayloads as $badPayload) {
             $badRes = $this->patchInterval($camp->campaign_uuid, $pt->plan_tag_uuid, $badPayload);
             self::assertSame(422, $badRes->getStatusCode(), 'Expected 422 for '.json_encode($badPayload));
             self::assertFalse($badRes->getData(true)['ok']);
         }
-        self::assertSame(240, (int) $pt->fresh()->interval_minutes);
+        self::assertSame(10080, (int) $pt->fresh()->interval_minutes);
 
         // Cancelled -> 409
         $camp->update(['status' => CampaignStatus::Cancelled->value]);
         $resCancel = $this->patchInterval($camp->campaign_uuid, $pt->plan_tag_uuid, ['interval_minutes' => 30]);
         self::assertSame(409, $resCancel->getStatusCode());
-        self::assertSame(240, (int) $pt->fresh()->interval_minutes);
+        self::assertSame(10080, (int) $pt->fresh()->interval_minutes);
 
         // Soft-deleted -> 404
         $camp->update(['status' => CampaignStatus::Running->value, 'deleted_at' => now()]);
