@@ -323,9 +323,41 @@ final class ScriptResolutionService
             }
         }
 
+        $effectiveRole = 'site_specific';
+        $effectiveGlobalScope = null;
+        $memberGroupUuid = null;
+
+        if ($package->isCmsGlobal() && $globalScope !== null) {
+            $effectiveRole = 'cms_global_owner';
+            $effectiveGlobalScope = $globalScope;
+        }
+        if (SocialAutomationSchema::scriptVariantGroupsReady()) {
+            $memberItem = SaScriptVariantGroupItem::query()
+                ->with('group')
+                ->where('package_id', $package->id)
+                ->where('is_enabled', true)
+                ->first();
+            $memberGroup = $memberItem?->group;
+            if ($memberGroup instanceof SaScriptVariantGroup && $memberGroup->is_enabled) {
+                $memberGroupUuid = (string) $memberGroup->group_uuid;
+                if ((string) $memberGroup->scope_type === SaScriptVariantGroup::SCOPE_CMS_GLOBAL && $effectiveRole !== 'cms_global_owner') {
+                    $effectiveRole = 'cms_global_variant';
+                    $effectiveGlobalScope = [
+                        'cms_type' => (string) $memberGroup->cms_type,
+                        'cms_template_id' => $memberGroup->cms_template_id !== null ? (int) $memberGroup->cms_template_id : null,
+                        'path_key' => (string) $memberGroup->cms_path_key,
+                        'scope_key' => (string) $memberGroup->global_scope_key,
+                    ];
+                }
+            }
+        }
+
         return [
             'sharing_mode' => $sharingMode,
             'global_scope' => $globalScope,
+            'effective_sharing_role' => $effectiveRole,
+            'effective_global_scope' => $effectiveGlobalScope,
+            'variant_group_id' => $memberGroupUuid,
             'global_eligible' => $eligibleScope !== null,
             'global_ineligible_reason' => $ineligibleReason,
             'eligible_global_scope' => $eligibleScope,
@@ -432,6 +464,7 @@ final class ScriptResolutionService
                     ->first();
                 if ($siteGroup instanceof SaScriptVariantGroup) {
                     $enabledVariants = [];
+                    $seenLabels = [];
                     $primaryPkg = null;
                     $primaryRel = null;
                     foreach ($siteGroup->items->sortBy('priority') as $item) {
@@ -441,6 +474,11 @@ final class ScriptResolutionService
                         if (! $item->release instanceof SaPackageRelease || (string) $item->release->status !== 'published') {
                             continue;
                         }
+                        $lbl = strtoupper(trim((string) $item->language_label));
+                        if (isset($seenLabels[$lbl])) {
+                            return $this->missingResult($tagKey, true, 'ambiguous_variant_language', $cmsScope);
+                        }
+                        $seenLabels[$lbl] = true;
                         if ($primaryPkg === null) {
                             $primaryPkg = $item->package;
                             $primaryRel = $item->release;
@@ -554,6 +592,7 @@ final class ScriptResolutionService
                 }
 
                 $enabledVariants = [];
+                $seenLabels = [];
                 $primaryPackage = null;
                 $primaryRelease = null;
                 foreach ($group->items->sortBy('priority') as $item) {
@@ -568,6 +607,11 @@ final class ScriptResolutionService
                     if (! $vRel instanceof SaPackageRelease || (string) $vRel->status !== 'published') {
                         continue;
                     }
+                    $lbl = strtoupper(trim((string) $item->language_label));
+                    if (isset($seenLabels[$lbl])) {
+                        return $this->missingResult($targetTagKey, true, 'ambiguous_variant_language', $cmsScope);
+                    }
+                    $seenLabels[$lbl] = true;
                     if ($primaryPackage === null) {
                         $primaryPackage = $vPkg;
                         $primaryRelease = $vRel;

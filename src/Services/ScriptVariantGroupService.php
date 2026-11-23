@@ -460,7 +460,7 @@ final class ScriptVariantGroupService
         $packageKey = trim((string) ($input['package_key'] ?? $input['script_id'] ?? ''));
         $packageId = isset($input['package_id']) && $input['package_id'] !== '' ? (int) $input['package_id'] : null;
 
-        $package = null;
+                $package = null;
         if ($packageId !== null) {
             $package = SaPackage::query()->where('id', $packageId)->where('kind', 'script')->first();
         } elseif ($packageKey !== '') {
@@ -468,6 +468,9 @@ final class ScriptVariantGroupService
         }
         if (! $package instanceof SaPackage) {
             return ['ok' => false, 'http' => 422, 'error' => 'package_not_found', 'errors' => ['package_not_found']];
+        }
+        if (isset($package->is_enabled) && ! (bool) $package->is_enabled) {
+            return ['ok' => false, 'http' => 422, 'error' => 'disabled_script_cannot_be_variant', 'errors' => ['disabled_script_cannot_be_variant']];
         }
 
         $releaseId = isset($input['release_id']) && $input['release_id'] !== '' ? (int) $input['release_id'] : null;
@@ -653,10 +656,13 @@ final class ScriptVariantGroupService
             $cmsScope = null;
             $actionTagKey = null;
 
+            $scopeProbe = clone $locked;
+            $scopeProbe->is_enabled = true;
+
             if ($group instanceof SaScriptVariantGroup && $requestedScope === 'auto') {
                 $scopeType = (string) $group->scope_type;
                 if ($scopeType === SaScriptVariantGroup::SCOPE_CMS_GLOBAL) {
-                    $derived = $resolver->deriveGlobalScope($locked);
+                    $derived = $resolver->deriveGlobalScope($scopeProbe);
                     if (! ($derived['ok'] ?? false) || strtolower((string) $derived['scope']['scope_key']) !== strtolower((string) $group->global_scope_key)) {
                         return ['ok' => false, 'http' => 422, 'error' => 'incompatible_variant_scope', 'errors' => ['incompatible_variant_scope']];
                     }
@@ -665,7 +671,7 @@ final class ScriptVariantGroupService
                     $actionTagKey = (string) $group->action_tag_key;
                 }
             } else {
-                $derived = $resolver->deriveGlobalScope($locked);
+                $derived = $resolver->deriveGlobalScope($scopeProbe);
                 $canUseCmsGlobal = ($derived['ok'] ?? false);
                 if ($requestedScope === 'cms_global' && ! $canUseCmsGlobal) {
                     return [
@@ -731,6 +737,7 @@ final class ScriptVariantGroupService
                     ->where('kind', 'script')
                     ->where('sharing_mode', SaPackage::SHARING_CMS_GLOBAL)
                     ->where('global_scope_key', $scopeKey)
+                    ->where('is_enabled', true)
                     ->where('id', '!=', $locked->id)
                     ->lockForUpdate()
                     ->first();
@@ -842,14 +849,20 @@ final class ScriptVariantGroupService
             $locked->is_primary = $isPrimary;
             $locked->save();
 
-            // Upsert item in internal Variant Group (preserving immutable release pin if already pinned unless no release yet)
+            // Sync internal Variant Group item:
+            // Disabled Scripts are excluded from active fallback groups (allowing replacement of the same language)
+            // while remaining in Script Registry and preserving immutable snapshots in started Campaigns.
             $item = SaScriptVariantGroupItem::query()
                 ->where('group_id', $group->id)
                 ->where('package_id', $locked->id)
                 ->first();
-            if ($item instanceof SaScriptVariantGroupItem) {
+            if (! $isEnabled) {
+                if ($item instanceof SaScriptVariantGroupItem) {
+                    $item->delete();
+                }
+            } elseif ($item instanceof SaScriptVariantGroupItem) {
                 $item->language_label = $label;
-                $item->is_enabled = $isEnabled;
+                $item->is_enabled = true;
                 $item->save();
             } else {
                 $maxPrio = (int) SaScriptVariantGroupItem::query()->where('group_id', $group->id)->max('priority');
@@ -864,7 +877,7 @@ final class ScriptVariantGroupService
                     'execution_digest' => $release->execution_digest,
                     'language_label' => $label,
                     'priority' => $isPrimary ? 1 : ($maxPrio + 1),
-                    'is_enabled' => $isEnabled,
+                    'is_enabled' => true,
                 ]);
             }
 

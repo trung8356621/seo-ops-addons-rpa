@@ -359,6 +359,84 @@ final class ScriptOperationalConfigTest extends TestCase
         );
     }
 
+    public function test_old_vi_disabled_replaced_by_new_vi_primary_with_en_fallback_and_effective_sharing_roles(): void
+    {
+        $fx = $this->seedWordPressFixture();
+
+        // 1. Configure old VI as primary and EN as fallback; start Campaign 1
+        $this->registryController->updateConfig(
+            Request::create('/config', 'PATCH', ['language_label' => 'VI', 'is_enabled' => true, 'is_primary' => true]),
+            $fx['pkg_vi']->package_key,
+        );
+        $this->registryController->updateConfig(
+            Request::create('/config', 'PATCH', ['language_label' => 'EN', 'is_enabled' => true, 'is_primary' => false]),
+            $fx['pkg_en']->package_key,
+        );
+
+        // Verify effective_sharing_role on owner vs fallback variant vs standalone site_specific
+        $ownerDetail = json_decode((string) $this->registryController->show($fx['pkg_vi']->package_key)->getContent(), true)['script'];
+        $fallbackDetail = json_decode((string) $this->registryController->show($fx['pkg_en']->package_key)->getContent(), true)['script'];
+        $standaloneDetail = json_decode((string) $this->registryController->show($fx['pkg_site_b']->package_key)->getContent(), true)['script'];
+
+        self::assertSame('cms_global_owner', $ownerDetail['effective_sharing_role']);
+        self::assertSame('wordpress:create_post', $ownerDetail['global_scope']['scope_key']);
+        self::assertSame('wordpress:create_post', $ownerDetail['effective_global_scope']['scope_key']);
+
+        self::assertSame('cms_global_variant', $fallbackDetail['effective_sharing_role']);
+        self::assertNull($fallbackDetail['global_scope']); // Never pretends fallback owns DB global_scope_key
+        self::assertSame('wordpress:create_post', $fallbackDetail['effective_global_scope']['scope_key']);
+
+        self::assertSame('site_specific', $standaloneDetail['effective_sharing_role']);
+        self::assertNull($standaloneDetail['global_scope']);
+        self::assertNull($standaloneDetail['effective_global_scope']);
+
+        $camp1Uuid = $this->createAndStartWordPressCampaign($fx['rel_vi'], $fx['pkg_vi']);
+        $camp1 = SaCampaign::query()->where('campaign_uuid', $camp1Uuid)->firstOrFail();
+        $planTag1 = SaCampaignActionTag::query()->where('campaign_id', $camp1->id)->firstOrFail();
+        self::assertSame($fx['pkg_vi']->package_key, $planTag1->pinned_variants[0]['package_key']);
+
+        // 2. Disable old VI (UI changed) -> excluded from active Variant Group, stays in Script Registry
+        $disRes = $this->registryController->updateConfig(
+            Request::create('/config', 'PATCH', ['is_enabled' => false]),
+            $fx['pkg_vi']->package_key,
+        );
+        self::assertSame(200, $disRes->getStatusCode());
+        self::assertFalse($fx['pkg_vi']->fresh()->is_enabled);
+
+        // 3. Configure new VI as primary on the same Action scope (succeeds cleanly without 1062!)
+        $newViRes = $this->registryController->updateConfig(
+            Request::create('/config', 'PATCH', ['language_label' => 'VI', 'is_enabled' => true, 'is_primary' => true]),
+            $fx['pkg_vi_old']->package_key,
+        );
+        self::assertSame(200, $newViRes->getStatusCode(), (string) $newViRes->getContent());
+        $newViData = json_decode((string) $newViRes->getContent(), true);
+        self::assertCount(2, $newViData['variant_group']['variants']);
+        self::assertSame($fx['pkg_vi_old']->package_key, $newViData['variant_group']['variants'][0]['package_key']);
+        self::assertSame('VI', $newViData['variant_group']['variants'][0]['language_label']);
+        self::assertSame($fx['pkg_en']->package_key, $newViData['variant_group']['variants'][1]['package_key']);
+        self::assertSame('EN', $newViData['variant_group']['variants'][1]['language_label']);
+
+        // Old disabled VI was NOT re-enabled!
+        self::assertFalse($fx['pkg_vi']->fresh()->is_enabled);
+
+        // Attempting to re-enable old VI while new VI is enabled with 'VI' MUST reject with duplicate_language_label
+        $reEnableOld = $this->registryController->updateConfig(
+            Request::create('/config', 'PATCH', ['language_label' => 'VI', 'is_enabled' => true]),
+            $fx['pkg_vi']->package_key,
+        );
+        self::assertSame(422, $reEnableOld->getStatusCode());
+        self::assertSame('duplicate_language_label', json_decode((string) $reEnableOld->getContent(), true)['error']);
+
+        // New resolution picks new VI (priority 1) + EN (priority 2), excluding old disabled VI
+        $resolved = $this->resolver->resolveForTag($fx['tag_a']);
+        self::assertTrue($resolved['ok']);
+        self::assertSame($fx['pkg_vi_old']->package_key, $resolved['package']->package_key);
+        self::assertCount(2, $resolved['variant_group']['variants']);
+
+        // Existing started Campaign 1 snapshot remains immutable (still pinned to old VI!)
+        self::assertSame($fx['pkg_vi']->package_key, $planTag1->fresh()->pinned_variants[0]['package_key']);
+    }
+
     private function createAndStartWordPressCampaign(SaPackageRelease $rel, SaPackage $pkg): string
     {
         $art = $this->articles->create([

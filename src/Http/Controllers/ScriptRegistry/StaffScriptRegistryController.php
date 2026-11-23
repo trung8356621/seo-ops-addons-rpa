@@ -235,6 +235,11 @@ final class StaffScriptRegistryController extends Controller
                 : null,
             'sharing_mode' => (string) ($row['sharing_mode'] ?? SaPackage::SHARING_SITE_SPECIFIC),
             'global_scope' => is_array($row['global_scope'] ?? null) ? $row['global_scope'] : null,
+            'effective_sharing_role' => (string) ($row['effective_sharing_role'] ?? 'site_specific'),
+            'effective_global_scope' => is_array($row['effective_global_scope'] ?? null) ? $row['effective_global_scope'] : null,
+            'variant_group_id' => isset($row['variant_group_id']) && $row['variant_group_id'] !== null
+                ? (string) $row['variant_group_id']
+                : null,
             'global_eligible' => (bool) ($row['global_eligible'] ?? false),
             'global_ineligible_reason' => isset($row['global_ineligible_reason']) && $row['global_ineligible_reason'] !== null
                 ? (string) $row['global_ineligible_reason']
@@ -293,6 +298,11 @@ final class StaffScriptRegistryController extends Controller
                 : null,
             'sharing_mode' => (string) ($detail['sharing_mode'] ?? SaPackage::SHARING_SITE_SPECIFIC),
             'global_scope' => is_array($detail['global_scope'] ?? null) ? $detail['global_scope'] : null,
+            'effective_sharing_role' => (string) ($detail['effective_sharing_role'] ?? 'site_specific'),
+            'effective_global_scope' => is_array($detail['effective_global_scope'] ?? null) ? $detail['effective_global_scope'] : null,
+            'variant_group_id' => isset($detail['variant_group_id']) && $detail['variant_group_id'] !== null
+                ? (string) $detail['variant_group_id']
+                : null,
             'global_eligible' => (bool) ($detail['global_eligible'] ?? false),
             'global_ineligible_reason' => isset($detail['global_ineligible_reason']) && $detail['global_ineligible_reason'] !== null
                 ? (string) $detail['global_ineligible_reason']
