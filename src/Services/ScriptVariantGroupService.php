@@ -619,9 +619,44 @@ final class ScriptVariantGroupService
                 return ['ok' => false, 'http' => 422, 'error' => 'published_release_required', 'errors' => ['published_release_required']];
             }
 
+            $hasDescription = array_key_exists('description', $input);
+            $description = $locked->description;
+            if ($hasDescription) {
+                $rawDesc = $input['description'];
+                if ($rawDesc !== null && ! is_string($rawDesc)) {
+                    return ['ok' => false, 'http' => 422, 'error' => 'invalid_description', 'errors' => ['invalid_description']];
+                }
+                $trimmedDesc = $rawDesc !== null ? trim($rawDesc) : '';
+                if (mb_strlen($trimmedDesc) > 5000) {
+                    return ['ok' => false, 'http' => 422, 'error' => 'description_too_long', 'errors' => ['description_too_long']];
+                }
+                $description = $trimmedDesc !== '' ? $trimmedDesc : null;
+            }
+
             $hasEnabled = array_key_exists('is_enabled', $input);
             $hasPrimary = array_key_exists('is_primary', $input);
             $hasLabel = array_key_exists('language_label', $input);
+            $hasActionScope = array_key_exists('action_scope', $input);
+
+            if ($hasDescription && ! $hasEnabled && ! $hasPrimary && ! $hasLabel && ! $hasActionScope) {
+                $locked->description = $description;
+                if ($userId !== null) {
+                    $locked->updated_by_user_id = $userId;
+                }
+                $locked->save();
+
+                return [
+                    'ok' => true,
+                    'data' => [
+                        'package_key' => (string) $locked->package_key,
+                        'description' => $locked->description,
+                        'language_label' => $locked->language_label,
+                        'is_enabled' => (bool) ($locked->is_enabled ?? true),
+                        'is_primary' => (bool) ($locked->is_primary ?? false),
+                        'variant_group' => null,
+                    ],
+                ];
+            }
 
             $isEnabled = $hasEnabled ? (bool) $input['is_enabled'] : (bool) ($locked->is_enabled ?? true);
             $isPrimary = $hasPrimary ? (bool) $input['is_primary'] : (bool) ($locked->is_primary ?? false);
@@ -844,6 +879,12 @@ final class ScriptVariantGroupService
                 $locked->global_scope_key = null;
             }
 
+            if ($hasDescription) {
+                $locked->description = $description;
+            }
+            if ($userId !== null) {
+                $locked->updated_by_user_id = $userId;
+            }
             $locked->language_label = $label;
             $locked->is_enabled = $isEnabled;
             $locked->is_primary = $isPrimary;
@@ -891,6 +932,7 @@ final class ScriptVariantGroupService
                 'ok' => true,
                 'data' => [
                     'package_key' => (string) $locked->package_key,
+                    'description' => $locked->description,
                     'language_label' => (string) $locked->language_label,
                     'is_enabled' => (bool) $locked->is_enabled,
                     'is_primary' => (bool) $locked->is_primary,

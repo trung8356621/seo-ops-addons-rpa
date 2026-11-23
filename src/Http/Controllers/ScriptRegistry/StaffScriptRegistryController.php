@@ -162,6 +162,27 @@ final class StaffScriptRegistryController extends Controller
         ]);
     }
 
+    public function updateDescription(Request $request, string $id): JsonResponse
+    {
+        if (! $request->exists('description')) {
+            $this->access->assertCanMutate();
+
+            return response()->json(['ok' => false, 'error' => 'description_required', 'errors' => ['description_required']], 422);
+        }
+
+        return $this->updateConfig(
+            Request::create(
+                $request->getRequestUri(),
+                $request->getMethod(),
+                ['description' => $request->input('description')],
+                [],
+                [],
+                $request->server->all(),
+            )->setUserResolver($request->getUserResolver()),
+            $id,
+        );
+    }
+
     public function resolve(Request $request): JsonResponse
     {
         $this->access->assertCanAccess();

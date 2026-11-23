@@ -437,6 +437,75 @@ final class ScriptOperationalConfigTest extends TestCase
         self::assertSame($fx['pkg_vi']->package_key, $planTag1->fresh()->pinned_variants[0]['package_key']);
     }
 
+    public function test_editable_script_description_metadata_preserves_releases_groups_and_campaigns(): void
+    {
+        $fx = $this->seedWordPressFixture();
+
+        $beforeDigest = $fx['rel_en']->content_digest;
+        $beforeExecDigest = $fx['rel_en']->execution_digest;
+        $beforeManifest = $fx['rel_en']->manifest;
+
+        // Edit description on standalone site_specific script via /description without creating a Variant Group
+        $res1 = $this->registryController->updateDescription(
+            Request::create('/description', 'PATCH', ['description' => '  English WordPress Classic Editor flow  ']),
+            $fx['pkg_en']->package_key,
+        );
+        self::assertSame(200, $res1->getStatusCode(), (string) $res1->getContent());
+        $d1 = json_decode((string) $res1->getContent(), true);
+        self::assertSame('English WordPress Classic Editor flow', $d1['config']['description']);
+        self::assertSame('English WordPress Classic Editor flow', $d1['script']['description']);
+        self::assertSame(0, SaScriptVariantGroup::query()->count());
+        self::assertSame('site_specific', $fx['pkg_en']->fresh()->sharing_mode);
+        self::assertTrue($fx['pkg_en']->fresh()->is_enabled);
+        self::assertFalse($fx['pkg_en']->fresh()->is_primary);
+
+        // Release stays 100% immutable
+        $relAfter = $fx['rel_en']->fresh();
+        self::assertSame($beforeDigest, $relAfter->content_digest);
+        self::assertSame($beforeExecDigest, $relAfter->execution_digest);
+        self::assertSame($beforeManifest, $relAfter->manifest);
+
+        // Update description alongside operational config via /config
+        $res2 = $this->registryController->updateConfig(
+            Request::create('/config', 'PATCH', [
+                'description' => 'Updated VI primary script',
+                'language_label' => 'VI',
+                'is_enabled' => true,
+                'is_primary' => true,
+            ]),
+            $fx['pkg_vi']->package_key,
+        );
+        self::assertSame(200, $res2->getStatusCode());
+        $d2 = json_decode((string) $res2->getContent(), true);
+        self::assertSame('Updated VI primary script', $d2['script']['description']);
+        self::assertSame('VI', $d2['script']['language_label']);
+        self::assertTrue($d2['script']['is_primary']);
+
+        // Clear description with empty string -> stored as null
+        $res3 = $this->registryController->updateDescription(
+            Request::create('/description', 'PATCH', ['description' => '   ']),
+            $fx['pkg_en']->package_key,
+        );
+        self::assertSame(200, $res3->getStatusCode());
+        self::assertNull($fx['pkg_en']->fresh()->description);
+
+        // Reject >5000 char description
+        $tooLong = $this->registryController->updateDescription(
+            Request::create('/description', 'PATCH', ['description' => str_repeat('a', 5001)]),
+            $fx['pkg_en']->package_key,
+        );
+        self::assertSame(422, $tooLong->getStatusCode());
+        self::assertSame('description_too_long', json_decode((string) $tooLong->getContent(), true)['error']);
+
+        // Missing description key on /description returns 422
+        $missing = $this->registryController->updateDescription(
+            Request::create('/description', 'PATCH', []),
+            $fx['pkg_en']->package_key,
+        );
+        self::assertSame(422, $missing->getStatusCode());
+        self::assertSame('description_required', json_decode((string) $missing->getContent(), true)['error']);
+    }
+
     private function createAndStartWordPressCampaign(SaPackageRelease $rel, SaPackage $pkg): string
     {
         $art = $this->articles->create([
