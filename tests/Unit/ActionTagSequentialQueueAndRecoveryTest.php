@@ -324,6 +324,7 @@ final class ActionTagSequentialQueueAndRecoveryTest extends TestCase
             $t->timestamp('next_recheck_at')->nullable();
             $t->timestamp('deleted_at')->nullable();
             $t->unsignedBigInteger('deleted_by_user_id')->nullable();
+            $t->unsignedBigInteger('created_by_user_id')->nullable();
             $t->timestamps();
         });
         $s->create('sa_campaign_action_tags', function (Blueprint $t): void {
@@ -354,6 +355,7 @@ final class ActionTagSequentialQueueAndRecoveryTest extends TestCase
             $t->unsignedInteger('shortcode_mapping_version')->default(0);
             $t->boolean('is_enabled')->default(true);
             $t->unsignedInteger('sort_order')->default(1);
+            $t->unsignedInteger('interval_minutes')->default(0);
             $t->timestamps();
         });
         $s->create('sa_campaign_contents', function (Blueprint $t): void {
@@ -562,7 +564,7 @@ final class ActionTagSequentialQueueAndRecoveryTest extends TestCase
     }
 
     /**
-     * @param  list<array{tag: SaActionTag, pkg: SaPackage, rel: SaPackageRelease, count: int}>  $tagSpecs
+     * @param  list<array{tag: SaActionTag, pkg: SaPackage, rel: SaPackageRelease, count: int, interval_minutes?: int}>  $tagSpecs
      * @return array{campaign: SaCampaign, plan_tags: array<string, SaCampaignActionTag>, contents: array<string, list<SaCampaignContent>>}
      */
     private function createV2RunningCampaign(array $tagSpecs, string $mode = 'one_account_many_jobs'): array
@@ -602,6 +604,7 @@ final class ActionTagSequentialQueueAndRecoveryTest extends TestCase
                 'script_execution_digest' => $spec['rel']->execution_digest,
                 'manifest_snapshot' => $spec['rel']->manifest,
                 'sort_order' => $i + 1,
+                'interval_minutes' => $spec['interval_minutes'] ?? 0,
             ]);
             $planTags[$tag->tag_key] = $pt;
 
@@ -814,9 +817,116 @@ final class ActionTagSequentialQueueAndRecoveryTest extends TestCase
         $c1['agent']->update(['availability' => AgentAvailability::Available->value, 'last_heartbeat_at' => now()]);
         $c2['agent']->update(['availability' => AgentAvailability::Available->value, 'last_heartbeat_at' => now()]);
 
-        $recheck = $this->orchestrator->recheckDueCampaigns(now()->addMinutes(65));
+        $this->orchestrator->recheckDueCampaigns(now()->addMinutes(65));
         self::assertSame(CampaignContentStatus::Running->value, $items[0]->fresh()->status);
         self::assertSame(CampaignContentStatus::Pending->value, $items[1]->fresh()->status);
         self::assertSame(1, SaAccountExecutionLease::query()->where('account_id', $sharedAcc->id)->where('status', 'active')->count());
+    }
+
+    public function test_posting_interval_240_independent_tags_pause_resume_restart_and_manual_reset(): void
+    {
+        $tagFb = $this->seedActionTagAndScript('facebook', 'facebook.create_post');
+        $tagWp = $this->seedActionTagAndScript('wordpress', 'wordpress.create_post');
+        $cFb = $this->seedClient('facebook', 'acc_fb');
+        $cWp = $this->seedClient('wordpress', 'acc_wp');
+
+        // 2, 3, 4, 5, 6, 12, 19. FB interval=240, WP interval=0; first Job eligible immediately
+        $setup = $this->createV2RunningCampaign([
+            ['tag' => $tagFb['tag'], 'pkg' => $tagFb['pkg'], 'rel' => $tagFb['rel'], 'count' => 4, 'interval_minutes' => 240],
+            ['tag' => $tagWp['tag'], 'pkg' => $tagWp['pkg'], 'rel' => $tagWp['rel'], 'count' => 2, 'interval_minutes' => 0],
+        ]);
+        $camp = $setup['campaign'];
+        $fbItems = $setup['contents']['facebook.create_post'];
+        $wpItems = $setup['contents']['wordpress.create_post'];
+        $ptFb = $setup['plan_tags']['facebook.create_post'];
+
+        // Legacy compatibility: simulate stale waiting_resources on fbItems[2] from old scheduler
+        $fbItems[2]->update(['status' => CampaignContentStatus::WaitingResources->value, 'last_error_code' => 'waiting_resources']);
+
+        $t0 = \Carbon\CarbonImmutable::now();
+        $this->orchestrator->dispatchCampaign($camp, $t0);
+        self::assertSame(CampaignContentStatus::Running->value, $fbItems[0]->fresh()->status);
+        self::assertSame(CampaignContentStatus::Running->value, $wpItems[0]->fresh()->status);
+        // Non-head stale waiting_resources cleaned up to pending
+        self::assertSame(CampaignContentStatus::Pending->value, $fbItems[2]->fresh()->status);
+
+        // Complete FB job 1 & WP job 1 at 08:00
+        $this->claimAndFinish($cFb['agent'], $cFb['session'], 'succeeded');
+        $this->claimAndFinish($cWp['agent'], $cWp['session'], 'succeeded');
+        SaJob::query()->where('campaign_content_id', $fbItems[0]->id)->update(['finished_at' => $t0]);
+        SaJob::query()->where('campaign_content_id', $wpItems[0]->id)->update(['finished_at' => $t0]);
+
+        // At 09:00 (only 60m elapsed): WP (interval=0) dispatches immediately; FB (interval=240) stays Pending
+        $t0900 = $t0->addMinutes(60);
+        $this->orchestrator->dispatchCampaign($camp, $t0900);
+        self::assertSame(CampaignContentStatus::Running->value, $wpItems[1]->fresh()->status);
+        self::assertSame(CampaignContentStatus::Pending->value, $fbItems[1]->fresh()->status);
+        self::assertSame(0, SaJob::query()->where('campaign_content_id', $fbItems[1]->id)->count());
+
+        // 12. Waiting for interval exposes waiting_interval + next_run_at in detailDto (never waiting_resources)
+        $detail = $this->campaigns->detailDto($camp->fresh());
+        $fbTagDto = collect($detail['action_tags'])->firstWhere('id', $ptFb->plan_tag_uuid);
+        self::assertSame(240, $fbTagDto['interval_minutes']);
+        self::assertNotNull($fbTagDto['last_success_at']);
+        self::assertSame($t0->addMinutes(240)->toIso8601String(), $fbTagDto['next_run_at']);
+        $fb2Dto = collect($detail['contents'])->firstWhere('id', $fbItems[1]->content_uuid);
+        self::assertSame('waiting_interval', $fb2Dto['queue_state']);
+        self::assertSame($t0->addMinutes(240)->toIso8601String(), $fb2Dto['next_run_at']);
+
+        // 14. Pause at 09:00, Resume at 10:00 -> FB job 2 STILL waits until 12:00
+        $this->campaigns->pause($camp->campaign_uuid, $this->installationId);
+        $this->campaigns->resume($camp->campaign_uuid, $this->installationId);
+        $this->orchestrator->dispatchCampaign($camp->fresh(), $t0->addMinutes(120));
+        self::assertSame(CampaignContentStatus::Pending->value, $fbItems[1]->fresh()->status);
+
+        // 16. Simulate fresh Orchestrator instance (restart safety) at exact 12:00 (240m elapsed) -> dispatches 1 Job
+        $restartedOrch = new CampaignOrchestrator;
+        $restartedOrch->dispatchCampaign($camp->fresh(), $t0->addMinutes(240));
+        self::assertSame(CampaignContentStatus::Running->value, $fbItems[1]->fresh()->status);
+        self::assertSame(CampaignContentStatus::Pending->value, $fbItems[2]->fresh()->status);
+
+        // 15. Pause again; let interval expire while paused, then Resume -> dispatches at most 1 Job (never batch)
+        $this->claimAndFinish($cFb['agent'], $cFb['session'], 'failed', 'ERR_2');
+        $this->campaigns->pause($camp->campaign_uuid, $this->installationId);
+        // 7 & 8. Manual Success at 15:00 unlocks gate and resets interval timing to 15:00 + 240m = 19:00
+        $manualOk = $this->controller->manualTestActionTag(Request::create('/', 'POST'), $camp->campaign_uuid, $ptFb->plan_tag_uuid);
+        self::assertSame(201, $manualOk->getStatusCode());
+        $this->claimAndFinish($cFb['agent'], $cFb['session'], 'succeeded');
+        $t1500 = $t0->addHours(7);
+        $manualJobUuid = $manualOk->getData(true)['job']['job_uuid'];
+        SaJob::query()->where('job_uuid', $manualJobUuid)->update(['finished_at' => $t1500]);
+
+        $this->campaigns->resume($camp->campaign_uuid, $this->installationId);
+        // At 16:00 (only 60m after manual success), item 2 must still be Pending
+        $restartedOrch->dispatchCampaign($camp->fresh(), $t1500->addMinutes(60));
+        self::assertSame(CampaignContentStatus::Pending->value, $fbItems[2]->fresh()->status);
+
+        // At 20:00 (300m after manual success, well past 240m), only item 2 dispatches (never batch 2 & 3)
+        $restartedOrch->dispatchCampaign($camp->fresh(), $t1500->addMinutes(300));
+        self::assertSame(CampaignContentStatus::Running->value, $fbItems[2]->fresh()->status);
+        self::assertSame(CampaignContentStatus::Pending->value, $fbItems[3]->fresh()->status);
+    }
+
+    public function test_v2_plan_service_validates_and_persists_interval_minutes(): void
+    {
+        $t = $this->seedActionTagAndScript('threads', 'threads.create_post');
+
+        $bad = $this->campaigns->create([
+            'name' => 'Bad Interval',
+            'plan_version' => 2,
+            'action_tags' => [['action_tag_key' => 'threads.create_post', 'interval_minutes' => -5]],
+            'contents' => [],
+        ], $this->installationId, 1);
+        self::assertFalse($bad['ok']);
+        self::assertContains('invalid_interval_minutes', $bad['errors']);
+
+        $ok = $this->campaigns->create([
+            'name' => 'Threads 1440m',
+            'plan_version' => 2,
+            'action_tags' => [['action_tag_key' => 'threads.create_post', 'interval_minutes' => 1440]],
+            'contents' => [],
+        ], $this->installationId, 1);
+        self::assertTrue($ok['ok'], json_encode($ok));
+        self::assertSame(1440, $ok['data']['action_tags'][0]['interval_minutes']);
     }
 }

@@ -34,6 +34,7 @@ use Omnichannel\Addons\SocialAutomation\Models\Concerns\UsesSocialAutomationConn
  * @property int $shortcode_mapping_version
  * @property bool $is_enabled
  * @property int $sort_order
+ * @property int $interval_minutes
  */
 final class SaCampaignActionTag extends Model
 {
@@ -68,6 +69,7 @@ final class SaCampaignActionTag extends Model
         'shortcode_mapping_version',
         'is_enabled',
         'sort_order',
+        'interval_minutes',
     ];
 
     protected function casts(): array
@@ -86,6 +88,7 @@ final class SaCampaignActionTag extends Model
             'shortcode_mapping_version' => 'integer',
             'is_enabled' => 'boolean',
             'sort_order' => 'integer',
+            'interval_minutes' => 'integer',
         ];
     }
 

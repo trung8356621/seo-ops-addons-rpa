@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Omnichannel\Addons\SocialAutomation\Services;
 
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignInputSanitizer;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignRecheckPolicy;
@@ -21,6 +22,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaCampaign;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaignActionTag;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaignContent;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaignContentAssignment;
+use Omnichannel\Addons\SocialAutomation\Models\SaJob;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackage;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
 use Omnichannel\Addons\SocialAutomation\Models\SaSite;
@@ -240,6 +242,9 @@ final class CampaignV2PlanService
                         'is_enabled' => true,
                         'sort_order' => $idx,
                     ];
+                    if (Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasColumn('sa_campaign_action_tags', 'interval_minutes')) {
+                        $tagAttrs['interval_minutes'] = (int) ($tagData['interval_minutes'] ?? 0);
+                    }
                     if (SocialAutomationSchema::scriptVariantGroupsReady()) {
                         $tagAttrs['variant_group_id'] = $tagData['variant_group_id'] ?? null;
                         $tagAttrs['variant_group_uuid'] = $tagData['variant_group_uuid'] ?? null;
@@ -616,10 +621,13 @@ final class CampaignV2PlanService
                         $existingPt->shortcode_mapping = $tagData['shortcode_mapping'];
                         $existingPt->shortcode_mapping_version = $tagData['shortcode_mapping_version'];
                         $existingPt->sort_order = $idx;
+                        if (Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasColumn('sa_campaign_action_tags', 'interval_minutes')) {
+                            $existingPt->interval_minutes = (int) ($tagData['interval_minutes'] ?? ($existingPt->interval_minutes ?? 0));
+                        }
                         $existingPt->save();
                         $tagModelsByIdx[$idx] = $existingPt;
                     } else {
-                        $tagModelsByIdx[$idx] = SaCampaignActionTag::query()->create([
+                        $newTagAttrs = [
                             'plan_tag_uuid' => (string) Str::uuid(),
                             'campaign_id' => $locked->id,
                             'action_tag_id' => $tagData['action_tag_id'],
@@ -643,7 +651,11 @@ final class CampaignV2PlanService
                             'shortcode_mapping_version' => $tagData['shortcode_mapping_version'],
                             'is_enabled' => true,
                             'sort_order' => $idx,
-                        ]);
+                        ];
+                        if (Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasColumn('sa_campaign_action_tags', 'interval_minutes')) {
+                            $newTagAttrs['interval_minutes'] = (int) ($tagData['interval_minutes'] ?? 0);
+                        }
+                        $tagModelsByIdx[$idx] = SaCampaignActionTag::query()->create($newTagAttrs);
                     }
                 }
 
@@ -775,6 +787,8 @@ final class CampaignV2PlanService
 
         $campaignMeta = is_array($campaign->meta) ? $campaign->meta : [];
         $gates = is_array($campaignMeta['action_tag_gates'] ?? null) ? $campaignMeta['action_tag_gates'] : [];
+        $lastSuccessByTagId = $this->lastSuccessByActionTag($campaign);
+        $nextRunByTagId = [];
 
         $planTagUuidById = [];
         $actionTagsDto = [];
@@ -787,6 +801,12 @@ final class CampaignV2PlanService
             $gate = is_array($gates[(string) $pt->id] ?? null)
                 ? $gates[(string) $pt->id]
                 : ['blocked' => false];
+            $intervalMinutes = max(0, (int) ($pt->interval_minutes ?? 0));
+            $lastSuccessAt = $lastSuccessByTagId[(int) $pt->id] ?? null;
+            $nextRunAt = $lastSuccessAt !== null
+                ? $lastSuccessAt->copy()->addMinutes($intervalMinutes)
+                : null;
+            $nextRunByTagId[(int) $pt->id] = $nextRunAt;
 
             $actionTagsDto[] = [
                 'id' => (string) $pt->plan_tag_uuid,
@@ -813,6 +833,9 @@ final class CampaignV2PlanService
                 'variables' => $projectedVars['variables'] ?? [],
                 'is_enabled' => (bool) $pt->is_enabled,
                 'sort_order' => (int) $pt->sort_order,
+                'interval_minutes' => $intervalMinutes,
+                'last_success_at' => $lastSuccessAt?->toIso8601String(),
+                'next_run_at' => $nextRunAt?->toIso8601String(),
                 'gate' => $gate,
             ];
         }
@@ -862,6 +885,17 @@ final class CampaignV2PlanService
             }
         }
 
+        $seenQueueHead = [];
+        $inFlightTags = [];
+        foreach ($contents as $cRow) {
+            if ((string) $cRow->status === CampaignContentStatus::Running->value) {
+                $assigns = $assignmentsByContentId[(int) $cRow->id] ?? [];
+                if (count($assigns) === 1 && isset($assigns[0]['plan_tag_id'])) {
+                    $inFlightTags[$assigns[0]['plan_tag_id']] = true;
+                }
+            }
+        }
+
         $counts = [
             'total' => 0,
             'pending' => 0,
@@ -874,6 +908,7 @@ final class CampaignV2PlanService
             'cancelled' => 0,
         ];
         $contentsDto = [];
+        $now = now();
         foreach ($contents as $c) {
             $counts['total']++;
             $st = (string) $c->status;
@@ -895,13 +930,29 @@ final class CampaignV2PlanService
                 : null;
             $isBlockedByGate = $st === 'pending' && is_array($contentGate) && (($contentGate['blocked'] ?? false) === true);
 
+            $queueState = $isBlockedByGate ? 'blocked_by_failure' : $st;
+            $contentNextRunAt = null;
+            if (! $isBlockedByGate && $st === 'pending' && $primaryPlanTagId !== null) {
+                $ptUuid = $planTagUuidById[(int) $primaryPlanTagId] ?? null;
+                $isHead = $ptUuid !== null && ! isset($inFlightTags[$ptUuid]) && ! isset($seenQueueHead[$ptUuid]);
+                if ($ptUuid !== null) {
+                    $seenQueueHead[$ptUuid] = true;
+                }
+                $tagNextRun = $nextRunByTagId[(int) $primaryPlanTagId] ?? null;
+                if ($isHead && $tagNextRun instanceof \Carbon\CarbonInterface && $now->lt($tagNextRun)) {
+                    $queueState = 'waiting_interval';
+                    $contentNextRunAt = $tagNextRun->toIso8601String();
+                }
+            }
+
             $row = [
                 'id' => (string) $c->content_uuid,
                 'content_uuid' => (string) $c->content_uuid,
                 'external_ref' => $c->external_ref,
                 'status' => $st,
-                'queue_state' => $isBlockedByGate ? 'blocked_by_failure' : $st,
+                'queue_state' => $queueState,
                 'blocked_by_gate' => $isBlockedByGate ? $contentGate : null,
+                'next_run_at' => $contentNextRunAt,
                 'sort_order' => (int) $c->sort_order,
                 'assigned_account_id' => null,
                 'last_error_code' => $c->last_error_code,
@@ -1141,8 +1192,22 @@ final class CampaignV2PlanService
             $mappingVersion = 1;
         }
 
+        $parsedInterval = $this->parseIntervalMinutes($tagRow, $index, 0);
+        if (! ($parsedInterval['ok'] ?? false)) {
+            return $parsedInterval;
+        }
+
         $cmsScope = is_array($res['cms_scope'] ?? null) ? $res['cms_scope'] : null;
         $cmsType = $cmsScope['cms_type'] ?? SaSite::normalizeCmsType($site->cms_type ?? null);
+
+        $parsedInterval = $this->parseIntervalMinutes(
+            $tagRow,
+            $index,
+            max(0, (int) ($existing->interval_minutes ?? 0)),
+        );
+        if (! ($parsedInterval['ok'] ?? false)) {
+            return $parsedInterval;
+        }
 
         return [
             'ok' => true,
@@ -1170,6 +1235,7 @@ final class CampaignV2PlanService
                 'variables' => $variables,
                 'shortcode_mapping' => $mappingDoc,
                 'shortcode_mapping_version' => $mappingVersion,
+                'interval_minutes' => $parsedInterval['value'],
             ],
         ];
     }
@@ -1297,6 +1363,15 @@ final class CampaignV2PlanService
             $mappingVersion = max(1, (int) $existing->shortcode_mapping_version);
         }
 
+        $parsedInterval = $this->parseIntervalMinutes(
+            $tagRow,
+            $index,
+            max(0, (int) ($existing->interval_minutes ?? 0)),
+        );
+        if (! ($parsedInterval['ok'] ?? false)) {
+            return $parsedInterval;
+        }
+
         return [
             'ok' => true,
             'tag' => [
@@ -1324,6 +1399,7 @@ final class CampaignV2PlanService
                 'variables' => $variables,
                 'shortcode_mapping' => $mappingDoc,
                 'shortcode_mapping_version' => $mappingVersion,
+                'interval_minutes' => $parsedInterval['value'],
             ],
         ];
     }
@@ -1609,6 +1685,73 @@ final class CampaignV2PlanService
         $siteKey = trim((string) ($tag->site_key ?: $tag->platform));
 
         return $siteKey !== '' ? SaSite::query()->where('key', $siteKey)->first() : null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $tagRow
+     * @return array<string, mixed>
+     */
+    private function parseIntervalMinutes(array $tagRow, int $index, int $default): array
+    {
+        if (! array_key_exists('interval_minutes', $tagRow) || $tagRow['interval_minutes'] === null || $tagRow['interval_minutes'] === '') {
+            return ['ok' => true, 'value' => max(0, $default)];
+        }
+
+        $raw = $tagRow['interval_minutes'];
+        if (is_bool($raw) || filter_var($raw, FILTER_VALIDATE_INT) === false || (int) $raw < 0) {
+            return $this->fail(
+                422,
+                ['invalid_interval_minutes'],
+                ["action_tags.{$index}.interval_minutes" => ['interval_minutes must be a non-negative integer.']]
+            );
+        }
+
+        return ['ok' => true, 'value' => (int) $raw];
+    }
+
+    /**
+     * Compute the latest terminal Success timestamp per Campaign Action Tag from durable SaJob records.
+     *
+     * @return array<int, \Carbon\CarbonInterface>
+     */
+    private function lastSuccessByActionTag(SaCampaign $campaign): array
+    {
+        if (! SocialAutomationSchema::jobsReady()) {
+            return [];
+        }
+
+        $jobs = SaJob::query()
+            ->where('campaign_id', $campaign->id)
+            ->where('status', 'completed')
+            ->whereNotNull('finished_at')
+            ->orderByDesc('finished_at')
+            ->orderByDesc('id')
+            ->get(['campaign_content_id', 'payload', 'finished_at']);
+
+        if ($jobs->isEmpty()) {
+            return [];
+        }
+
+        $contentIds = $jobs->pluck('campaign_content_id')->filter()->unique()->values()->all();
+        $tagByContentId = $contentIds !== []
+            ? SaCampaignContentAssignment::query()
+                ->whereIn('campaign_content_id', $contentIds)
+                ->pluck('campaign_action_tag_id', 'campaign_content_id')
+                ->all()
+            : [];
+
+        $out = [];
+        foreach ($jobs as $job) {
+            $tagId = is_array($job->payload) ? (int) ($job->payload['campaign_action_tag_id'] ?? 0) : 0;
+            if ($tagId <= 0 && $job->campaign_content_id !== null) {
+                $tagId = (int) ($tagByContentId[(int) $job->campaign_content_id] ?? 0);
+            }
+            if ($tagId > 0 && ! isset($out[$tagId]) && $job->finished_at !== null) {
+                $out[$tagId] = $job->finished_at;
+            }
+        }
+
+        return $out;
     }
 
     /**

@@ -389,6 +389,8 @@ final class CampaignOrchestrator
                 $handledQueues = [];
                 $dispatched = 0;
                 $stillWaiting = 0;
+                $earliestNextRunAt = null;
+                $lastSuccessByTagId = $this->lastSuccessByActionTag($locked);
 
                 foreach ($contents as $content) {
                     // Prevent duplicate dispatch: one active logical Job per Article.
@@ -429,14 +431,30 @@ final class CampaignOrchestrator
 
                     // Blocked by Failure: stop automatic dispatch for this Action Tag queue; keep following items Pending.
                     if (isset($blockedTagIds[$planTagId])) {
+                        $this->normalizeNonHeadWaitingToPending($content);
                         continue;
                     }
 
                     // Sequential queue: at most one active/head item evaluated per Action Tag queue.
                     if (isset($inFlightTagIds[$planTagId]) || isset($handledQueues[$planTagId])) {
+                        $this->normalizeNonHeadWaitingToPending($content);
                         continue;
                     }
                     $handledQueues[$planTagId] = true;
+
+                    // Posting interval check (before resource selection).
+                    $intervalMinutes = max(0, (int) ($planTag->interval_minutes ?? 0));
+                    $lastSuccessAt = $lastSuccessByTagId[$planTagId] ?? null;
+                    if ($intervalMinutes > 0 && $lastSuccessAt instanceof \DateTimeInterface) {
+                        $nextRunAt = \Carbon\CarbonImmutable::instance($lastSuccessAt)->addMinutes($intervalMinutes);
+                        if ($cycleNow->lt($nextRunAt)) {
+                            $this->normalizeNonHeadWaitingToPending($content);
+                            if ($earliestNextRunAt === null || $nextRunAt->lt($earliestNextRunAt)) {
+                                $earliestNextRunAt = $nextRunAt;
+                            }
+                            continue;
+                        }
+                    }
 
                     $requiredAccountId = $content->assigned_account_id ? (int) $content->assigned_account_id : null;
                     $blockedAssigned = $assignedIds;
@@ -519,9 +537,16 @@ final class CampaignOrchestrator
                     ->exists();
 
                 $intervalSeconds = $this->settings->getSchedulerIntervalSeconds((string) $locked->installation_id);
-                $locked->next_recheck_at = $waitingLeft
-                    ? $this->recheck->nextRecheckAt($cycleNow, $intervalSeconds)
-                    : null;
+                if ($waitingLeft) {
+                    $normalRecheck = $this->recheck->nextRecheckAt($cycleNow, $intervalSeconds);
+                    $locked->next_recheck_at = ($earliestNextRunAt !== null && $earliestNextRunAt->lt($normalRecheck))
+                        ? $earliestNextRunAt
+                        : $normalRecheck;
+                } elseif ($earliestNextRunAt !== null) {
+                    $locked->next_recheck_at = $earliestNextRunAt;
+                } else {
+                    $locked->next_recheck_at = null;
+                }
                 $locked->save();
                 $this->maybeCompleteCampaign($locked);
 
@@ -2051,17 +2076,28 @@ final class CampaignOrchestrator
                 ]);
                 $meta['action_tag_gates'] = $gates;
                 $campaign->meta = $meta;
+                $intervalMinutes = max(0, (int) ($planTag->interval_minutes ?? 0));
+                $succeededAt = $job->finished_at ?? now();
+                $nextEligible = $intervalMinutes > 0
+                    ? \Carbon\CarbonImmutable::instance($succeededAt)->addMinutes($intervalMinutes)
+                    : now();
                 if ((string) $campaign->status === CampaignStatus::Running->value) {
-                    $campaign->next_recheck_at = now();
+                    $campaign->next_recheck_at = $nextEligible;
                 }
                 $campaign->save();
 
-                return (string) $campaign->status === CampaignStatus::Running->value ? (int) $campaign->id : null;
+                return (string) $campaign->status === CampaignStatus::Running->value && $intervalMinutes === 0
+                    ? (int) $campaign->id
+                    : null;
             }
 
-            // Automatic Succeeded on a Running campaign marks campaign due for next scheduler tick.
+            // Automatic Succeeded on a Running campaign marks campaign due at next eligible time.
             if ((string) $campaign->status === CampaignStatus::Running->value) {
-                $campaign->next_recheck_at = now();
+                $intervalMinutes = max(0, (int) ($planTag->interval_minutes ?? 0));
+                $succeededAt = $job->finished_at ?? now();
+                $campaign->next_recheck_at = $intervalMinutes > 0
+                    ? \Carbon\CarbonImmutable::instance($succeededAt)->addMinutes($intervalMinutes)
+                    : now();
                 $campaign->save();
             }
 
@@ -2069,6 +2105,66 @@ final class CampaignOrchestrator
         }
 
         return null;
+    }
+
+    /**
+     * Normalize stale non-head waiting_resources rows (from legacy schedulers) back to pending.
+     */
+    private function normalizeNonHeadWaitingToPending(SaCampaignContent $content): void
+    {
+        if ((string) $content->status === CampaignContentStatus::WaitingResources->value
+            && (string) ($content->last_error_code ?? '') === 'waiting_resources'
+            && $content->current_job_id === null) {
+            $content->status = CampaignContentStatus::Pending->value;
+            $content->last_error_code = null;
+            $content->last_error_message = null;
+            $content->save();
+        }
+    }
+
+    /**
+     * Compute the latest terminal Success timestamp per Campaign Action Tag from durable SaJob records.
+     *
+     * @return array<int, \Carbon\CarbonInterface>
+     */
+    private function lastSuccessByActionTag(SaCampaign $campaign): array
+    {
+        if (! SocialAutomationSchema::jobsReady()) {
+            return [];
+        }
+
+        $jobs = SaJob::query()
+            ->where('campaign_id', $campaign->id)
+            ->where('status', JobStatus::Completed->value)
+            ->whereNotNull('finished_at')
+            ->orderByDesc('finished_at')
+            ->orderByDesc('id')
+            ->get(['campaign_content_id', 'payload', 'finished_at']);
+
+        if ($jobs->isEmpty()) {
+            return [];
+        }
+
+        $contentIds = $jobs->pluck('campaign_content_id')->filter()->unique()->values()->all();
+        $tagByContentId = $contentIds !== []
+            ? SaCampaignContentAssignment::query()
+                ->whereIn('campaign_content_id', $contentIds)
+                ->pluck('campaign_action_tag_id', 'campaign_content_id')
+                ->all()
+            : [];
+
+        $out = [];
+        foreach ($jobs as $job) {
+            $tagId = is_array($job->payload) ? (int) ($job->payload['campaign_action_tag_id'] ?? 0) : 0;
+            if ($tagId <= 0 && $job->campaign_content_id !== null) {
+                $tagId = (int) ($tagByContentId[(int) $job->campaign_content_id] ?? 0);
+            }
+            if ($tagId > 0 && ! isset($out[$tagId]) && $job->finished_at !== null) {
+                $out[$tagId] = $job->finished_at;
+            }
+        }
+
+        return $out;
     }
 
     /**
