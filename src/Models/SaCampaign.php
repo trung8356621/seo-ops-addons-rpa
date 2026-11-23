@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace Omnichannel\Addons\SocialAutomation\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Omnichannel\Addons\SocialAutomation\Models\Concerns\UsesSocialAutomationConnection;
+use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationSchema;
 
 /**
  * @property int $id
@@ -23,6 +25,8 @@ use Omnichannel\Addons\SocialAutomation\Models\Concerns\UsesSocialAutomationConn
  * @property string|null $script_content_digest
  * @property int $resource_recheck_seconds
  * @property \Illuminate\Support\Carbon|null $next_recheck_at
+ * @property int|null $deleted_by_user_id
+ * @property \Illuminate\Support\Carbon|null $deleted_at
  */
 final class SaCampaign extends Model
 {
@@ -34,6 +38,7 @@ final class SaCampaign extends Model
         'campaign_uuid', 'installation_id', 'name', 'platform', 'execution_mode', 'run_mode', 'status', 'plan_version',
         'script_id', 'script_version', 'script_content_digest', 'resource_recheck_seconds',
         'next_recheck_at', 'started_at', 'paused_at', 'cancelled_at', 'completed_at',
+        'deleted_at', 'deleted_by_user_id',
         'created_by_user_id', 'meta', 'shortcode_mapping', 'shortcode_mapping_version',
     ];
 
@@ -43,6 +48,7 @@ final class SaCampaign extends Model
             'plan_version' => 'integer',
             'resource_recheck_seconds' => 'integer',
             'created_by_user_id' => 'integer',
+            'deleted_by_user_id' => 'integer',
             'meta' => 'array',
             'shortcode_mapping' => 'array',
             'shortcode_mapping_version' => 'integer',
@@ -51,7 +57,23 @@ final class SaCampaign extends Model
             'paused_at' => 'datetime',
             'cancelled_at' => 'datetime',
             'completed_at' => 'datetime',
+            'deleted_at' => 'datetime',
         ];
+    }
+
+    /**
+     * Exclude soft-deleted campaigns when the additive deleted_at column is present.
+     *
+     * @param  Builder<SaCampaign>  $query
+     * @return Builder<SaCampaign>
+     */
+    public function scopeNotDeleted(Builder $query): Builder
+    {
+        if (SocialAutomationSchema::campaignSoftDeleteReady()) {
+            return $query->whereNull($this->getTable().'.deleted_at');
+        }
+
+        return $query;
     }
 
     /** @return HasMany<SaCampaignContent, $this> */

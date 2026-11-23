@@ -103,7 +103,7 @@ final class CampaignOrchestrator
 
         try {
             return DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($campaign): array {
-                $locked = SaCampaign::query()->where('id', $campaign->id)->lockForUpdate()->first();
+                $locked = SaCampaign::query()->notDeleted()->where('id', $campaign->id)->lockForUpdate()->first();
                 if (! $locked instanceof SaCampaign) {
                     return ['ok' => false, 'dispatched' => 0, 'waiting' => 0, 'errors' => ['campaign_not_found']];
                 }
@@ -273,7 +273,7 @@ final class CampaignOrchestrator
 
         try {
             return DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($campaign, $cycleNow): array {
-                $locked = SaCampaign::query()->where('id', $campaign->id)->lockForUpdate()->first();
+                $locked = SaCampaign::query()->notDeleted()->where('id', $campaign->id)->lockForUpdate()->first();
                 if (! $locked instanceof SaCampaign) {
                     return ['ok' => false, 'dispatched' => 0, 'waiting' => 0, 'errors' => ['campaign_not_found']];
                 }
@@ -462,6 +462,7 @@ final class CampaignOrchestrator
         $dispatched = 0;
 
         $campaigns = SaCampaign::query()
+            ->notDeleted()
             ->where('status', CampaignStatus::Running->value)
             ->where(function ($q) use ($now): void {
                 $q->whereNull('next_recheck_at')->orWhere('next_recheck_at', '<=', $now);
@@ -803,7 +804,7 @@ final class CampaignOrchestrator
                     return ['ok' => false, 'errors' => ['content_not_retryable']];
                 }
 
-                $campaign = SaCampaign::query()->where('id', $locked->campaign_id)->lockForUpdate()->first();
+                $campaign = SaCampaign::query()->notDeleted()->where('id', $locked->campaign_id)->lockForUpdate()->first();
                 if (! $campaign instanceof SaCampaign) {
                     return ['ok' => false, 'errors' => ['campaign_not_found']];
                 }
@@ -901,7 +902,7 @@ final class CampaignOrchestrator
                 $locked->admin_action_at = now();
                 $locked->save();
 
-                $campaign = SaCampaign::query()->find($locked->campaign_id);
+                $campaign = SaCampaign::query()->notDeleted()->find($locked->campaign_id);
                 if ($campaign instanceof SaCampaign) {
                     $this->maybeCompleteCampaign($campaign);
                 }
@@ -992,7 +993,7 @@ final class CampaignOrchestrator
                                     ->lockForUpdate()
                                     ->delete();
 
-                                $campaign = SaCampaign::query()->find($locked->campaign_id);
+                                $campaign = SaCampaign::query()->notDeleted()->find($locked->campaign_id);
                                 $meta = $campaign instanceof SaCampaign && is_array($campaign->meta) ? $campaign->meta : [];
                                 $hasCampaignPin = trim((string) ($meta['pinned_account_id'] ?? '')) !== '';
                                 if (! $hasCampaignPin && (int) $content->assigned_account_id === (int) $locked->account_id) {
@@ -1651,7 +1652,7 @@ final class CampaignOrchestrator
                 ->update(['status' => $contentStatus->value]);
         }
 
-        $campaign = SaCampaign::query()->find($content->campaign_id);
+        $campaign = SaCampaign::query()->notDeleted()->find($content->campaign_id);
         if ($campaign instanceof SaCampaign) {
             $this->maybeCompleteCampaign($campaign);
         }

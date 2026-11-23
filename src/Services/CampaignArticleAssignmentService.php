@@ -36,6 +36,7 @@ final class CampaignArticleAssignmentService
         }
 
         $campaign = SaCampaign::query()
+            ->notDeleted()
             ->where('campaign_uuid', $campaignUuid)
             ->where('installation_id', $installationId)
             ->first();
@@ -127,6 +128,7 @@ final class CampaignArticleAssignmentService
 
         return DB::connection($conn)->transaction(function () use ($campaignUuid, $installationId, $items): array {
             $campaign = SaCampaign::query()
+                ->notDeleted()
                 ->where('campaign_uuid', $campaignUuid)
                 ->where('installation_id', $installationId)
                 ->lockForUpdate()
@@ -280,6 +282,7 @@ final class CampaignArticleAssignmentService
 
         return DB::connection($conn)->transaction(function () use ($campaignUuid, $installationId, $targetUuid): array {
             $campaign = SaCampaign::query()
+                ->notDeleted()
                 ->where('campaign_uuid', $campaignUuid)
                 ->where('installation_id', $installationId)
                 ->lockForUpdate()

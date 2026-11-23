@@ -15,17 +15,23 @@ use Omnichannel\Addons\SocialAutomation\Domain\CampaignShortcodeMockGenerator;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignShortcodePipeline;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignTestScriptPolicy;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignV2ExecutionPolicy;
+use Omnichannel\Addons\SocialAutomation\Enums\CampaignAttemptStatus;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignContentStatus;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignExecutionMode;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignRunMode;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignStatus;
+use Omnichannel\Addons\SocialAutomation\Enums\JobStatus;
 use Omnichannel\Addons\SocialAutomation\Models\SaAccount;
+use Omnichannel\Addons\SocialAutomation\Models\SaAccountExecutionLease;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTag;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTagScript;
+use Omnichannel\Addons\SocialAutomation\Models\SaAuditLog;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaign;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaignActionTag;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaignContent;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaignContentAssignment;
+use Omnichannel\Addons\SocialAutomation\Models\SaJob;
+use Omnichannel\Addons\SocialAutomation\Models\SaJobAttempt;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackage;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
 use Omnichannel\Addons\SocialAutomation\Orchestration\CampaignOrchestrator;
@@ -232,6 +238,7 @@ final class CampaignService
         }
 
         return SaCampaign::query()
+            ->notDeleted()
             ->where('installation_id', $installationId)
             ->orderByDesc('id')
             ->limit($limit)
@@ -249,6 +256,7 @@ final class CampaignService
             return null;
         }
         $campaign = SaCampaign::query()
+            ->notDeleted()
             ->where('campaign_uuid', $campaignUuid)
             ->where('installation_id', $installationId)
             ->first();
@@ -356,6 +364,7 @@ final class CampaignService
 
         $txResult = DB::connection($conn)->transaction(function () use ($campaignUuid, $installationId): array {
             $campaign = SaCampaign::query()
+                ->notDeleted()
                 ->where('campaign_uuid', $campaignUuid)
                 ->where('installation_id', $installationId)
                 ->lockForUpdate()
@@ -493,6 +502,138 @@ final class CampaignService
         });
     }
 
+    /**
+     * Atomically validate eligibility and soft-delete a Cancelled Campaign.
+     * Never modifies Jobs, Attempts, Leases, Contents, Snapshots, or Campaign status.
+     *
+     * @return array{ok: bool, http?: int, campaign_id?: string, deleted_at?: string, code?: string, reason?: string, errors?: list<string>}
+     */
+    public function delete(string $campaignUuid, string $installationId, ?int $userId): array
+    {
+        if (! SocialAutomationSchema::campaignSoftDeleteReady()) {
+            return [
+                'ok' => false,
+                'http' => 503,
+                'code' => 'SCHEMA_UNAVAILABLE',
+                'reason' => 'schema_unavailable',
+                'errors' => ['schema_unavailable'],
+            ];
+        }
+
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+
+        return DB::connection($conn)->transaction(function () use ($campaignUuid, $installationId, $userId): array {
+            $campaign = SaCampaign::query()
+                ->where('campaign_uuid', $campaignUuid)
+                ->where('installation_id', $installationId)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $campaign instanceof SaCampaign) {
+                return [
+                    'ok' => false,
+                    'http' => 404,
+                    'code' => 'CAMPAIGN_NOT_FOUND',
+                    'reason' => 'campaign_not_found',
+                    'errors' => ['campaign_not_found'],
+                ];
+            }
+
+            if ($campaign->deleted_at !== null) {
+                return $this->deleteBlocked('campaign_already_deleted');
+            }
+
+            if ((string) $campaign->status !== CampaignStatus::Cancelled->value) {
+                return $this->deleteBlocked('campaign_not_cancelled');
+            }
+
+            $jobs = SaJob::query()
+                ->where('campaign_id', $campaign->id)
+                ->lockForUpdate()
+                ->get(['id', 'status']);
+
+            $jobIds = [];
+            foreach ($jobs as $job) {
+                $jobIds[] = (int) $job->id;
+                $jobStatus = JobStatus::tryFrom((string) $job->status);
+                if ($jobStatus === JobStatus::Unknown) {
+                    return $this->deleteBlocked('unknown_jobs_exist');
+                }
+                if ($jobStatus === null || ! $jobStatus->isTerminal()) {
+                    return $this->deleteBlocked('nonterminal_jobs_exist');
+                }
+            }
+
+            if ($jobIds !== [] && SocialAutomationSchema::has('sa_account_execution_leases')) {
+                $hasUnresolvedLease = SaAccountExecutionLease::query()
+                    ->whereIn('job_id', $jobIds)
+                    ->where(function ($q): void {
+                        $q->where('status', 'active')
+                            ->orWhereNotIn('status', ['released', 'expired', 'revoked']);
+                    })
+                    ->lockForUpdate()
+                    ->exists();
+                if ($hasUnresolvedLease) {
+                    return $this->deleteBlocked('active_leases_exist');
+                }
+            }
+
+            if ($jobIds !== [] && SocialAutomationSchema::has('sa_job_attempts')) {
+                $attempts = SaJobAttempt::query()
+                    ->whereIn('job_id', $jobIds)
+                    ->lockForUpdate()
+                    ->get(['id', 'status']);
+                foreach ($attempts as $attempt) {
+                    $attemptStatus = CampaignAttemptStatus::tryFrom((string) $attempt->status);
+                    if ($attemptStatus === null || ! $attemptStatus->isTerminal()) {
+                        return $this->deleteBlocked('unresolved_attempts_exist');
+                    }
+                }
+            }
+
+            $now = now();
+            $campaign->deleted_at = $now;
+            $campaign->deleted_by_user_id = $userId;
+            $campaign->save();
+
+            if (SocialAutomationSchema::has('sa_audit_logs')) {
+                SaAuditLog::query()->create([
+                    'actor_type' => 'staff',
+                    'actor_id' => $userId,
+                    'action' => 'campaign.soft_deleted',
+                    'subject_type' => 'sa_campaign',
+                    'subject_id' => $campaign->id,
+                    'context' => [
+                        'campaign_uuid' => $campaign->campaign_uuid,
+                        'installation_id' => $installationId,
+                        'status' => $campaign->status,
+                    ],
+                    'occurred_at' => $now,
+                ]);
+            }
+
+            return [
+                'ok' => true,
+                'campaign_id' => (string) $campaign->campaign_uuid,
+                'deleted_at' => $now->toIso8601String(),
+            ];
+        });
+    }
+
+    /**
+     * @return array{ok: false, http: int, code: string, reason: string, errors: list<string>}
+     */
+    private function deleteBlocked(string $reason): array
+    {
+        return [
+            'ok' => false,
+            'http' => 409,
+            'code' => 'CAMPAIGN_DELETE_BLOCKED',
+            'reason' => $reason,
+            'errors' => [$reason],
+        ];
+    }
+
     public function findContent(string $contentUuid, string $installationId): ?SaCampaignContent
     {
         if (! SocialAutomationSchema::campaignsReady()) {
@@ -502,7 +643,7 @@ final class CampaignService
         if (! $content instanceof SaCampaignContent) {
             return null;
         }
-        $campaign = SaCampaign::query()->find($content->campaign_id);
+        $campaign = SaCampaign::query()->notDeleted()->find($content->campaign_id);
         if (! $campaign instanceof SaCampaign || (string) $campaign->installation_id !== $installationId) {
             return null;
         }
@@ -1361,6 +1502,7 @@ final class CampaignService
             return null;
         }
         $campaign = SaCampaign::query()
+            ->notDeleted()
             ->where('campaign_uuid', $campaignUuid)
             ->where('installation_id', $installationId)
             ->first();

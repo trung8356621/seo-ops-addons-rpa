@@ -47,6 +47,24 @@ final class SocialAutomationSchema
     }
 
     /**
+     * Soft-delete metadata columns present on sa_campaigns.
+     */
+    public static function campaignSoftDeleteReady(): bool
+    {
+        if (! self::campaignsReady()) {
+            return false;
+        }
+        try {
+            $conn = SocialAutomationServiceConfig::CONNECTION;
+
+            return (bool) @Schema::connection($conn)->hasColumn('sa_campaigns', 'deleted_at')
+                && (bool) @Schema::connection($conn)->hasColumn('sa_campaigns', 'deleted_by_user_id');
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    /**
      * Campaign Shortcode V2 columns present (additive migration applied).
      */
     public static function campaignShortcodeReady(): bool

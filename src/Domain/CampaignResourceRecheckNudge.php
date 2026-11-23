@@ -50,6 +50,7 @@ final class CampaignResourceRecheckNudge
         $skipped = 0;
 
         $campaigns = SaCampaign::query()
+            ->notDeleted()
             ->where('installation_id', $installationId)
             ->where('status', CampaignStatus::Running->value)
             ->whereNotNull('next_recheck_at')

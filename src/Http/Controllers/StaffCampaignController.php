@@ -127,6 +127,42 @@ final class StaffCampaignController extends Controller
         return $this->actionResponse($result);
     }
 
+    public function destroy(Request $request, string $id): JsonResponse
+    {
+        $this->access->assertCanManageCampaigns();
+        if (! SocialAutomationSchema::campaignSoftDeleteReady()) {
+            return response()->json([
+                'ok' => false,
+                'success' => false,
+                'code' => 'SCHEMA_UNAVAILABLE',
+                'reason' => 'schema_unavailable',
+                'errors' => ['schema_unavailable'],
+            ], 503);
+        }
+
+        $result = $this->campaigns->delete(
+            $id,
+            $this->installation->resolveInstallationId(),
+            $request->user()?->id ? (int) $request->user()->id : null,
+        );
+        if (! ($result['ok'] ?? false)) {
+            return response()->json([
+                'ok' => false,
+                'success' => false,
+                'code' => $result['code'] ?? 'CAMPAIGN_DELETE_BLOCKED',
+                'reason' => $result['reason'] ?? 'delete_blocked',
+                'errors' => $result['errors'] ?? ['delete_blocked'],
+            ], (int) ($result['http'] ?? 409));
+        }
+
+        return response()->json([
+            'ok' => true,
+            'success' => true,
+            'campaign_id' => $result['campaign_id'],
+            'deleted_at' => $result['deleted_at'],
+        ]);
+    }
+
     /**
      * @param  array{ok: bool, data?: array<string, mixed>, errors?: list<string>}  $result
      */
