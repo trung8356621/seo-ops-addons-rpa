@@ -6,6 +6,7 @@ namespace Omnichannel\Addons\SocialAutomation\Orchestration;
 
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Omnichannel\Addons\SocialAutomation\Artifacts\ArtifactAcceptPolicy;
 use Omnichannel\Addons\SocialAutomation\Domain\AccountLockPolicy;
@@ -747,9 +748,24 @@ final class CampaignOrchestrator
             $output['artifacts'] = $artifactRefs['refs'];
             $output['screenshot_proves_publication'] = false;
         }
+        if (isset($payload['step_count']) && is_numeric($payload['step_count']) && (int) $payload['step_count'] >= 0) {
+            $output = is_array($output) ? $output : [];
+            $output['step_count'] = (int) $payload['step_count'];
+        }
 
         $jobStatus = $attemptStatus->toJobStatus();
         $release = $attemptStatus !== CampaignAttemptStatus::Unknown;
+        $attrs = [
+            'result' => $output === [] ? null : $output,
+            'error_code' => is_array($payload['error'] ?? null)
+                ? ($payload['error']['code'] ?? $payload['error_code'] ?? null)
+                : ($payload['error_code'] ?? null),
+            'error_message' => $this->errorMessageFromPayload($payload),
+            'finished_at' => now(),
+        ];
+        if (isset($payload['duration_ms']) && is_numeric($payload['duration_ms']) && (int) $payload['duration_ms'] >= 0) {
+            $attrs['duration_ms'] = (int) $payload['duration_ms'];
+        }
 
         return $this->advanceClient(
             $jobUuid,
@@ -759,19 +775,178 @@ final class CampaignOrchestrator
             $attemptStatus,
             $jobStatus,
             'result',
-            [
-                'result' => $output === [] ? null : $output,
-                'error_code' => is_array($payload['error'] ?? null)
-                    ? ($payload['error']['code'] ?? $payload['error_code'] ?? null)
-                    : ($payload['error_code'] ?? null),
-                'error_message' => $this->errorMessageFromPayload($payload),
-                'finished_at' => now(),
-            ],
+            $attrs,
             requireFence: true,
             releaseLock: $release,
             terminalContent: true,
             artifactRefs: $artifactRefs['refs'] ?? [],
         );
+    }
+
+    /**
+     * Authenticated Client binary artifact upload (screenshots, etc.) stored outside public webroot.
+     *
+     * @param  array<string, mixed>  $input
+     * @return array{ok: bool, idempotent?: bool, artifact?: array<string, mixed>, errors?: list<string>}
+     */
+    public function uploadCampaignArtifact(
+        string $jobUuid,
+        array $input,
+        ?string $binary,
+        ?int $clientApiKeyId,
+        string $installationId,
+    ): array {
+        if (! SocialAutomationSchema::campaignsReady() || ! SocialAutomationSchema::has('sa_artifacts')) {
+            return ['ok' => false, 'errors' => ['schema_unavailable']];
+        }
+
+        if ($binary === null || $binary === '') {
+            return ['ok' => false, 'errors' => ['content_invalid']];
+        }
+
+        $mime = strtolower(trim((string) ($input['mime'] ?? 'image/png')));
+        $kind = strtolower(trim((string) ($input['kind'] ?? 'screenshot')));
+        if (! in_array($kind, ['screenshot', 'video', 'log', 'other'], true)) {
+            return ['ok' => false, 'errors' => ['artifact_kind_invalid']];
+        }
+
+        $meta = is_array($input['metadata'] ?? null) ? $input['metadata'] : [];
+        foreach (['variant_id', 'language_label', 'package_key', 'screenshot_role', 'role', 'step', 'failed_step', 'phase', 'outcome'] as $field) {
+            if (isset($input[$field]) && ! isset($meta[$field])) {
+                $meta[$field] = is_string($input[$field]) ? trim($input[$field]) : $input[$field];
+            }
+        }
+        foreach (['release_id', 'priority'] as $intField) {
+            if (isset($input[$intField]) && is_numeric($input[$intField]) && ! isset($meta[$intField])) {
+                $meta[$intField] = (int) $input[$intField];
+            }
+        }
+
+        $policyCheck = $this->artifacts->validate($mime, strlen($binary), $meta);
+        if (! ($policyCheck['ok'] ?? false)) {
+            return ['ok' => false, 'errors' => $policyCheck['errors'] ?? ['artifact_invalid']];
+        }
+
+        if ($kind === 'screenshot') {
+            $outcome = strtolower(trim((string) ($input['outcome'] ?? $meta['outcome'] ?? 'success')));
+            $shotCheck = $this->artifacts->validateScreenshotMetadata($outcome, $meta);
+            if (! ($shotCheck['ok'] ?? false)) {
+                return ['ok' => false, 'errors' => $shotCheck['errors'] ?? ['screenshot_metadata_invalid']];
+            }
+            if (($shotCheck['phase'] ?? null) !== null) {
+                $meta['phase'] = $shotCheck['phase'];
+            }
+            $meta['outcome'] = $outcome;
+            $meta['proves_publication'] = false;
+        }
+
+        $checksum = hash('sha256', $binary);
+        $job = $this->authorizedCampaignJob($jobUuid, $clientApiKeyId, $installationId, false);
+        if (! $job instanceof SaJob) {
+            return ['ok' => false, 'errors' => ['job_not_found_or_forbidden']];
+        }
+
+        $jobStatus = JobStatus::tryFrom((string) $job->status);
+        if ($jobStatus === JobStatus::Cancelled) {
+            return ['ok' => false, 'errors' => ['job_cancelled']];
+        }
+
+        $attemptUuid = trim((string) ($input['attempt_uuid'] ?? $input['attempt_id'] ?? ''));
+        $activeFence = $this->activeFenceAttemptUuid($job);
+        $attempt = null;
+        if ($attemptUuid !== '') {
+            $attempt = SaJobAttempt::query()
+                ->where('job_id', $job->id)
+                ->where('attempt_uuid', $attemptUuid)
+                ->first();
+            if (! $attempt instanceof SaJobAttempt) {
+                return ['ok' => false, 'errors' => ['stale_attempt']];
+            }
+            if ((string) $attempt->status === CampaignAttemptStatus::Cancelled->value) {
+                return ['ok' => false, 'errors' => ['stale_attempt']];
+            }
+            if ($activeFence !== null && ! hash_equals($activeFence, $attemptUuid) && ! $jobStatus?->isTerminal()) {
+                return ['ok' => false, 'errors' => ['stale_attempt']];
+            }
+        } else {
+            $attempt = $this->activeAttempt($job);
+            if (! $attempt instanceof SaJobAttempt) {
+                return ['ok' => false, 'errors' => ['stale_attempt']];
+            }
+            $attemptUuid = (string) $attempt->attempt_uuid;
+        }
+
+        // Idempotent duplicate check (same job + attempt + sha256 checksum).
+        $existing = SaArtifact::query()
+            ->where('job_id', $job->id)
+            ->where('attempt_id', $attempt->id)
+            ->where('checksum_sha256', $checksum)
+            ->first();
+        if ($existing instanceof SaArtifact
+            && $this->artifacts->isDuplicateChecksum($existing->checksum_sha256, $checksum)) {
+            return [
+                'ok' => true,
+                'idempotent' => true,
+                'artifact' => [
+                    'artifact_uuid' => (string) $existing->artifact_uuid,
+                    'job_uuid' => (string) $job->job_uuid,
+                    'attempt_uuid' => (string) $attempt->attempt_uuid,
+                    'kind' => (string) $existing->kind,
+                    'mime' => (string) $existing->mime,
+                    'size_bytes' => (int) $existing->size_bytes,
+                    'checksum_sha256' => (string) $existing->checksum_sha256,
+                    'metadata' => is_array($existing->metadata) ? $existing->metadata : null,
+                ],
+            ];
+        }
+
+        $artifactUuid = (string) Str::uuid();
+        $ext = match ($mime) {
+            'image/png' => 'png',
+            'image/jpeg' => 'jpg',
+            'image/webp' => 'webp',
+            'video/mp4' => 'mp4',
+            'video/webm' => 'webm',
+            'application/json' => 'json',
+            'text/plain' => 'txt',
+            default => 'bin',
+        };
+        $storagePath = sprintf('social-automation/artifacts/%s/%s.%s', (string) $job->job_uuid, $artifactUuid, $ext);
+        if (! Storage::disk('local')->put($storagePath, $binary)) {
+            return ['ok' => false, 'errors' => ['artifact_storage_failed']];
+        }
+
+        $meta['attempt_uuid'] = $attemptUuid;
+        $meta = $this->observability->redactArray($meta);
+
+        $artifact = SaArtifact::query()->create([
+            'artifact_uuid' => $artifactUuid,
+            'job_id' => $job->id,
+            'attempt_id' => $attempt->id,
+            'kind' => $kind,
+            'mime' => $mime,
+            'size_bytes' => strlen($binary),
+            'storage_disk' => 'local',
+            'storage_path' => $storagePath,
+            'checksum_sha256' => $checksum,
+            'metadata' => $meta,
+            'retain_until' => now()->addDays(30),
+        ]);
+
+        return [
+            'ok' => true,
+            'idempotent' => false,
+            'artifact' => [
+                'artifact_uuid' => (string) $artifact->artifact_uuid,
+                'job_uuid' => (string) $job->job_uuid,
+                'attempt_uuid' => (string) $attempt->attempt_uuid,
+                'kind' => (string) $artifact->kind,
+                'mime' => (string) $artifact->mime,
+                'size_bytes' => (int) $artifact->size_bytes,
+                'checksum_sha256' => (string) $artifact->checksum_sha256,
+                'metadata' => is_array($artifact->metadata) ? $artifact->metadata : null,
+            ],
+        ];
     }
 
     /**

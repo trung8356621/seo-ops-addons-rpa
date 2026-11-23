@@ -97,12 +97,17 @@ final class CampaignContentHistoryService
                 ->orderBy('id')
                 ->get();
             foreach ($artifacts as $art) {
+                $hasBinary = is_string($art->storage_path) && $art->storage_path !== '';
                 $dto = [
                     'artifact_uuid' => (string) $art->artifact_uuid,
                     'kind' => (string) $art->kind,
                     'mime' => $art->mime !== null ? (string) $art->mime : null,
                     'size_bytes' => $art->size_bytes !== null ? (int) $art->size_bytes : null,
                     'checksum_sha256' => $art->checksum_sha256 !== null ? (string) $art->checksum_sha256 : null,
+                    'has_binary' => $hasBinary,
+                    'download_url' => $hasBinary
+                        ? '/social-automation/api/campaigns/artifacts/'.(string) $art->artifact_uuid
+                        : null,
                     'metadata' => is_array($art->metadata) ? $art->metadata : null,
                 ];
                 if ($art->attempt_id !== null) {
@@ -139,6 +144,7 @@ final class CampaignContentHistoryService
             $progress = is_array($attempt->progress) ? $attempt->progress : [];
             $result = is_array($attempt->result) ? $attempt->result : [];
             $step = $progress['step'] ?? $result['failed_step'] ?? $result['step'] ?? null;
+            $stepCount = $result['step_count'] ?? $progress['total_steps'] ?? null;
 
             $artifacts = $artifactsByAttemptId[(int) $attempt->id] ?? [];
             if ($artifacts === [] && ($attemptCountByJob[(int) $job->id] ?? 0) === 1) {
@@ -154,6 +160,7 @@ final class CampaignContentHistoryService
                 'status' => (string) $attempt->status,
                 'job_status' => (string) $job->status,
                 'step' => $step,
+                'step_count' => is_numeric($stepCount) ? (int) $stepCount : null,
                 'error_code' => $attempt->error_code ?? $job->error_code,
                 'error_message' => $attempt->error_message ?? $job->error_message,
                 'started_at' => ($attempt->started_at ?? $job->started_at)?->toIso8601String(),

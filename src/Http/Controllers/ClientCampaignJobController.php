@@ -69,6 +69,66 @@ final class ClientCampaignJobController extends Controller
         return $this->forward($request, $id, 'result');
     }
 
+    public function uploadArtifact(Request $request, string $id): JsonResponse
+    {
+        if (! SocialAutomationSchema::campaignsReady() || ! SocialAutomationSchema::has('sa_artifacts')) {
+            return response()->json(['ok' => false, 'errors' => ['schema_unavailable']], 503);
+        }
+        $key = $this->clientKey($request);
+        if ($key === null) {
+            return response()->json(['ok' => false, 'errors' => ['unauthorized']], 401);
+        }
+
+        $input = $request->all();
+        $binary = null;
+        $file = $request->file('file') ?? $request->file('artifact') ?? $request->file('screenshot');
+        if ($file !== null && $file->isValid()) {
+            $binary = (string) file_get_contents($file->getRealPath());
+            if (! isset($input['mime']) || trim((string) $input['mime']) === '') {
+                $mime = $file->getMimeType();
+                if (is_string($mime) && $mime !== '') {
+                    $input['mime'] = strtolower($mime);
+                }
+            }
+        } else {
+            $b64 = $request->input('content_base64');
+            if (is_string($b64) && $b64 !== '') {
+                $decoded = base64_decode($b64, true);
+                $binary = $decoded === false ? null : $decoded;
+            }
+        }
+
+        $result = $this->orchestrator->uploadCampaignArtifact(
+            $id,
+            is_array($input) ? $input : [],
+            $binary,
+            (int) $key->id,
+            (string) $key->installation_id,
+        );
+
+        if (! ($result['ok'] ?? false)) {
+            $errors = $result['errors'] ?? ['artifact_upload_failed'];
+            $code = 422;
+            if (in_array('job_not_found_or_forbidden', $errors, true)) {
+                $code = 404;
+            } elseif (in_array('stale_attempt', $errors, true) || in_array('job_cancelled', $errors, true)) {
+                $code = 409;
+            } elseif (in_array('schema_unavailable', $errors, true)) {
+                $code = 503;
+            }
+
+            return response()->json(['ok' => false, 'errors' => $errors], $code);
+        }
+
+        $status = ($result['idempotent'] ?? false) ? 200 : 201;
+
+        return response()->json([
+            'ok' => true,
+            'idempotent' => (bool) ($result['idempotent'] ?? false),
+            'artifact' => $result['artifact'],
+        ], $status);
+    }
+
     private function forward(Request $request, string $id, string $method): JsonResponse
     {
         if (! SocialAutomationSchema::campaignsReady()) {

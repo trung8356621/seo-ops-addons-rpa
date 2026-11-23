@@ -7,6 +7,11 @@ namespace Omnichannel\Addons\SocialAutomation\Http\Controllers;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Omnichannel\Addons\SocialAutomation\Models\SaArtifact;
+use Omnichannel\Addons\SocialAutomation\Models\SaCampaign;
+use Omnichannel\Addons\SocialAutomation\Models\SaJob;
 use Omnichannel\Addons\SocialAutomation\Services\CampaignService;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationAccess;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationInstallationResolver;
@@ -161,6 +166,59 @@ final class StaffCampaignController extends Controller
             'campaign_id' => $result['campaign_id'],
             'deleted_at' => $result['deleted_at'],
         ]);
+    }
+
+    public function downloadArtifact(string $artifactUuid): mixed
+    {
+        $this->access->assertCanAccess();
+        if (! SocialAutomationSchema::campaignsReady() || ! SocialAutomationSchema::has('sa_artifacts')) {
+            return response()->json(['ok' => false, 'errors' => ['schema_unavailable']], 503);
+        }
+
+        $uuid = trim($artifactUuid);
+        if (! Str::isUuid($uuid)) {
+            return response()->json(['ok' => false, 'errors' => ['artifact_not_found']], 404);
+        }
+
+        $artifact = SaArtifact::query()->where('artifact_uuid', $uuid)->first();
+        if (! $artifact instanceof SaArtifact || ! is_string($artifact->storage_path) || $artifact->storage_path === '') {
+            return response()->json(['ok' => false, 'errors' => ['artifact_not_found']], 404);
+        }
+
+        if (str_contains($artifact->storage_path, '..') || ! str_starts_with($artifact->storage_path, 'social-automation/artifacts/')) {
+            return response()->json(['ok' => false, 'errors' => ['artifact_not_found']], 404);
+        }
+
+        $job = SaJob::query()->find($artifact->job_id);
+        if (! $job instanceof SaJob || $job->campaign_id === null) {
+            return response()->json(['ok' => false, 'errors' => ['artifact_not_found']], 404);
+        }
+
+        $installationId = $this->installation->resolveInstallationId();
+        $campaign = SaCampaign::query()
+            ->notDeleted()
+            ->where('id', $job->campaign_id)
+            ->where('installation_id', $installationId)
+            ->first();
+        if (! $campaign instanceof SaCampaign) {
+            return response()->json(['ok' => false, 'errors' => ['artifact_not_found']], 404);
+        }
+
+        $disk = Storage::disk($artifact->storage_disk ?: 'local');
+        if (! $disk->exists($artifact->storage_path)) {
+            return response()->json(['ok' => false, 'errors' => ['artifact_file_missing']], 404);
+        }
+
+        return $disk->response(
+            $artifact->storage_path,
+            basename($artifact->storage_path),
+            [
+                'Content-Type' => (string) ($artifact->mime ?: 'application/octet-stream'),
+                'Cache-Control' => 'private, no-store',
+                'X-Content-Type-Options' => 'nosniff',
+                'X-Checksum-Sha256' => (string) ($artifact->checksum_sha256 ?? ''),
+            ],
+        );
     }
 
     /**

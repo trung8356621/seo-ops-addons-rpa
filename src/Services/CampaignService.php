@@ -443,21 +443,48 @@ final class CampaignService
      */
     public function resume(string $campaignUuid, string $installationId): array
     {
-        $campaign = $this->findOwned($campaignUuid, $installationId);
-        if ($campaign === null) {
-            return ['ok' => false, 'errors' => ['campaign_not_found']];
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+
+        $txResult = DB::connection($conn)->transaction(function () use ($campaignUuid, $installationId): array {
+            $locked = SaCampaign::query()
+                ->notDeleted()
+                ->where('campaign_uuid', $campaignUuid)
+                ->where('installation_id', $installationId)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $locked instanceof SaCampaign) {
+                return ['ok' => false, 'errors' => ['campaign_not_found']];
+            }
+            if ((int) ($locked->plan_version ?? 1) >= 2 && ! CampaignV2ExecutionPolicy::isEnabled()) {
+                return ['ok' => false, 'errors' => ['v2_campaign_execution_unsupported']];
+            }
+
+            $status = CampaignStatus::tryFrom((string) $locked->status);
+            if ($status === CampaignStatus::Running) {
+                return ['ok' => true, 'already_running' => true, 'campaign' => $locked];
+            }
+            if ($status !== CampaignStatus::Paused) {
+                return ['ok' => false, 'errors' => ['invalid_campaign_status']];
+            }
+
+            $locked->status = CampaignStatus::Running->value;
+            $locked->paused_at = null;
+            $locked->next_recheck_at = now();
+            $locked->save();
+
+            return ['ok' => true, 'already_running' => false, 'campaign' => $locked];
+        });
+
+        if (! ($txResult['ok'] ?? false)) {
+            return ['ok' => false, 'errors' => $txResult['errors'] ?? ['resume_failed']];
         }
-        if ((int) ($campaign->plan_version ?? 1) >= 2 && ! CampaignV2ExecutionPolicy::isEnabled()) {
-            return ['ok' => false, 'errors' => ['v2_campaign_execution_unsupported']];
+
+        /** @var SaCampaign $campaign */
+        $campaign = $txResult['campaign'];
+        if (! ($txResult['already_running'] ?? false)) {
+            $this->orchestrator->dispatchCampaign($campaign);
         }
-        if ((string) $campaign->status !== CampaignStatus::Paused->value) {
-            return ['ok' => false, 'errors' => ['invalid_campaign_status']];
-        }
-        $campaign->status = CampaignStatus::Running->value;
-        $campaign->paused_at = null;
-        $campaign->next_recheck_at = now();
-        $campaign->save();
-        $this->orchestrator->dispatchCampaign($campaign);
 
         return ['ok' => true, 'data' => $this->detailDto($campaign->fresh() ?? $campaign)];
     }

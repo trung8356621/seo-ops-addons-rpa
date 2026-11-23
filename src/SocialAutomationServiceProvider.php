@@ -528,6 +528,9 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     Route::delete('/{id}', [StaffCampaignController::class, 'destroy'])
                         ->whereUuid('id')
                         ->name('social-automation.campaigns.destroy');
+                    Route::get('/artifacts/{artifactUuid}', [StaffCampaignController::class, 'downloadArtifact'])
+                        ->whereUuid('artifactUuid')
+                        ->name('social-automation.campaigns.artifacts.download');
                     Route::get('/{id}/contents', [StaffCampaignContentController::class, 'index'])
                         ->whereUuid('id')
                         ->name('social-automation.campaigns.contents.index');
@@ -653,9 +656,12 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                 Route::post('/jobs/{id}/progress', [ClientCampaignJobController::class, 'progress'])
                     ->whereUuid('id')
                     ->name('social-automation.client.jobs.progress');
-                    Route::post('/jobs/{id}/result', [ClientCampaignJobController::class, 'result'])
-                        ->whereUuid('id')
-                        ->name('social-automation.client.jobs.result');
+                Route::post('/jobs/{id}/result', [ClientCampaignJobController::class, 'result'])
+                    ->whereUuid('id')
+                    ->name('social-automation.client.jobs.result');
+                Route::post('/jobs/{id}/artifacts', [ClientCampaignJobController::class, 'uploadArtifact'])
+                    ->whereUuid('id')
+                    ->name('social-automation.client.jobs.artifacts');
             });
 
         // Keep Alive Socket gateway verify — shared gateway secret only (never Client API Key).
