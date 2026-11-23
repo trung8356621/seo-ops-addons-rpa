@@ -226,13 +226,23 @@ final class ScriptResolutionService
                 ];
             }
 
-            $locked->fill([
-                'sharing_mode' => SaPackage::SHARING_CMS_GLOBAL,
-                'global_cms_type' => $scope['cms_type'],
-                'global_cms_template_id' => $scope['cms_template_id'],
-                'global_cms_path_key' => $scope['path_key'],
-                'global_scope_key' => $scope['scope_key'],
-            ])->save();
+            $existingGroupHolder = ($owningGroup instanceof SaScriptVariantGroup && $allowedGroupPackageIds !== [])
+                ? SaPackage::query()
+                    ->where('global_scope_key', $scope['scope_key'])
+                    ->where('id', '!=', $locked->id)
+                    ->whereIn('id', $allowedGroupPackageIds)
+                    ->exists()
+                : false;
+
+            if (! $existingGroupHolder) {
+                $locked->fill([
+                    'sharing_mode' => SaPackage::SHARING_CMS_GLOBAL,
+                    'global_cms_type' => $scope['cms_type'],
+                    'global_cms_template_id' => $scope['cms_template_id'],
+                    'global_cms_path_key' => $scope['path_key'],
+                    'global_scope_key' => $scope['scope_key'],
+                ])->save();
+            }
 
             return [
                 'ok' => true,
@@ -422,12 +432,18 @@ final class ScriptResolutionService
                     ->first();
                 if ($siteGroup instanceof SaScriptVariantGroup) {
                     $enabledVariants = [];
+                    $primaryPkg = null;
+                    $primaryRel = null;
                     foreach ($siteGroup->items->sortBy('priority') as $item) {
                         if (! $item->is_enabled || ! $item->package instanceof SaPackage || ! ($item->package->is_enabled ?? true)) {
                             continue;
                         }
                         if (! $item->release instanceof SaPackageRelease || (string) $item->release->status !== 'published') {
                             continue;
+                        }
+                        if ($primaryPkg === null) {
+                            $primaryPkg = $item->package;
+                            $primaryRel = $item->release;
                         }
                         $enabledVariants[] = [
                             'variant_id' => (string) $item->variant_uuid,
@@ -441,7 +457,17 @@ final class ScriptResolutionService
                             'execution_digest' => $item->release->execution_digest,
                         ];
                     }
-                    if ($enabledVariants !== []) {
+                    if ($enabledVariants !== [] && $primaryPkg instanceof SaPackage && $primaryRel instanceof SaPackageRelease) {
+                        $res = $this->foundResult(
+                            self::SOURCE_SITE_SPECIFIC,
+                            $tagKey,
+                            $tagKey,
+                            $primaryPkg,
+                            $primaryRel,
+                            $cmsScope,
+                            $site,
+                            $path,
+                        );
                         $res['variant_group'] = [
                             'group_id' => (int) $siteGroup->id,
                             'group_uuid' => (string) $siteGroup->group_uuid,

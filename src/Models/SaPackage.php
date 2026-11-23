@@ -35,8 +35,10 @@ final class SaPackage extends Model
         'package_key',
         'kind',
         'name',
+        'language_label',
         'description',
         'is_enabled',
+        'is_primary',
         'is_authentication',
         'sharing_mode',
         'global_cms_type',
@@ -54,6 +56,7 @@ final class SaPackage extends Model
     {
         return [
             'is_enabled' => 'boolean',
+            'is_primary' => 'boolean',
             'is_authentication' => 'boolean',
             'global_cms_template_id' => 'integer',
             'disabled_meta' => 'array',

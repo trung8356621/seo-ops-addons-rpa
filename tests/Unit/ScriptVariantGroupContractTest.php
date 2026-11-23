@@ -833,7 +833,7 @@ final class ScriptVariantGroupContractTest extends TestCase
             $table->string('global_cms_type', 64)->nullable();
             $table->unsignedBigInteger('global_cms_template_id')->nullable();
             $table->string('global_cms_path_key', 128)->nullable();
-            $table->string('global_scope_key', 191)->nullable();
+            $table->string('global_scope_key', 191)->nullable()->unique('sa_packages_global_scope_unique');
             $table->timestamps();
         });
 

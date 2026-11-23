@@ -421,6 +421,9 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     Route::match(['patch', 'put'], '/{id}/sharing', [StaffScriptRegistryController::class, 'updateSharing'])
                         ->where('id', '^(?!.*\\.\\.)[^/]{1,191}$')
                         ->name('social-automation.script-registry.sharing.update');
+                    Route::match(['patch', 'put'], '/{id}/config', [StaffScriptRegistryController::class, 'updateConfig'])
+                        ->where('id', '^(?!.*\\.\\.)[^/]{1,191}$')
+                        ->name('social-automation.script-registry.config.update');
                 });
 
                 // Client API Key Management for SEO-OPS UI / Staff session

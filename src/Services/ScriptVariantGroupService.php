@@ -506,14 +506,24 @@ final class ScriptVariantGroupService
             if (strtolower((string) $scope['scope_key']) !== strtolower((string) $group->global_scope_key)) {
                 return ['ok' => false, 'http' => 422, 'error' => 'incompatible_variant_scope', 'errors' => ['incompatible_variant_scope']];
             }
-            // Ensure package is marked cms_global for this owned scope
-            if (! $package->isCmsGlobal() || $package->global_scope_key !== $group->global_scope_key) {
+            // Respect sa_packages_global_scope_unique: at most one SaPackage holds global_scope_key.
+            // Secondary variants stay site_specific in sa_packages and belong to the group via sa_script_variant_group_items.
+            $existingGlobalHolder = SaPackage::query()
+                ->where('global_scope_key', $scope['scope_key'])
+                ->where('id', '!=', $package->id)
+                ->exists();
+            if (! $existingGlobalHolder && (! $package->isCmsGlobal() || $package->global_scope_key !== $group->global_scope_key)) {
                 $package->fill([
                     'sharing_mode' => SaPackage::SHARING_CMS_GLOBAL,
                     'global_cms_type' => $scope['cms_type'],
                     'global_cms_template_id' => $scope['cms_template_id'],
                     'global_cms_path_key' => $scope['path_key'],
                     'global_scope_key' => $scope['scope_key'],
+                ])->save();
+            } elseif ($existingGlobalHolder && $package->global_scope_key === $scope['scope_key']) {
+                $package->fill([
+                    'sharing_mode' => SaPackage::SHARING_SITE_SPECIFIC,
+                    'global_scope_key' => null,
                 ])->save();
             }
         } else {
@@ -560,7 +570,371 @@ final class ScriptVariantGroupService
             'is_enabled' => (bool) ($input['is_enabled'] ?? true),
         ]);
 
+        if (SocialAutomationSchema::scriptOperationalConfigReady()) {
+            $package->language_label = $label;
+            if (! $package->is_primary && $priority === 1 && (bool) ($input['is_enabled'] ?? true)) {
+                $package->is_primary = true;
+            }
+            $package->save();
+        }
+
         return ['ok' => true];
+    }
+
+    /**
+     * Simplified operational configuration on an individual Script.
+     * Automatically manages the internal Variant Group without requiring manual group creation.
+     *
+     * @param  array<string, mixed>  $input
+     * @return array{ok: bool, http?: int, data?: array<string, mixed>, error?: string, errors?: list<string>, conflict?: array<string, mixed>}
+     */
+    public function configureScript(SaPackage $package, array $input, ?int $userId = null): array
+    {
+        if (! SocialAutomationSchema::scriptVariantGroupsReady() || ! SocialAutomationSchema::scriptOperationalConfigReady()) {
+            return ['ok' => false, 'http' => 503, 'error' => 'schema_unavailable', 'errors' => ['schema_unavailable']];
+        }
+        if ((string) $package->kind !== 'script') {
+            return ['ok' => false, 'http' => 422, 'error' => 'not_a_script_package', 'errors' => ['not_a_script_package']];
+        }
+
+        $resolver = $this->resolver ?? new ScriptResolutionService;
+        $conn = SocialAutomationServiceConfig::CONNECTION;
+
+        return DB::connection($conn)->transaction(function () use ($package, $input, $userId, $resolver): array {
+            $locked = SaPackage::query()->where('id', $package->id)->lockForUpdate()->first();
+            if (! $locked instanceof SaPackage) {
+                return ['ok' => false, 'http' => 404, 'error' => 'not_found', 'errors' => ['not_found']];
+            }
+
+            $release = SaPackageRelease::query()
+                ->where('package_id', $locked->id)
+                ->where('status', 'published')
+                ->orderByDesc('published_at')
+                ->orderByDesc('id')
+                ->first();
+            if (! $release instanceof SaPackageRelease) {
+                return ['ok' => false, 'http' => 422, 'error' => 'published_release_required', 'errors' => ['published_release_required']];
+            }
+
+            $hasEnabled = array_key_exists('is_enabled', $input);
+            $hasPrimary = array_key_exists('is_primary', $input);
+            $hasLabel = array_key_exists('language_label', $input);
+
+            $isEnabled = $hasEnabled ? (bool) $input['is_enabled'] : (bool) ($locked->is_enabled ?? true);
+            $isPrimary = $hasPrimary ? (bool) $input['is_primary'] : (bool) ($locked->is_primary ?? false);
+
+            if (! $isEnabled && $hasPrimary && (bool) $input['is_primary']) {
+                return ['ok' => false, 'http' => 422, 'error' => 'disabled_script_cannot_be_primary', 'errors' => ['disabled_script_cannot_be_primary']];
+            }
+            if (! $isEnabled) {
+                $isPrimary = false;
+            }
+
+            $label = $hasLabel
+                ? $this->normalizeLanguageLabel((string) $input['language_label'])
+                : $this->normalizeLanguageLabel((string) ($locked->language_label ?? ''));
+            if ($label === '') {
+                $label = 'DEFAULT';
+            }
+
+            // Determine Action/CMS scope with strict site-specific isolation
+            $existingItem = SaScriptVariantGroupItem::query()->where('package_id', $locked->id)->first();
+            $requestedScope = strtolower(trim((string) ($input['action_scope'] ?? 'auto')));
+            if (! in_array($requestedScope, ['auto', 'cms_global', 'site_action'], true)) {
+                return ['ok' => false, 'http' => 422, 'error' => 'invalid_action_scope', 'errors' => ['invalid_action_scope']];
+            }
+
+            $group = null;
+            if ($existingItem instanceof SaScriptVariantGroupItem) {
+                $group = SaScriptVariantGroup::query()->where('id', $existingItem->group_id)->lockForUpdate()->first();
+            }
+
+            $scopeType = SaScriptVariantGroup::SCOPE_SITE_ACTION;
+            $cmsScope = null;
+            $actionTagKey = null;
+
+            if ($group instanceof SaScriptVariantGroup && $requestedScope === 'auto') {
+                $scopeType = (string) $group->scope_type;
+                if ($scopeType === SaScriptVariantGroup::SCOPE_CMS_GLOBAL) {
+                    $derived = $resolver->deriveGlobalScope($locked);
+                    if (! ($derived['ok'] ?? false) || strtolower((string) $derived['scope']['scope_key']) !== strtolower((string) $group->global_scope_key)) {
+                        return ['ok' => false, 'http' => 422, 'error' => 'incompatible_variant_scope', 'errors' => ['incompatible_variant_scope']];
+                    }
+                    $cmsScope = $derived['scope'];
+                } else {
+                    $actionTagKey = (string) $group->action_tag_key;
+                }
+            } else {
+                $derived = $resolver->deriveGlobalScope($locked);
+                $canUseCmsGlobal = ($derived['ok'] ?? false);
+                if ($requestedScope === 'cms_global' && ! $canUseCmsGlobal) {
+                    return [
+                        'ok' => false,
+                        'http' => 422,
+                        'error' => (string) ($derived['error'] ?? 'ineligible_for_global'),
+                        'errors' => [(string) ($derived['error'] ?? 'ineligible_for_global')],
+                    ];
+                }
+
+                $useCmsGlobal = false;
+                if ($canUseCmsGlobal && $requestedScope !== 'site_action') {
+                    $scopeKey = (string) $derived['scope']['scope_key'];
+                    $existingGlobalGroup = SaScriptVariantGroup::query()
+                        ->where('scope_type', SaScriptVariantGroup::SCOPE_CMS_GLOBAL)
+                        ->where('global_scope_key', $scopeKey)
+                        ->exists();
+                    $existingGlobalPkg = SaPackage::query()
+                        ->where('kind', 'script')
+                        ->where('sharing_mode', SaPackage::SHARING_CMS_GLOBAL)
+                        ->where('global_scope_key', $scopeKey)
+                        ->exists();
+                    if ($requestedScope === 'cms_global' || $locked->isCmsGlobal() || $existingGlobalGroup || $existingGlobalPkg) {
+                        $useCmsGlobal = true;
+                    }
+                }
+
+                if ($useCmsGlobal) {
+                    $scopeType = SaScriptVariantGroup::SCOPE_CMS_GLOBAL;
+                    $cmsScope = $derived['scope'];
+                } else {
+                    $scopeType = SaScriptVariantGroup::SCOPE_SITE_ACTION;
+                    $actionTagKey = $this->resolveActionTagKeyForPackage($locked, $release);
+                    if ($actionTagKey === null) {
+                        return ['ok' => false, 'http' => 422, 'error' => 'source_action_tag_not_found', 'errors' => ['source_action_tag_not_found']];
+                    }
+                }
+            }
+
+            if ($scopeType === SaScriptVariantGroup::SCOPE_CMS_GLOBAL) {
+                $scopeKey = (string) $cmsScope['scope_key'];
+                $group = SaScriptVariantGroup::query()
+                    ->where('scope_type', SaScriptVariantGroup::SCOPE_CMS_GLOBAL)
+                    ->where('global_scope_key', $scopeKey)
+                    ->lockForUpdate()
+                    ->first();
+                if (! $group instanceof SaScriptVariantGroup) {
+                    $group = SaScriptVariantGroup::query()->create([
+                        'group_uuid' => (string) Str::uuid(),
+                        'name' => $scopeKey,
+                        'scope_type' => SaScriptVariantGroup::SCOPE_CMS_GLOBAL,
+                        'cms_type' => $cmsScope['cms_type'],
+                        'cms_template_id' => $cmsScope['cms_template_id'],
+                        'cms_path_key' => $cmsScope['path_key'],
+                        'global_scope_key' => $scopeKey,
+                        'is_enabled' => true,
+                        'created_by_user_id' => $userId,
+                    ]);
+                }
+
+                // Auto-enroll an existing ungrouped cms_global owner for the same scope if present
+                $ungroupedOwner = SaPackage::query()
+                    ->where('kind', 'script')
+                    ->where('sharing_mode', SaPackage::SHARING_CMS_GLOBAL)
+                    ->where('global_scope_key', $scopeKey)
+                    ->where('id', '!=', $locked->id)
+                    ->lockForUpdate()
+                    ->first();
+                if ($ungroupedOwner instanceof SaPackage) {
+                    $ownerInGroup = SaScriptVariantGroupItem::query()
+                        ->where('group_id', $group->id)
+                        ->where('package_id', $ungroupedOwner->id)
+                        ->exists();
+                    if (! $ownerInGroup) {
+                        $ownerRel = SaPackageRelease::query()
+                            ->where('package_id', $ungroupedOwner->id)
+                            ->where('status', 'published')
+                            ->orderByDesc('published_at')
+                            ->orderByDesc('id')
+                            ->first();
+                        $ownerLabel = $this->normalizeLanguageLabel((string) ($ungroupedOwner->language_label ?? ''));
+                        if ($ownerLabel === '') {
+                            $ownerLabel = 'DEFAULT';
+                        }
+                        if ($ownerRel instanceof SaPackageRelease) {
+                            SaScriptVariantGroupItem::query()->create([
+                                'variant_uuid' => (string) Str::uuid(),
+                                'group_id' => $group->id,
+                                'package_id' => (int) $ungroupedOwner->id,
+                                'package_key' => (string) $ungroupedOwner->package_key,
+                                'release_id' => (int) $ownerRel->id,
+                                'script_version' => (string) $ownerRel->version,
+                                'content_digest' => $ownerRel->content_digest,
+                                'execution_digest' => $ownerRel->execution_digest,
+                                'language_label' => $ownerLabel,
+                                'priority' => 1,
+                                'is_enabled' => (bool) ($ungroupedOwner->is_enabled ?? true),
+                            ]);
+                            if (! $isPrimary && (bool) ($ungroupedOwner->is_enabled ?? true)) {
+                                $ungroupedOwner->is_primary = true;
+                            }
+                            if ($ungroupedOwner->language_label === null || $ungroupedOwner->language_label === '') {
+                                $ungroupedOwner->language_label = $ownerLabel;
+                            }
+                            $ungroupedOwner->save();
+                        }
+                    }
+                }
+            } else {
+                $group = SaScriptVariantGroup::query()
+                    ->where('scope_type', SaScriptVariantGroup::SCOPE_SITE_ACTION)
+                    ->where('action_tag_key', $actionTagKey)
+                    ->lockForUpdate()
+                    ->first();
+                if (! $group instanceof SaScriptVariantGroup) {
+                    $group = SaScriptVariantGroup::query()->create([
+                        'group_uuid' => (string) Str::uuid(),
+                        'name' => $actionTagKey,
+                        'scope_type' => SaScriptVariantGroup::SCOPE_SITE_ACTION,
+                        'action_tag_key' => $actionTagKey,
+                        'is_enabled' => true,
+                        'created_by_user_id' => $userId,
+                    ]);
+                }
+            }
+
+            // Enforce: do not treat two different Scripts with the same enabled language_label as interchangeable
+            if ($isEnabled) {
+                $dupLabel = SaScriptVariantGroupItem::query()
+                    ->where('group_id', $group->id)
+                    ->where('language_label', $label)
+                    ->where('package_id', '!=', $locked->id)
+                    ->where('is_enabled', true)
+                    ->exists();
+                if ($dupLabel) {
+                    return ['ok' => false, 'http' => 422, 'error' => 'duplicate_language_label', 'errors' => ['duplicate_language_label']];
+                }
+            }
+
+            // Enforce at most one enabled primary Script per Action scope
+            if ($isPrimary) {
+                $memberIds = SaScriptVariantGroupItem::query()
+                    ->where('group_id', $group->id)
+                    ->where('package_id', '!=', $locked->id)
+                    ->pluck('package_id')
+                    ->all();
+                if ($memberIds !== []) {
+                    SaPackage::query()->whereIn('id', $memberIds)->update(['is_primary' => false]);
+                }
+
+                if ($scopeType === SaScriptVariantGroup::SCOPE_CMS_GLOBAL) {
+                    $scopeKey = (string) $cmsScope['scope_key'];
+                    SaPackage::query()
+                        ->where('global_scope_key', $scopeKey)
+                        ->where('id', '!=', $locked->id)
+                        ->update([
+                            'sharing_mode' => SaPackage::SHARING_SITE_SPECIFIC,
+                            'global_scope_key' => null,
+                            'is_primary' => false,
+                        ]);
+                    $locked->sharing_mode = SaPackage::SHARING_CMS_GLOBAL;
+                    $locked->global_cms_type = $cmsScope['cms_type'];
+                    $locked->global_cms_template_id = $cmsScope['cms_template_id'];
+                    $locked->global_cms_path_key = $cmsScope['path_key'];
+                    $locked->global_scope_key = $scopeKey;
+                }
+            } elseif (! $isEnabled && $scopeType === SaScriptVariantGroup::SCOPE_CMS_GLOBAL && $locked->global_scope_key !== null) {
+                $locked->sharing_mode = SaPackage::SHARING_SITE_SPECIFIC;
+                $locked->global_scope_key = null;
+            }
+
+            $locked->language_label = $label;
+            $locked->is_enabled = $isEnabled;
+            $locked->is_primary = $isPrimary;
+            $locked->save();
+
+            // Upsert item in internal Variant Group (preserving immutable release pin if already pinned unless no release yet)
+            $item = SaScriptVariantGroupItem::query()
+                ->where('group_id', $group->id)
+                ->where('package_id', $locked->id)
+                ->first();
+            if ($item instanceof SaScriptVariantGroupItem) {
+                $item->language_label = $label;
+                $item->is_enabled = $isEnabled;
+                $item->save();
+            } else {
+                $maxPrio = (int) SaScriptVariantGroupItem::query()->where('group_id', $group->id)->max('priority');
+                SaScriptVariantGroupItem::query()->create([
+                    'variant_uuid' => (string) Str::uuid(),
+                    'group_id' => $group->id,
+                    'package_id' => (int) $locked->id,
+                    'package_key' => (string) $locked->package_key,
+                    'release_id' => (int) $release->id,
+                    'script_version' => (string) $release->version,
+                    'content_digest' => $release->content_digest,
+                    'execution_digest' => $release->execution_digest,
+                    'language_label' => $label,
+                    'priority' => $isPrimary ? 1 : ($maxPrio + 1),
+                    'is_enabled' => $isEnabled,
+                ]);
+            }
+
+            // Recompute deterministic priority: 1 = enabled primary, 2..N = other enabled variants, then disabled
+            $this->recomputeDeterministicPriorities($group, $locked->id, $isPrimary);
+
+            // If primary was disabled in a cms_global group, promote global_scope_key holder only if an enabled primary exists
+            $freshGroup = $group->fresh(['items.package', 'items.release']) ?? $group;
+
+            return [
+                'ok' => true,
+                'data' => [
+                    'package_key' => (string) $locked->package_key,
+                    'language_label' => (string) $locked->language_label,
+                    'is_enabled' => (bool) $locked->is_enabled,
+                    'is_primary' => (bool) $locked->is_primary,
+                    'variant_group' => $this->groupDto($freshGroup),
+                ],
+            ];
+        });
+    }
+
+    private function recomputeDeterministicPriorities(SaScriptVariantGroup $group, int $primaryCandidatePkgId, bool $isPrimary): void
+    {
+        $items = SaScriptVariantGroupItem::query()
+            ->with('package')
+            ->where('group_id', $group->id)
+            ->orderBy('priority')
+            ->orderBy('id')
+            ->get();
+
+        $ordered = [];
+        foreach ($items as $item) {
+            $itemIsPrimary = $isPrimary
+                ? ((int) $item->package_id === $primaryCandidatePkgId && (bool) $item->is_enabled)
+                : ((bool) $item->is_enabled && (bool) ($item->package?->is_primary ?? false));
+            if ($itemIsPrimary) {
+                $ordered[] = $item;
+            }
+        }
+        foreach ($items as $item) {
+            if (in_array($item, $ordered, true)) {
+                continue;
+            }
+            if ($item->is_enabled) {
+                $ordered[] = $item;
+            }
+        }
+        foreach ($items as $item) {
+            if (! in_array($item, $ordered, true)) {
+                $ordered[] = $item;
+            }
+        }
+
+        foreach ($ordered as $idx => $item) {
+            $item->priority = $idx + 1;
+            $item->save();
+        }
+    }
+
+    private function resolveActionTagKeyForPackage(SaPackage $package, SaPackageRelease $release): ?string
+    {
+        $link = SaActionTagScript::query()->where('package_id', $package->id)->first();
+        if ($link instanceof SaActionTagScript && ! empty($link->action_tag_key)) {
+            return strtolower(trim((string) $link->action_tag_key));
+        }
+        $manifest = is_array($release->manifest) ? $release->manifest : [];
+        $key = trim((string) ($manifest['action_tag_key'] ?? ''));
+
+        return $key !== '' ? strtolower($key) : null;
     }
 
     private function packageMatchesActionTag(SaPackage $package, SaPackageRelease $release, string $actionTagKey): bool

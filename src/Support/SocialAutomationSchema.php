@@ -129,6 +129,24 @@ final class SocialAutomationSchema
     }
 
     /**
+     * Operational Script config columns (language_label, is_primary) on sa_packages.
+     */
+    public static function scriptOperationalConfigReady(): bool
+    {
+        if (! self::has('sa_packages')) {
+            return false;
+        }
+        try {
+            $conn = SocialAutomationServiceConfig::CONNECTION;
+
+            return (bool) @Schema::connection($conn)->hasColumn('sa_packages', 'language_label')
+                && (bool) @Schema::connection($conn)->hasColumn('sa_packages', 'is_primary');
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    /**
      * Keep Alive Node registration + explicit Campaign assignment tables.
      */
     public static function keepaliveReady(): bool

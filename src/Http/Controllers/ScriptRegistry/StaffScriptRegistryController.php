@@ -13,6 +13,7 @@ use Omnichannel\Addons\SocialAutomation\Models\SaPath;
 use Omnichannel\Addons\SocialAutomation\Models\SaSite;
 use Omnichannel\Addons\SocialAutomation\PackageRegistry\ScriptRegistryUiService;
 use Omnichannel\Addons\SocialAutomation\Services\ScriptResolutionService;
+use Omnichannel\Addons\SocialAutomation\Services\ScriptVariantGroupService;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationAccess;
 
 /**
@@ -29,6 +30,7 @@ final class StaffScriptRegistryController extends Controller
         private readonly ScriptRegistryUiService $ui,
         private readonly SocialAutomationAccess $access,
         private readonly ?ScriptResolutionService $resolver = null,
+        private readonly ?ScriptVariantGroupService $variantGroups = null,
     ) {}
 
     public function index(): JsonResponse
@@ -117,6 +119,49 @@ final class StaffScriptRegistryController extends Controller
         ]);
     }
 
+    public function updateConfig(Request $request, string $id): JsonResponse
+    {
+        $this->access->assertCanMutate();
+
+        $packageKey = trim($id);
+        if ($packageKey === '' || strlen($packageKey) > 191) {
+            return response()->json(['ok' => false, 'error' => 'not_found'], 404);
+        }
+
+        $package = SaPackage::query()
+            ->where('package_key', $packageKey)
+            ->where('kind', 'script')
+            ->first();
+        if (! $package instanceof SaPackage) {
+            return response()->json(['ok' => false, 'error' => 'not_found'], 404);
+        }
+
+        $groups = $this->variantGroups ?? app(ScriptVariantGroupService::class);
+        $userId = $request->user()?->id ? (int) $request->user()->id : null;
+        $result = $groups->configureScript($package, $request->all(), $userId);
+        if (! ($result['ok'] ?? false)) {
+            $payload = [
+                'ok' => false,
+                'error' => (string) ($result['error'] ?? 'config_update_failed'),
+                'errors' => $result['errors'] ?? ['config_update_failed'],
+            ];
+            if (isset($result['conflict'])) {
+                $payload['conflict'] = $result['conflict'];
+            }
+
+            return response()->json($payload, (int) ($result['http'] ?? 422));
+        }
+
+        $detail = $this->ui->scriptDetail($packageKey);
+
+        return response()->json([
+            'ok' => true,
+            'config' => $result['data'],
+            'variant_group' => $result['data']['variant_group'] ?? null,
+            'script' => $detail !== null ? self::mapDetail($detail) : null,
+        ]);
+    }
+
     public function resolve(Request $request): JsonResponse
     {
         $this->access->assertCanAccess();
@@ -196,6 +241,11 @@ final class StaffScriptRegistryController extends Controller
                 : null,
             'eligible_global_scope' => is_array($row['eligible_global_scope'] ?? null) ? $row['eligible_global_scope'] : null,
             'global_conflict' => is_array($row['global_conflict'] ?? null) ? $row['global_conflict'] : null,
+            'language_label' => isset($row['language_label']) && $row['language_label'] !== null
+                ? (string) $row['language_label']
+                : null,
+            'is_enabled' => (bool) ($row['is_enabled'] ?? true),
+            'is_primary' => (bool) ($row['is_primary'] ?? false),
             'assets_complete' => (bool) ($row['assets_complete'] ?? false),
             'video_demo_status' => (string) ($row['video_demo_status'] ?? 'missing'),
             'has_playable_video' => (bool) ($row['has_playable_video'] ?? false),
@@ -249,6 +299,11 @@ final class StaffScriptRegistryController extends Controller
                 : null,
             'eligible_global_scope' => is_array($detail['eligible_global_scope'] ?? null) ? $detail['eligible_global_scope'] : null,
             'global_conflict' => is_array($detail['global_conflict'] ?? null) ? $detail['global_conflict'] : null,
+            'language_label' => isset($detail['language_label']) && $detail['language_label'] !== null
+                ? (string) $detail['language_label']
+                : null,
+            'is_enabled' => (bool) ($detail['is_enabled'] ?? true),
+            'is_primary' => (bool) ($detail['is_primary'] ?? false),
             'sync_source' => isset($detail['sync_source']) && $detail['sync_source'] !== null
                 ? (string) $detail['sync_source']
                 : null,
