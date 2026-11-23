@@ -38,6 +38,7 @@ final class CampaignV2PlanService
         private readonly CampaignShortcodeMappingValidator $mappingValidator = new CampaignShortcodeMappingValidator,
         private readonly CampaignScriptVariableSchema $variableSchema = new CampaignScriptVariableSchema,
         private readonly CampaignInputSanitizer $sanitizer = new CampaignInputSanitizer,
+        private readonly CampaignContentHistoryService $contentHistory = new CampaignContentHistoryService,
     ) {}
 
     public function isV2CreatePayload(array $input): bool
@@ -841,6 +842,18 @@ final class CampaignV2PlanService
             ->orderBy('sort_order')
             ->orderBy('id')
             ->get();
+        $attemptsByContent = $this->contentHistory->attemptsByContentId($campaign, $contents);
+        $articleTitles = [];
+        if (SocialAutomationSchema::articleLibraryReady()) {
+            $aIds = $contents->pluck('article_id')->filter()->unique()->map(static fn ($id): int => (int) $id)->values()->all();
+            if ($aIds !== []) {
+                $articleTitles = \Omnichannel\Addons\SocialAutomation\Models\SaArticle::query()
+                    ->whereIn('id', $aIds)
+                    ->pluck('title', 'id')
+                    ->mapWithKeys(static fn ($t, $id): array => [(int) $id => (string) $t])
+                    ->all();
+            }
+        }
 
         $counts = [
             'total' => 0,
@@ -862,6 +875,7 @@ final class CampaignV2PlanService
             }
             $row = [
                 'id' => (string) $c->content_uuid,
+                'content_uuid' => (string) $c->content_uuid,
                 'external_ref' => $c->external_ref,
                 'status' => $st,
                 'sort_order' => (int) $c->sort_order,
@@ -870,6 +884,7 @@ final class CampaignV2PlanService
                 'last_error_message' => $c->last_error_message,
                 'input' => is_array($c->input) ? $c->input : [],
                 'assignments' => $assignmentsByContentId[(int) $c->id] ?? [],
+                'attempts' => $attemptsByContent[(int) $c->id] ?? [],
             ];
             if (SocialAutomationSchema::campaignShortcodeReady()) {
                 $row['source_format'] = (string) ($c->source_format ?? 'shortcode');
@@ -878,6 +893,7 @@ final class CampaignV2PlanService
             }
             if (SocialAutomationSchema::articleLibraryReady()) {
                 $row['article_id'] = $c->article_uuid;
+                $row['article_title'] = $c->snapshot_payload['title'] ?? ($articleTitles[(int) ($c->article_id ?? 0)] ?? null);
                 $row['snapshot_at'] = $c->snapshot_at?->toIso8601String();
             }
             $contentsDto[] = $row;

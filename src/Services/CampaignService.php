@@ -46,6 +46,7 @@ final class CampaignService
         private readonly CampaignShortcodeMockGenerator $mockGenerator = new CampaignShortcodeMockGenerator,
         private readonly CampaignV2PlanService $v2Plan = new CampaignV2PlanService,
         private readonly CampaignArticleAssignmentService $articleAssignments = new CampaignArticleAssignmentService,
+        private readonly CampaignContentHistoryService $contentHistory = new CampaignContentHistoryService,
     ) {}
 
     /**
@@ -522,12 +523,21 @@ final class CampaignService
         }
 
         $accountUuids = $this->accountUuidMapForCampaign($campaign);
-        $rows = SaCampaignContent::query()
+        $models = SaCampaignContent::query()
             ->where('campaign_id', $campaign->id)
             ->orderBy('sort_order')
             ->orderBy('id')
-            ->get()
-            ->map(fn (SaCampaignContent $c): array => $this->contentDto($c, $accountUuids))
+            ->get();
+        $attemptsByContent = $this->contentHistory->attemptsByContentId($campaign, $models);
+        $articleTitles = $this->articleTitleMap($models);
+
+        $rows = $models
+            ->map(fn (SaCampaignContent $c): array => $this->contentDto(
+                $c,
+                $accountUuids,
+                $attemptsByContent[(int) $c->id] ?? [],
+                $articleTitles[(int) ($c->article_id ?? 0)] ?? null,
+            ))
             ->all();
 
         return ['ok' => true, 'data' => $rows];
@@ -1002,14 +1012,20 @@ final class CampaignService
 
     /**
      * @param  array<int, string>  $accountUuids
+     * @param  list<array<string, mixed>>|null  $attempts
      * @return array<string, mixed>
      */
-    public function contentDto(SaCampaignContent $content, array $accountUuids = []): array
-    {
+    public function contentDto(
+        SaCampaignContent $content,
+        array $accountUuids = [],
+        ?array $attempts = null,
+        ?string $articleTitle = null,
+    ): array {
         $aid = $content->assigned_account_id ? (int) $content->assigned_account_id : null;
 
         $dto = [
             'id' => $content->content_uuid,
+            'content_uuid' => (string) $content->content_uuid,
             'external_ref' => $content->external_ref,
             'status' => $content->status,
             'sort_order' => (int) $content->sort_order,
@@ -1017,6 +1033,7 @@ final class CampaignService
             'last_error_code' => $content->last_error_code,
             'last_error_message' => $content->last_error_message,
             'input' => is_array($content->input) ? $content->input : [],
+            'attempts' => $attempts ?? [],
         ];
         if (SocialAutomationSchema::campaignShortcodeReady()) {
             $dto['source_format'] = (string) ($content->source_format ?? 'legacy_input');
@@ -1025,10 +1042,32 @@ final class CampaignService
         }
         if (SocialAutomationSchema::articleLibraryReady()) {
             $dto['article_id'] = $content->article_uuid;
+            $dto['article_title'] = $content->snapshot_payload['title'] ?? $articleTitle;
             $dto['snapshot_at'] = $content->snapshot_at?->toIso8601String();
         }
 
         return $dto;
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, SaCampaignContent>  $contents
+     * @return array<int, string>
+     */
+    private function articleTitleMap($contents): array
+    {
+        if (! SocialAutomationSchema::articleLibraryReady()) {
+            return [];
+        }
+        $ids = $contents->pluck('article_id')->filter()->unique()->map(static fn ($id): int => (int) $id)->values()->all();
+        if ($ids === []) {
+            return [];
+        }
+
+        return \Omnichannel\Addons\SocialAutomation\Models\SaArticle::query()
+            ->whereIn('id', $ids)
+            ->pluck('title', 'id')
+            ->mapWithKeys(static fn ($title, $id): array => [(int) $id => (string) $title])
+            ->all();
     }
 
     /**
@@ -1566,12 +1605,20 @@ final class CampaignService
         $counts = $this->contentCounts($campaign);
         $meta = is_array($campaign->meta) ? $campaign->meta : [];
         $accountUuids = $this->accountUuidMapForCampaign($campaign);
-        $contents = SaCampaignContent::query()
+        $contentModels = SaCampaignContent::query()
             ->where('campaign_id', $campaign->id)
             ->orderBy('sort_order')
             ->orderBy('id')
-            ->get()
-            ->map(fn (SaCampaignContent $c): array => $this->contentDto($c, $accountUuids))
+            ->get();
+        $attemptsByContent = $this->contentHistory->attemptsByContentId($campaign, $contentModels);
+        $articleTitles = $this->articleTitleMap($contentModels);
+        $contents = $contentModels
+            ->map(fn (SaCampaignContent $c): array => $this->contentDto(
+                $c,
+                $accountUuids,
+                $attemptsByContent[(int) $c->id] ?? [],
+                $articleTitles[(int) ($c->article_id ?? 0)] ?? null,
+            ))
             ->all();
 
         $detail = [
