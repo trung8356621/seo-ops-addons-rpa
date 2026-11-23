@@ -11,7 +11,9 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Omnichannel\Addons\SocialAutomation\Models\SaArtifact;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaign;
+use Omnichannel\Addons\SocialAutomation\Models\SaCampaignActionTag;
 use Omnichannel\Addons\SocialAutomation\Models\SaJob;
+use Omnichannel\Addons\SocialAutomation\Orchestration\CampaignOrchestrator;
 use Omnichannel\Addons\SocialAutomation\Services\CampaignService;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationAccess;
 use Omnichannel\Addons\SocialAutomation\Support\SocialAutomationInstallationResolver;
@@ -219,6 +221,43 @@ final class StaffCampaignController extends Controller
                 'X-Checksum-Sha256' => (string) ($artifact->checksum_sha256 ?? ''),
             ],
         );
+    }
+
+    public function manualTestActionTag(Request $request, string $id, string $planTagId): JsonResponse
+    {
+        $this->access->assertCanManageCampaigns();
+        if (! SocialAutomationSchema::campaignV2Ready()) {
+            return response()->json(['ok' => false, 'errors' => ['schema_unavailable']], 503);
+        }
+
+        $installationId = $this->installation->resolveInstallationId();
+        $campaign = SaCampaign::query()
+            ->notDeleted()
+            ->where('campaign_uuid', $id)
+            ->where('installation_id', $installationId)
+            ->first();
+        if (! $campaign instanceof SaCampaign) {
+            return response()->json(['ok' => false, 'errors' => ['campaign_not_found']], 404);
+        }
+
+        $planTag = SaCampaignActionTag::query()
+            ->where('campaign_id', $campaign->id)
+            ->where('plan_tag_uuid', $planTagId)
+            ->first();
+        if (! $planTag instanceof SaCampaignActionTag) {
+            return response()->json(['ok' => false, 'errors' => ['action_tag_not_found']], 404);
+        }
+
+        $accountId = $request->filled('account_id') ? (int) $request->input('account_id') : null;
+        $result = app(CampaignOrchestrator::class)->dispatchManualActionTagTest($campaign, $planTag, $accountId);
+        if (! ($result['ok'] ?? false)) {
+            $errors = $result['errors'] ?? ['manual_test_dispatch_failed'];
+            $code = in_array('campaign_not_dispatchable', $errors, true) ? 409 : 422;
+
+            return response()->json(['ok' => false, 'errors' => $errors], $code);
+        }
+
+        return response()->json(['ok' => true, 'job' => $result['job']], 201);
     }
 
     /**

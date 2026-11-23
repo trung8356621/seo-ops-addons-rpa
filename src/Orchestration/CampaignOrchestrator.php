@@ -317,6 +317,76 @@ final class CampaignOrchestrator
                     ->get()
                     ->keyBy('id');
 
+                $campaignMeta = is_array($locked->meta) ? $locked->meta : [];
+                $gates = is_array($campaignMeta['action_tag_gates'] ?? null) ? $campaignMeta['action_tag_gates'] : [];
+
+                // Active in-flight Action Tag queues (1 active job per Action Tag queue).
+                $inFlightTagIds = [];
+                $runningContentIds = SaCampaignContent::query()
+                    ->where('campaign_id', $locked->id)
+                    ->where('status', CampaignContentStatus::Running->value)
+                    ->pluck('id')
+                    ->all();
+                if ($runningContentIds !== []) {
+                    $runningAssignments = SaCampaignContentAssignment::query()
+                        ->whereIn('campaign_content_id', $runningContentIds)
+                        ->pluck('campaign_action_tag_id')
+                        ->all();
+                    foreach ($runningAssignments as $tid) {
+                        $inFlightTagIds[(int) $tid] = true;
+                    }
+                }
+                $activeManualJobs = SaJob::query()
+                    ->where('campaign_id', $locked->id)
+                    ->whereNull('campaign_content_id')
+                    ->whereIn('status', AccountLockPolicy::ACTIVE_STATUSES)
+                    ->get(['payload']);
+                foreach ($activeManualJobs as $mj) {
+                    $mjTagId = is_array($mj->payload) ? (int) ($mj->payload['campaign_action_tag_id'] ?? 0) : 0;
+                    if ($mjTagId > 0) {
+                        $inFlightTagIds[$mjTagId] = true;
+                    }
+                }
+
+                // Fallback failure gate detection for legacy FailedLocked/Unknown contents without gate metadata.
+                $blockedTagIds = [];
+                foreach ($gates as $tidKey => $gateRow) {
+                    if (is_array($gateRow) && ($gateRow['blocked'] ?? false) === true) {
+                        $blockedTagIds[(int) $tidKey] = true;
+                    }
+                }
+                $failedOrUnknownIds = SaCampaignContent::query()
+                    ->where('campaign_id', $locked->id)
+                    ->whereIn('status', [
+                        CampaignContentStatus::FailedLocked->value,
+                        CampaignContentStatus::Unknown->value,
+                    ])
+                    ->pluck('id')
+                    ->all();
+                if ($failedOrUnknownIds !== []) {
+                    $failedAssignments = SaCampaignContentAssignment::query()
+                        ->whereIn('campaign_content_id', $failedOrUnknownIds)
+                        ->pluck('campaign_action_tag_id')
+                        ->all();
+                    foreach ($failedAssignments as $tid) {
+                        $tidInt = (int) $tid;
+                        $gateKey = (string) $tidInt;
+                        if (! array_key_exists($gateKey, $gates)) {
+                            $blockedTagIds[$tidInt] = true;
+                        }
+                    }
+                }
+
+                // Batch-load assignments for all candidate contents in deterministic queue order.
+                $contentIds = $contents->pluck('id')->all();
+                $assignmentsByContent = $contentIds !== []
+                    ? SaCampaignContentAssignment::query()
+                        ->whereIn('campaign_content_id', $contentIds)
+                        ->get()
+                        ->groupBy('campaign_content_id')
+                    : collect();
+
+                $handledQueues = [];
                 $dispatched = 0;
                 $stillWaiting = 0;
 
@@ -331,9 +401,7 @@ final class CampaignOrchestrator
                         continue;
                     }
 
-                    $assignments = SaCampaignContentAssignment::query()
-                        ->where('campaign_content_id', $content->id)
-                        ->get();
+                    $assignments = $assignmentsByContent->get($content->id, collect());
                     if ($assignments->count() !== 1) {
                         $content->status = CampaignContentStatus::WaitingResources->value;
                         $content->last_error_code = $assignments->count() > 1
@@ -347,8 +415,9 @@ final class CampaignOrchestrator
 
                     /** @var SaCampaignContentAssignment $assignment */
                     $assignment = $assignments->first();
+                    $planTagId = (int) $assignment->campaign_action_tag_id;
                     /** @var SaCampaignActionTag|null $planTag */
-                    $planTag = $planTagsById->get($assignment->campaign_action_tag_id);
+                    $planTag = $planTagsById->get($planTagId);
                     if (! $planTag instanceof SaCampaignActionTag || ! $planTag->is_enabled) {
                         $content->status = CampaignContentStatus::WaitingResources->value;
                         $content->last_error_code = 'action_tag_unavailable';
@@ -357,6 +426,17 @@ final class CampaignOrchestrator
                         $stillWaiting++;
                         continue;
                     }
+
+                    // Blocked by Failure: stop automatic dispatch for this Action Tag queue; keep following items Pending.
+                    if (isset($blockedTagIds[$planTagId])) {
+                        continue;
+                    }
+
+                    // Sequential queue: at most one active/head item evaluated per Action Tag queue.
+                    if (isset($inFlightTagIds[$planTagId]) || isset($handledQueues[$planTagId])) {
+                        continue;
+                    }
+                    $handledQueues[$planTagId] = true;
 
                     $requiredAccountId = $content->assigned_account_id ? (int) $content->assigned_account_id : null;
                     $blockedAssigned = $assignedIds;
@@ -386,17 +466,25 @@ final class CampaignOrchestrator
                     }
 
                     $row = $selection['selected'][0];
+                    $errMeta = is_array($content->last_error_meta) ? $content->last_error_meta : [];
+                    $executionOrigin = ($errMeta['manual_recovery_origin'] ?? null) === 'manual_retry'
+                        ? 'manual_retry'
+                        : 'scheduler';
+
                     $job = $this->reserveCampaignJob($locked, $content, $row, $mode, [
                         'script_id' => (string) $planTag->script_id,
                         'script_version' => (string) $planTag->script_version,
                         'script_content_digest' => $planTag->script_content_digest,
                         'input' => is_array($assignment->input) ? $assignment->input : [],
+                        'campaign_action_tag_id' => $planTagId,
                         'plan_tag_id' => (string) $planTag->plan_tag_uuid,
+                        'action_tag_id' => (int) $planTag->action_tag_id,
                         'action_tag_key' => (string) $planTag->action_tag_key,
                         'site_key' => (string) $planTag->site_key,
                         'release_id' => (int) $planTag->release_id,
                         'variant_group_id' => $planTag->variant_group_uuid ?? null,
                         'script_variants' => is_array($planTag->pinned_variants ?? null) ? $planTag->pinned_variants : null,
+                        'execution_origin' => $executionOrigin,
                     ]);
                     if ($job === null) {
                         $content->status = CampaignContentStatus::WaitingResources->value;
@@ -407,6 +495,10 @@ final class CampaignOrchestrator
 
                     $content->last_error_code = null;
                     $content->last_error_message = null;
+                    if (isset($errMeta['manual_recovery_origin'])) {
+                        unset($errMeta['manual_recovery_origin']);
+                        $content->last_error_meta = $errMeta === [] ? null : $errMeta;
+                    }
                     $content->save();
 
                     $assignment->status = CampaignContentStatus::Running->value;
@@ -417,15 +509,14 @@ final class CampaignOrchestrator
                         $assignedIds[] = $accountId;
                         $busyInCampaign[] = $accountId;
                     }
+                    $inFlightTagIds[$planTagId] = true;
                     $dispatched++;
                 }
 
                 $waitingLeft = $stillWaiting > 0 || SaCampaignContent::query()
                     ->where('campaign_id', $locked->id)
-                    ->whereIn('status', [
-                        CampaignContentStatus::Pending->value,
-                        CampaignContentStatus::WaitingResources->value,
-                    ])->exists();
+                    ->where('status', CampaignContentStatus::WaitingResources->value)
+                    ->exists();
 
                 $intervalSeconds = $this->settings->getSchedulerIntervalSeconds((string) $locked->installation_id);
                 $locked->next_recheck_at = $waitingLeft
@@ -537,7 +628,9 @@ final class CampaignOrchestrator
                 $reservedJobs = SaJob::query()
                     ->where('agent_id', $agent->id)
                     ->whereIn('browser_session_id', $sessionIds)
-                    ->whereNotNull('campaign_content_id')
+                    ->where(function ($q): void {
+                        $q->whereNotNull('campaign_content_id')->orWhereNotNull('campaign_id');
+                    })
                     ->where('status', JobStatus::Reserved->value)
                     ->orderBy('id')
                     ->lockForUpdate()
@@ -558,7 +651,9 @@ final class CampaignOrchestrator
                     $active = SaJob::query()
                         ->where('agent_id', $agent->id)
                         ->whereIn('browser_session_id', $sessionIds)
-                        ->whereNotNull('campaign_content_id')
+                        ->where(function ($q): void {
+                            $q->whereNotNull('campaign_content_id')->orWhereNotNull('campaign_id');
+                        })
                         ->whereIn('status', [JobStatus::Claimed->value, JobStatus::Running->value])
                         ->orderBy('id')
                         ->lockForUpdate()
@@ -1025,7 +1120,10 @@ final class CampaignOrchestrator
                 $locked->status = CampaignContentStatus::Pending->value;
                 $locked->last_error_code = null;
                 $locked->last_error_message = null;
-                $locked->last_error_meta = null;
+                $locked->last_error_meta = [
+                    'manual_recovery_origin' => 'manual_retry',
+                    'idempotency_key' => $idempotencyKey,
+                ];
                 $locked->current_job_id = null;
                 $locked->admin_action_idempotency = $idempotencyKey;
                 $locked->admin_action_at = now();
@@ -1592,10 +1690,13 @@ final class CampaignOrchestrator
         ];
         if ($v2Override !== null) {
             $jobPayload['plan_version'] = 2;
+            $jobPayload['campaign_action_tag_id'] = $v2Override['campaign_action_tag_id'] ?? null;
             $jobPayload['plan_tag_id'] = $v2Override['plan_tag_id'] ?? null;
+            $jobPayload['action_tag_id'] = $v2Override['action_tag_id'] ?? null;
             $jobPayload['action_tag_key'] = $v2Override['action_tag_key'] ?? null;
             $jobPayload['site_key'] = $v2Override['site_key'] ?? null;
             $jobPayload['release_id'] = $v2Override['release_id'] ?? null;
+            $jobPayload['execution_origin'] = $v2Override['execution_origin'] ?? 'scheduler';
             if (! empty($v2Override['script_variants']) && is_array($v2Override['script_variants'])) {
                 $jobPayload['variant_group_id'] = $v2Override['variant_group_id'] ?? null;
                 $jobPayload['script_variants'] = array_values($v2Override['script_variants']);
@@ -1724,9 +1825,11 @@ final class CampaignOrchestrator
             return ['ok' => false, 'errors' => ['schema_unavailable']];
         }
 
+        $wakeCampaignId = null;
+
         try {
-            return DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use (
-                $jobUuid, $payload, $clientApiKeyId, $installationId, $attemptStatus, $to, $event, $attrs, $requireFence, $releaseLock, $terminalContent, $artifactRefs
+            $tx = DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use (
+                $jobUuid, $payload, $clientApiKeyId, $installationId, $attemptStatus, $to, $event, $attrs, $requireFence, $releaseLock, $terminalContent, $artifactRefs, &$wakeCampaignId
             ): array {
                 $job = $this->authorizedCampaignJob($jobUuid, $clientApiKeyId, $installationId, true);
                 if ($job === null) {
@@ -1789,11 +1892,23 @@ final class CampaignOrchestrator
                 }
 
                 if ($terminalContent && $job->campaign_content_id) {
-                    $this->applyTerminalContent($job, $attemptStatus, $attrs);
+                    $wakeCampaignId = $this->applyTerminalContent($job, $attempt, $attemptStatus, $attrs);
+                } elseif ($terminalContent && $job->campaign_id) {
+                    $wakeCampaignId = $this->handleQueueGateOnTerminal($job, $attempt, null, $attemptStatus, $attrs);
                 }
 
                 return ['ok' => true, 'data' => ['job_id' => $job->job_uuid, 'status' => $job->status]];
             });
+
+            if (($tx['ok'] ?? false) && $wakeCampaignId !== null) {
+                $wakeCampaign = SaCampaign::query()->notDeleted()->find($wakeCampaignId);
+                if ($wakeCampaign instanceof SaCampaign
+                    && (string) $wakeCampaign->status === CampaignStatus::Running->value) {
+                    $this->dispatchCampaign($wakeCampaign);
+                }
+            }
+
+            return $tx;
         } catch (Throwable) {
             return ['ok' => false, 'errors' => ['advance_failed']];
         }
@@ -1802,11 +1917,15 @@ final class CampaignOrchestrator
     /**
      * @param  array<string, mixed>  $attrs
      */
-    private function applyTerminalContent(SaJob $job, CampaignAttemptStatus $attemptStatus, array $attrs): void
-    {
+    private function applyTerminalContent(
+        SaJob $job,
+        ?SaJobAttempt $attempt,
+        CampaignAttemptStatus $attemptStatus,
+        array $attrs,
+    ): ?int {
         $content = SaCampaignContent::query()->where('id', $job->campaign_content_id)->lockForUpdate()->first();
         if (! $content instanceof SaCampaignContent) {
-            return;
+            return null;
         }
 
         $contentStatus = match ($attemptStatus) {
@@ -1817,7 +1936,7 @@ final class CampaignOrchestrator
             default => null,
         };
         if ($contentStatus === null) {
-            return;
+            return null;
         }
 
         $content->status = $contentStatus->value;
@@ -1837,9 +1956,281 @@ final class CampaignOrchestrator
                 ->update(['status' => $contentStatus->value]);
         }
 
+        $wakeCampaignId = $this->handleQueueGateOnTerminal($job, $attempt, $content, $attemptStatus, $attrs);
+
         $campaign = SaCampaign::query()->notDeleted()->find($content->campaign_id);
         if ($campaign instanceof SaCampaign) {
             $this->maybeCompleteCampaign($campaign);
+        }
+
+        return $wakeCampaignId;
+    }
+
+    /**
+     * Block Action Tag queue on terminal Failed/Unknown; release ONLY on explicit manual Succeeded.
+     *
+     * @param  array<string, mixed>  $attrs
+     */
+    private function handleQueueGateOnTerminal(
+        SaJob $job,
+        ?SaJobAttempt $attempt,
+        ?SaCampaignContent $content,
+        CampaignAttemptStatus $attemptStatus,
+        array $attrs,
+    ): ?int {
+        if ($job->campaign_id === null || ! SocialAutomationSchema::campaignV2Ready()) {
+            return null;
+        }
+
+        $campaign = SaCampaign::query()->notDeleted()->where('id', $job->campaign_id)->lockForUpdate()->first();
+        if (! $campaign instanceof SaCampaign || (int) ($campaign->plan_version ?? 1) < 2) {
+            return null;
+        }
+
+        $jobPayload = is_array($job->payload) ? $job->payload : [];
+        $planTagId = isset($jobPayload['campaign_action_tag_id']) ? (int) $jobPayload['campaign_action_tag_id'] : 0;
+        if ($planTagId <= 0 && $content instanceof SaCampaignContent) {
+            $assign = SaCampaignContentAssignment::query()
+                ->where('campaign_content_id', $content->id)
+                ->first();
+            $planTagId = $assign instanceof SaCampaignContentAssignment ? (int) $assign->campaign_action_tag_id : 0;
+        }
+        if ($planTagId <= 0) {
+            return null;
+        }
+
+        $planTag = SaCampaignActionTag::query()
+            ->where('id', $planTagId)
+            ->where('campaign_id', $campaign->id)
+            ->first();
+        if (! $planTag instanceof SaCampaignActionTag) {
+            return null;
+        }
+
+        $meta = is_array($campaign->meta) ? $campaign->meta : [];
+        $gates = is_array($meta['action_tag_gates'] ?? null) ? $meta['action_tag_gates'] : [];
+        $gateKey = (string) $planTagId;
+
+        if ($attemptStatus === CampaignAttemptStatus::Failed || $attemptStatus === CampaignAttemptStatus::Unknown) {
+            $gates[$gateKey] = [
+                'blocked' => true,
+                'reason' => isset($attrs['error_code']) && $attrs['error_code'] !== ''
+                    ? (string) $attrs['error_code']
+                    : $attemptStatus->value,
+                'message' => isset($attrs['error_message']) ? (string) $attrs['error_message'] : null,
+                'job_id' => (int) $job->id,
+                'job_uuid' => (string) $job->job_uuid,
+                'attempt_id' => $attempt?->id ? (int) $attempt->id : null,
+                'attempt_uuid' => $attempt?->attempt_uuid ? (string) $attempt->attempt_uuid : null,
+                'content_id' => $content?->id ? (int) $content->id : null,
+                'content_uuid' => $content?->content_uuid ? (string) $content->content_uuid : null,
+                'blocked_at' => now()->toIso8601String(),
+                'action_tag_id' => (int) $planTag->action_tag_id,
+                'action_tag_key' => (string) $planTag->action_tag_key,
+                'plan_tag_id' => $planTagId,
+            ];
+            $meta['action_tag_gates'] = $gates;
+            $campaign->meta = $meta;
+            $campaign->save();
+
+            return null;
+        }
+
+        if ($attemptStatus === CampaignAttemptStatus::Succeeded) {
+            $origin = (string) ($jobPayload['execution_origin'] ?? 'scheduler');
+            $isManual = in_array($origin, ['manual_retry', 'manual_test'], true);
+            $wasBlocked = is_array($gates[$gateKey] ?? null) && (($gates[$gateKey]['blocked'] ?? false) === true);
+
+            if ($isManual && $wasBlocked) {
+                $gates[$gateKey] = array_merge($gates[$gateKey], [
+                    'blocked' => false,
+                    'released_at' => now()->toIso8601String(),
+                    'released_by_job_uuid' => (string) $job->job_uuid,
+                    'released_by_attempt_uuid' => $attempt?->attempt_uuid ? (string) $attempt->attempt_uuid : null,
+                    'released_by_origin' => $origin,
+                ]);
+                $meta['action_tag_gates'] = $gates;
+                $campaign->meta = $meta;
+                if ((string) $campaign->status === CampaignStatus::Running->value) {
+                    $campaign->next_recheck_at = now();
+                }
+                $campaign->save();
+
+                return (string) $campaign->status === CampaignStatus::Running->value ? (int) $campaign->id : null;
+            }
+
+            // Automatic Succeeded on a Running campaign marks campaign due for next scheduler tick.
+            if ((string) $campaign->status === CampaignStatus::Running->value) {
+                $campaign->next_recheck_at = now();
+                $campaign->save();
+            }
+
+            return null;
+        }
+
+        return null;
+    }
+
+    /**
+     * Dispatch an explicit manual test Job for a Campaign Action Tag queue (without retrying failed articles).
+     *
+     * @return array{ok: bool, job?: array<string, mixed>, errors?: list<string>}
+     */
+    public function dispatchManualActionTagTest(
+        SaCampaign $campaign,
+        SaCampaignActionTag $planTag,
+        ?int $requiredAccountId = null,
+    ): array {
+        if (! SocialAutomationSchema::campaignV2Ready()) {
+            return ['ok' => false, 'errors' => ['schema_unavailable']];
+        }
+
+        try {
+            return DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use (
+                $campaign,
+                $planTag,
+                $requiredAccountId
+            ): array {
+                $locked = SaCampaign::query()->notDeleted()->where('id', $campaign->id)->lockForUpdate()->first();
+                if (! $locked instanceof SaCampaign) {
+                    return ['ok' => false, 'errors' => ['campaign_not_found']];
+                }
+                $cStatus = CampaignStatus::tryFrom((string) $locked->status);
+                if ($cStatus === null || $cStatus->isTerminal()) {
+                    return ['ok' => false, 'errors' => ['campaign_not_dispatchable']];
+                }
+
+                $mode = CampaignExecutionMode::tryFrom((string) $locked->execution_mode)
+                    ?? CampaignExecutionMode::OneAccountOneJob;
+
+                $selection = $this->selectEligibleForCampaign(
+                    $locked,
+                    $mode,
+                    [],
+                    [],
+                    1,
+                    $requiredAccountId,
+                    $planTag,
+                );
+                if ($selection['selected'] === []) {
+                    return ['ok' => false, 'errors' => ['waiting_resources']];
+                }
+
+                $row = $selection['selected'][0];
+                $session = SaBrowserSession::query()->lockForUpdate()->find($row['session_id'] ?? null);
+                $agent = $session instanceof SaBrowserSession ? SaAgent::query()->lockForUpdate()->find($session->agent_id) : null;
+                $accountId = (int) ($row['account_id'] ?? 0);
+                $account = $accountId > 0 ? SaAccount::query()->lockForUpdate()->find($accountId) : null;
+                if (! $session instanceof SaBrowserSession || ! $agent instanceof SaAgent || ! $account instanceof SaAccount) {
+                    return ['ok' => false, 'errors' => ['waiting_resources']];
+                }
+                if (! $this->sessionLocks->canLock([
+                    'locked_job_id' => $session->locked_job_id,
+                    'lock_expires_at' => $session->lock_expires_at,
+                ], 0)) {
+                    return ['ok' => false, 'errors' => ['waiting_resources']];
+                }
+
+                $scriptPin = $this->actionScripts->resolvePublishedPin(
+                    (string) $planTag->script_id,
+                    (string) $planTag->script_version,
+                    $planTag->script_content_digest,
+                );
+                if ($scriptPin === null) {
+                    return ['ok' => false, 'errors' => ['script_pin_unavailable']];
+                }
+
+                $leaseToken = Str::random(40);
+                $fencing = 1;
+                $jobPayload = [
+                    'input' => [],
+                    'campaign_uuid' => $locked->campaign_uuid,
+                    'run_mode' => CampaignRunMode::Test->value,
+                    'execution_mode' => (string) $locked->execution_mode,
+                    'installation_id' => (string) $locked->installation_id,
+                    'script_pin' => $scriptPin,
+                    'plan_version' => 2,
+                    'campaign_action_tag_id' => (int) $planTag->id,
+                    'plan_tag_id' => (string) $planTag->plan_tag_uuid,
+                    'action_tag_id' => (int) $planTag->action_tag_id,
+                    'action_tag_key' => (string) $planTag->action_tag_key,
+                    'site_key' => (string) $planTag->site_key,
+                    'release_id' => (int) $planTag->release_id,
+                    'execution_origin' => 'manual_test',
+                ];
+
+                $job = SaJob::query()->create([
+                    'job_uuid' => (string) Str::uuid(),
+                    'task_id' => null,
+                    'campaign_id' => $locked->id,
+                    'campaign_content_id' => null,
+                    'agent_id' => $agent->id,
+                    'browser_session_id' => $session->id,
+                    'account_id' => $accountId,
+                    'package_key' => $scriptPin['package_key'],
+                    'package_version' => $scriptPin['version'],
+                    'content_digest' => $scriptPin['content_digest'],
+                    'status' => JobStatus::Reserved->value,
+                    'idempotency_key' => 'manual-test:'.$locked->id.':'.$planTag->id.':'.Str::uuid(),
+                    'lease_token' => $leaseToken,
+                    'fencing_generation' => $fencing,
+                    'payload' => $jobPayload,
+                    'reserved_at' => now(),
+                    'lease_expires_at' => now()->addSeconds(self::DEFAULT_LEASE_SECONDS),
+                    'dispatch_source' => 'manual_test',
+                ]);
+
+                SaJobAttempt::query()->create([
+                    'attempt_uuid' => (string) Str::uuid(),
+                    'lease_token' => $leaseToken,
+                    'job_id' => $job->id,
+                    'attempt_no' => 1,
+                    'fencing_generation' => $fencing,
+                    'status' => CampaignAttemptStatus::Queued->value,
+                    'agent_id' => $agent->id,
+                    'browser_session_id' => $session->id,
+                    'account_id' => $accountId,
+                    'lease_expires_at' => now()->addSeconds(self::DEFAULT_LEASE_SECONDS),
+                ]);
+
+                SaAccountExecutionLease::query()->create([
+                    'account_id' => $accountId,
+                    'agent_id' => $agent->id,
+                    'browser_session_id' => $session->id,
+                    'job_id' => $job->id,
+                    'lease_token' => $leaseToken,
+                    'fencing_generation' => $fencing,
+                    'status' => 'active',
+                    'acquired_at' => now(),
+                    'heartbeat_at' => now(),
+                    'expires_at' => now()->addSeconds(self::DEFAULT_LEASE_SECONDS),
+                ]);
+
+                $session->fill([
+                    'locked_job_id' => $job->id,
+                    'locked_at' => now(),
+                    'lock_expires_at' => now()->addSeconds(self::DEFAULT_LEASE_SECONDS),
+                ])->save();
+
+                return [
+                    'ok' => true,
+                    'job' => [
+                        'job_uuid' => (string) $job->job_uuid,
+                        'campaign_action_tag_id' => (int) $planTag->id,
+                        'action_tag_key' => (string) $planTag->action_tag_key,
+                        'execution_origin' => 'manual_test',
+                    ],
+                ];
+            });
+        } catch (Throwable $e) {
+            Log::warning('social_automation.manual_test_dispatch_failed', [
+                'campaign_id' => $campaign->id ?? null,
+                'plan_tag_id' => $planTag->id ?? null,
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
+
+            return ['ok' => false, 'errors' => ['manual_test_dispatch_failed']];
         }
     }
 
@@ -1932,7 +2323,9 @@ final class CampaignOrchestrator
         string $installationId,
         bool $forUpdate,
     ): ?SaJob {
-        $q = SaJob::query()->where('job_uuid', $jobUuid)->whereNotNull('campaign_content_id');
+        $q = SaJob::query()->where('job_uuid', $jobUuid)->where(function ($sub): void {
+            $sub->whereNotNull('campaign_content_id')->orWhereNotNull('campaign_id');
+        });
         if ($forUpdate) {
             $q->lockForUpdate();
         }

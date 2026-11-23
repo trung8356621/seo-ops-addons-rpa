@@ -773,6 +773,9 @@ final class CampaignV2PlanService
             ->orderBy('id')
             ->get();
 
+        $campaignMeta = is_array($campaign->meta) ? $campaign->meta : [];
+        $gates = is_array($campaignMeta['action_tag_gates'] ?? null) ? $campaignMeta['action_tag_gates'] : [];
+
         $planTagUuidById = [];
         $actionTagsDto = [];
         foreach ($planTags as $pt) {
@@ -781,6 +784,9 @@ final class CampaignV2PlanService
             $projectedVars = $manifest !== []
                 ? $this->variableSchema->projectStaffList($manifest)
                 : ['status' => 'empty', 'variables' => [], 'errors' => []];
+            $gate = is_array($gates[(string) $pt->id] ?? null)
+                ? $gates[(string) $pt->id]
+                : ['blocked' => false];
 
             $actionTagsDto[] = [
                 'id' => (string) $pt->plan_tag_uuid,
@@ -807,6 +813,7 @@ final class CampaignV2PlanService
                 'variables' => $projectedVars['variables'] ?? [],
                 'is_enabled' => (bool) $pt->is_enabled,
                 'sort_order' => (int) $pt->sort_order,
+                'gate' => $gate,
             ];
         }
 
@@ -873,11 +880,28 @@ final class CampaignV2PlanService
             if (array_key_exists($st, $counts)) {
                 $counts[$st]++;
             }
+            $contentAssigns = $assignmentsByContentId[(int) $c->id] ?? [];
+            $primaryPlanTagId = null;
+            if (count($contentAssigns) === 1 && isset($contentAssigns[0]['plan_tag_id'])) {
+                foreach ($planTagUuidById as $ptIntId => $ptUuid) {
+                    if ($ptUuid === $contentAssigns[0]['plan_tag_id']) {
+                        $primaryPlanTagId = (string) $ptIntId;
+                        break;
+                    }
+                }
+            }
+            $contentGate = $primaryPlanTagId !== null && is_array($gates[$primaryPlanTagId] ?? null)
+                ? $gates[$primaryPlanTagId]
+                : null;
+            $isBlockedByGate = $st === 'pending' && is_array($contentGate) && (($contentGate['blocked'] ?? false) === true);
+
             $row = [
                 'id' => (string) $c->content_uuid,
                 'content_uuid' => (string) $c->content_uuid,
                 'external_ref' => $c->external_ref,
                 'status' => $st,
+                'queue_state' => $isBlockedByGate ? 'blocked_by_failure' : $st,
+                'blocked_by_gate' => $isBlockedByGate ? $contentGate : null,
                 'sort_order' => (int) $c->sort_order,
                 'assigned_account_id' => null,
                 'last_error_code' => $c->last_error_code,
@@ -922,6 +946,7 @@ final class CampaignV2PlanService
         $dto['revision'] = (int) (($meta['draft_revision'] ?? null) ?: 1);
         $dto['updated_at'] = $campaign->updated_at?->toIso8601String();
         $dto['action_tags'] = $actionTagsDto;
+        $dto['action_tag_gates'] = $gates;
         $dto['contents'] = $contentsDto;
 
         return $dto;

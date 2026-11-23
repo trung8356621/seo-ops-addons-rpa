@@ -525,6 +525,10 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     Route::post('/{id}/cancel', [StaffCampaignController::class, 'cancel'])
                         ->whereUuid('id')
                         ->name('social-automation.campaigns.cancel');
+                    Route::post('/{id}/action-tags/{planTagId}/manual-test', [StaffCampaignController::class, 'manualTestActionTag'])
+                        ->whereUuid('id')
+                        ->whereUuid('planTagId')
+                        ->name('social-automation.campaigns.action-tags.manual-test');
                     Route::delete('/{id}', [StaffCampaignController::class, 'destroy'])
                         ->whereUuid('id')
                         ->name('social-automation.campaigns.destroy');
