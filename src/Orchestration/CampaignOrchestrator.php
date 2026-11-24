@@ -431,10 +431,19 @@ final class CampaignOrchestrator
                         continue;
                     }
 
-                    // Blocked by Failure: stop automatic dispatch for this Action Tag queue; keep following items Pending.
+                    $errMeta = is_array($content->last_error_meta) ? $content->last_error_meta : [];
+                    $hasOneShotGateRecovery = ($errMeta['manual_recovery_origin'] ?? null) === 'manual_retry'
+                        && ($errMeta['gate_recovery_authorized'] ?? false) === true
+                        && is_string($errMeta['gate_recovery_token'] ?? null)
+                        && trim((string) $errMeta['gate_recovery_token']) !== '';
+
+                    // Blocked by Failure: stop automatic dispatch for this Action Tag queue unless this head item
+                    // holds an explicit one-shot manual_retry authorization; keep following items Pending.
                     if (isset($blockedTagIds[$planTagId])) {
-                        $this->normalizeNonHeadWaitingToPending($content);
-                        continue;
+                        if (! $hasOneShotGateRecovery || isset($inFlightTagIds[$planTagId]) || isset($handledQueues[$planTagId])) {
+                            $this->normalizeNonHeadWaitingToPending($content);
+                            continue;
+                        }
                     }
 
                     // Sequential queue: at most one active/head item evaluated per Action Tag queue.
@@ -518,8 +527,16 @@ final class CampaignOrchestrator
 
                     $content->last_error_code = null;
                     $content->last_error_message = null;
-                    if (isset($errMeta['manual_recovery_origin'])) {
-                        unset($errMeta['manual_recovery_origin']);
+                    if (isset($errMeta['manual_recovery_origin'])
+                        || isset($errMeta['gate_recovery_authorized'])
+                        || isset($errMeta['gate_recovery_token'])
+                        || isset($errMeta['gate_recovery_authorized_at'])) {
+                        unset(
+                            $errMeta['manual_recovery_origin'],
+                            $errMeta['gate_recovery_authorized'],
+                            $errMeta['gate_recovery_token'],
+                            $errMeta['gate_recovery_authorized_at'],
+                        );
                         $content->last_error_meta = $errMeta === [] ? null : $errMeta;
                     }
                     $content->save();
@@ -1109,11 +1126,6 @@ final class CampaignOrchestrator
                     ];
                 }
 
-                $status = CampaignContentStatus::tryFrom((string) $locked->status);
-                if ($status !== CampaignContentStatus::FailedLocked && $status !== CampaignContentStatus::Unknown) {
-                    return ['ok' => false, 'errors' => ['content_not_retryable']];
-                }
-
                 $campaign = SaCampaign::query()->notDeleted()->where('id', $locked->campaign_id)->lockForUpdate()->first();
                 if (! $campaign instanceof SaCampaign) {
                     return ['ok' => false, 'errors' => ['campaign_not_found']];
@@ -1124,6 +1136,17 @@ final class CampaignOrchestrator
                 }
                 if ($cStatus === CampaignStatus::Draft) {
                     return ['ok' => false, 'errors' => ['campaign_not_started']];
+                }
+
+                $isV2 = (int) ($campaign->plan_version ?? 1) >= 2;
+                $status = CampaignContentStatus::tryFrom((string) $locked->status);
+                $canRetryPendingGated = $status === CampaignContentStatus::Pending
+                    && $isV2
+                    && $this->isPendingContentEligibleForGateRecovery($campaign, $locked);
+                if ($status !== CampaignContentStatus::FailedLocked
+                    && $status !== CampaignContentStatus::Unknown
+                    && ! $canRetryPendingGated) {
+                    return ['ok' => false, 'errors' => ['content_not_retryable']];
                 }
 
                 // Unknown keeps global lease until Admin acts — release before new attempt.
@@ -1152,6 +1175,9 @@ final class CampaignOrchestrator
                 $locked->last_error_message = null;
                 $locked->last_error_meta = [
                     'manual_recovery_origin' => 'manual_retry',
+                    'gate_recovery_authorized' => true,
+                    'gate_recovery_token' => (string) Str::uuid(),
+                    'gate_recovery_authorized_at' => now()->toIso8601String(),
                     'idempotency_key' => $idempotencyKey,
                 ];
                 $locked->current_job_id = null;
@@ -1159,11 +1185,23 @@ final class CampaignOrchestrator
                 $locked->admin_action_at = now();
                 $locked->save();
 
-                if ((string) $campaign->status !== CampaignStatus::Running->value) {
+                if ($isV2 && SocialAutomationSchema::campaignV2Ready()) {
+                    SaCampaignContentAssignment::query()
+                        ->where('campaign_content_id', $locked->id)
+                        ->whereIn('status', [
+                            CampaignContentStatus::FailedLocked->value,
+                            CampaignContentStatus::Unknown->value,
+                        ])
+                        ->update(['status' => CampaignContentStatus::Pending->value]);
+                }
+
+                if (! $isV2 && (string) $campaign->status !== CampaignStatus::Running->value) {
                     $campaign->status = CampaignStatus::Running->value;
                     $campaign->paused_at = null;
                 }
-                $campaign->next_recheck_at = now();
+                if ((string) $campaign->status === CampaignStatus::Running->value) {
+                    $campaign->next_recheck_at = now();
+                }
                 $campaign->save();
 
                 return [
@@ -1174,6 +1212,78 @@ final class CampaignOrchestrator
         } catch (Throwable) {
             return ['ok' => false, 'errors' => ['retry_failed']];
         }
+    }
+
+    /**
+     * Allow re-authorizing an already-Pending V2 queue-head Content only when its Action Tag gate is blocked
+     * and no active Job exists (e.g. a legacy manual_retry without one-shot gate authorization).
+     */
+    private function isPendingContentEligibleForGateRecovery(SaCampaign $campaign, SaCampaignContent $content): bool
+    {
+        if (! SocialAutomationSchema::campaignV2Ready()) {
+            return false;
+        }
+        if ($content->current_job_id !== null) {
+            return false;
+        }
+        $hasActiveJob = SaJob::query()
+            ->where('campaign_content_id', $content->id)
+            ->whereIn('status', AccountLockPolicy::ACTIVE_STATUSES)
+            ->exists();
+        if ($hasActiveJob) {
+            return false;
+        }
+
+        $assignments = SaCampaignContentAssignment::query()
+            ->where('campaign_content_id', $content->id)
+            ->get();
+        if ($assignments->count() !== 1) {
+            return false;
+        }
+        $planTagId = (int) $assignments->first()->campaign_action_tag_id;
+
+        $meta = is_array($campaign->meta) ? $campaign->meta : [];
+        $gates = is_array($meta['action_tag_gates'] ?? null) ? $meta['action_tag_gates'] : [];
+        $gateKey = (string) $planTagId;
+
+        $tagContentIds = SaCampaignContentAssignment::query()
+            ->where('campaign_action_tag_id', $planTagId)
+            ->pluck('campaign_content_id')
+            ->all();
+        if ($tagContentIds === []) {
+            return false;
+        }
+
+        $isGateBlocked = is_array($gates[$gateKey] ?? null) && (($gates[$gateKey]['blocked'] ?? false) === true);
+        if (! $isGateBlocked && ! array_key_exists($gateKey, $gates)) {
+            $isGateBlocked = SaCampaignContent::query()
+                ->where('campaign_id', $campaign->id)
+                ->whereIn('id', $tagContentIds)
+                ->whereIn('status', [
+                    CampaignContentStatus::FailedLocked->value,
+                    CampaignContentStatus::Unknown->value,
+                ])
+                ->exists();
+        }
+        if (! $isGateBlocked) {
+            return false;
+        }
+
+        // Only the queue-head non-completed content for this Action Tag may be authorized.
+        $headContentId = SaCampaignContent::query()
+            ->where('campaign_id', $campaign->id)
+            ->whereIn('id', $tagContentIds)
+            ->whereIn('status', [
+                CampaignContentStatus::Pending->value,
+                CampaignContentStatus::WaitingResources->value,
+                CampaignContentStatus::FailedLocked->value,
+                CampaignContentStatus::Unknown->value,
+            ])
+            ->orderBy('sort_order')
+            ->orderBy('id')
+            ->value('id');
+
+        return $headContentId !== null && (int) $headContentId === (int) $content->id;
     }
 
     /**

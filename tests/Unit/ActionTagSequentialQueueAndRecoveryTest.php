@@ -19,6 +19,7 @@ use Omnichannel\Addons\SocialAutomation\Enums\AgentAvailability;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignContentStatus;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignStatus;
 use Omnichannel\Addons\SocialAutomation\Enums\SessionReadyStatus;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\StaffCampaignContentController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\StaffCampaignController;
 use Omnichannel\Addons\SocialAutomation\Models\SaAccount;
 use Omnichannel\Addons\SocialAutomation\Models\SaAccountExecutionLease;
@@ -57,6 +58,8 @@ final class ActionTagSequentialQueueAndRecoveryTest extends TestCase
     private CampaignService $campaigns;
 
     private StaffCampaignController $controller;
+
+    private StaffCampaignContentController $contentController;
 
     private string $installationId = 'inst-seq-queue';
 
@@ -143,6 +146,7 @@ final class ActionTagSequentialQueueAndRecoveryTest extends TestCase
         };
 
         $this->controller = new StaffCampaignController($this->campaigns, $access, $inst);
+        $this->contentController = new StaffCampaignContentController($this->campaigns, $this->orchestrator, $access, $inst);
     }
 
     protected function tearDown(): void
@@ -1182,5 +1186,170 @@ final class ActionTagSequentialQueueAndRecoveryTest extends TestCase
             ->pluck('sort_order')
             ->map(fn ($v) => (int) $v)
             ->all());
+    }
+
+    public function test_manual_retry_one_shot_gate_recovery_success_failure_unknown_and_idempotency(): void
+    {
+        $tagA = $this->seedActionTagAndScript('maytuicanvas', 'maytuicanvas.create_post');
+        $client = $this->seedClient('maytuicanvas', 'may-acc-1');
+        $setup = $this->createV2RunningCampaign([
+            ['tag' => $tagA['tag'], 'pkg' => $tagA['pkg'], 'rel' => $tagA['rel'], 'count' => 3],
+        ]);
+        $camp = $setup['campaign'];
+        $items = $setup['contents']['maytuicanvas.create_post'];
+        $pt = $setup['plan_tags']['maytuicanvas.create_post'];
+        $origReleaseId = $pt->release_id;
+
+        // 1. Dispatch item 0 -> fails -> blocks Action Tag gate
+        $this->orchestrator->dispatchCampaign($camp);
+        $this->claimAndFinish($client['agent'], $client['session'], 'failed', 'ORC_ERROR');
+
+        $job1 = SaJob::query()->where('campaign_content_id', $items[0]->id)->firstOrFail();
+        self::assertSame(CampaignContentStatus::FailedLocked->value, $items[0]->fresh()->status);
+        self::assertTrue($camp->fresh()->meta['action_tag_gates'][(string) $pt->id]['blocked']);
+        self::assertSame(CampaignContentStatus::Pending->value, $items[1]->fresh()->status);
+
+        // 7. Non-head Pending item (items[1]) CANNOT be retried to bypass gate
+        $nonHeadResp = $this->contentController->retry(
+            Request::create('/', 'POST', ['idempotency_key' => 'retry-nonhead']),
+            $items[1]->content_uuid,
+        );
+        self::assertSame(422, $nonHeadResp->getStatusCode());
+
+        // 2 & 3. Explicit Retry on failed item 0 creates ONE new recovery Job; old Failed Job 1 stays immutable
+        $retry1 = $this->contentController->retry(
+            Request::create('/', 'POST', ['idempotency_key' => 'retry-1']),
+            $items[0]->content_uuid,
+        );
+        self::assertSame(200, $retry1->getStatusCode(), $retry1->getContent());
+        self::assertSame(CampaignContentStatus::Running->value, $items[0]->fresh()->status);
+        $jobsAfterRetry1 = SaJob::query()->where('campaign_content_id', $items[0]->id)->orderBy('id')->get();
+        self::assertCount(2, $jobsAfterRetry1);
+        self::assertSame('failed', $job1->fresh()->status);
+        $job2 = $jobsAfterRetry1[1];
+        self::assertNotSame($job1->id, $job2->id);
+        self::assertSame('manual_retry', $job2->payload['execution_origin'] ?? null);
+        // One-shot authorization consumed on reservation
+        $freshMeta = $items[0]->fresh()->last_error_meta ?? [];
+        self::assertArrayNotHasKey('gate_recovery_authorized', $freshMeta);
+        self::assertArrayNotHasKey('gate_recovery_token', $freshMeta);
+        self::assertArrayNotHasKey('manual_recovery_origin', $freshMeta);
+        // Other contents remain blocked/pending
+        self::assertSame(CampaignContentStatus::Pending->value, $items[1]->fresh()->status);
+
+        // 8. Duplicate Retry (same key or new key while Running) does NOT create duplicate Jobs
+        $dupSameKey = $this->contentController->retry(
+            Request::create('/', 'POST', ['idempotency_key' => 'retry-1']),
+            $items[0]->content_uuid,
+        );
+        self::assertSame(200, $dupSameKey->getStatusCode());
+        self::assertTrue($dupSameKey->getData(true)['idempotent'] ?? false);
+        self::assertCount(2, SaJob::query()->where('campaign_content_id', $items[0]->id)->get());
+
+        $dupNewKey = $this->contentController->retry(
+            Request::create('/', 'POST', ['idempotency_key' => 'retry-1b']),
+            $items[0]->content_uuid,
+        );
+        self::assertSame(422, $dupNewKey->getStatusCode());
+        self::assertCount(2, SaJob::query()->where('campaign_content_id', $items[0]->id)->get());
+
+        // 5. Failed recovery keeps Action Tag blocked and does NOT advance items[1]
+        $this->claimAndFinish($client['agent'], $client['session'], 'failed', 'STILL_FAILING');
+        self::assertSame(CampaignContentStatus::FailedLocked->value, $items[0]->fresh()->status);
+        self::assertTrue($camp->fresh()->meta['action_tag_gates'][(string) $pt->id]['blocked']);
+        self::assertSame('STILL_FAILING', $camp->fresh()->meta['action_tag_gates'][(string) $pt->id]['reason']);
+        $this->orchestrator->recheckDueCampaigns(now()->addMinutes(5));
+        self::assertSame(CampaignContentStatus::Pending->value, $items[1]->fresh()->status);
+
+        // 6. Retry again -> Unknown recovery keeps Action Tag blocked and does NOT advance items[1]
+        $retry2 = $this->contentController->retry(
+            Request::create('/', 'POST', ['idempotency_key' => 'retry-2']),
+            $items[0]->content_uuid,
+        );
+        self::assertSame(200, $retry2->getStatusCode());
+        $this->claimAndFinish($client['agent'], $client['session'], 'unknown', 'HUMAN_REQUIRED');
+        self::assertSame(CampaignContentStatus::Unknown->value, $items[0]->fresh()->status);
+        self::assertTrue($camp->fresh()->meta['action_tag_gates'][(string) $pt->id]['blocked']);
+        $this->orchestrator->recheckDueCampaigns(now()->addMinutes(5));
+        self::assertSame(CampaignContentStatus::Pending->value, $items[1]->fresh()->status);
+
+        // 4 & 13. Retry Unknown -> Successful recovery unlocks Tag, releases lease, and advances items[1]
+        $retry3 = $this->contentController->retry(
+            Request::create('/', 'POST', ['idempotency_key' => 'retry-3']),
+            $items[0]->content_uuid,
+        );
+        self::assertSame(200, $retry3->getStatusCode());
+        $this->claimAndFinish($client['agent'], $client['session'], 'succeeded');
+        self::assertSame(CampaignContentStatus::Success->value, $items[0]->fresh()->status);
+        self::assertFalse($camp->fresh()->meta['action_tag_gates'][(string) $pt->id]['blocked']);
+        $recoveryJob = SaJob::query()->where('campaign_content_id', $items[0]->id)->orderByDesc('id')->firstOrFail();
+        self::assertSame('released', SaAccountExecutionLease::query()->where('job_id', $recoveryJob->id)->value('status'));
+        self::assertSame(CampaignContentStatus::Running->value, $items[1]->fresh()->status);
+        self::assertSame(1, SaAccountExecutionLease::query()->where('status', 'active')->count());
+        self::assertSame($origReleaseId, $pt->fresh()->release_id);
+    }
+
+    public function test_legacy_pending_manual_retry_marker_does_not_auto_dispatch_and_pause_stays_paused(): void
+    {
+        $tagA = $this->seedActionTagAndScript('maytuicanvas', 'maytuicanvas.create_post');
+        $client = $this->seedClient('maytuicanvas', 'may-acc-2');
+        $setup = $this->createV2RunningCampaign([
+            ['tag' => $tagA['tag'], 'pkg' => $tagA['pkg'], 'rel' => $tagA['rel'], 'count' => 3],
+        ]);
+        $camp = $setup['campaign'];
+        $items = $setup['contents']['maytuicanvas.create_post'];
+        $pt = $setup['plan_tags']['maytuicanvas.create_post'];
+
+        // Simulate Campaign 9 Content 83 state: failed -> gate blocked -> legacy manual_retry left Content Pending without gate_recovery_authorized
+        $this->orchestrator->dispatchCampaign($camp);
+        $this->claimAndFinish($client['agent'], $client['session'], 'failed', 'ORC_ERROR');
+        $item0 = $items[0]->fresh();
+        $item0->status = CampaignContentStatus::Pending->value;
+        $item0->current_job_id = null;
+        $item0->last_error_code = null;
+        $item0->last_error_message = null;
+        $item0->last_error_meta = [
+            'manual_recovery_origin' => 'manual_retry',
+            'idempotency_key' => 'legacy-key',
+        ];
+        $item0->save();
+        SaCampaignContentAssignment::query()
+            ->where('campaign_content_id', $items[0]->id)
+            ->update(['status' => CampaignContentStatus::FailedLocked->value]);
+
+        // 9. Deployment / cron tick / resume must NOT auto-dispatch legacy Pending + manual_retry marker
+        $this->orchestrator->dispatchCampaign($camp->fresh());
+        $this->orchestrator->recheckDueCampaigns(now()->addMinutes(5));
+        self::assertSame(CampaignContentStatus::Pending->value, $items[0]->fresh()->status);
+        self::assertCount(1, SaJob::query()->where('campaign_content_id', $items[0]->id)->get());
+
+        // 11. If Campaign is Paused, explicit Retry authorizes recovery WITHOUT silently resuming the Campaign
+        $this->campaigns->pause($camp->campaign_uuid, $this->installationId);
+        $retryWhilePaused = $this->contentController->retry(
+            Request::create('/', 'POST', ['idempotency_key' => 'retry-paused']),
+            $items[0]->content_uuid,
+        );
+        self::assertSame(200, $retryWhilePaused->getStatusCode());
+        self::assertSame(CampaignStatus::Paused->value, $camp->fresh()->status);
+        self::assertSame(CampaignContentStatus::Pending->value, $items[0]->fresh()->status);
+        self::assertTrue((bool) ($items[0]->fresh()->last_error_meta['gate_recovery_authorized'] ?? false));
+
+        // Resume now dispatches ONLY the authorized recovery Content (items[0]), keeping items[1] Pending
+        $this->campaigns->resume($camp->campaign_uuid, $this->installationId);
+        self::assertSame(CampaignContentStatus::Running->value, $items[0]->fresh()->status);
+        self::assertSame(CampaignContentStatus::Pending->value, $items[1]->fresh()->status);
+        self::assertCount(2, SaJob::query()->where('campaign_content_id', $items[0]->id)->get());
+
+        // Pause while recovery Job is in-flight -> recovery Success unlocks gate, but does NOT advance items[1] until Resume
+        $this->campaigns->pause($camp->campaign_uuid, $this->installationId);
+        $this->claimAndFinish($client['agent'], $client['session'], 'succeeded');
+        self::assertSame(CampaignContentStatus::Success->value, $items[0]->fresh()->status);
+        self::assertFalse($camp->fresh()->meta['action_tag_gates'][(string) $pt->id]['blocked']);
+        self::assertSame(CampaignStatus::Paused->value, $camp->fresh()->status);
+        self::assertSame(CampaignContentStatus::Pending->value, $items[1]->fresh()->status);
+
+        // Resume continues sequential execution with items[1]
+        $this->campaigns->resume($camp->campaign_uuid, $this->installationId);
+        self::assertSame(CampaignContentStatus::Running->value, $items[1]->fresh()->status);
     }
 }
