@@ -7,6 +7,7 @@ namespace Omnichannel\Addons\SocialAutomation\Services;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use Omnichannel\Addons\SocialAutomation\Domain\AccountLockPolicy;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignInputSanitizer;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignRecheckPolicy;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignScriptVariableSchema;
@@ -1041,6 +1042,49 @@ final class CampaignV2PlanService
             }
         }
 
+        $cStatus = CampaignStatus::tryFrom((string) $campaign->status);
+        $campaignAllowsRetry = $cStatus !== null && ! $cStatus->isTerminal() && $cStatus !== CampaignStatus::Draft;
+        $activeJobContentIds = [];
+        $activeCampaignJobs = SaJob::query()
+            ->where('campaign_id', $campaign->id)
+            ->whereIn('status', AccountLockPolicy::ACTIVE_STATUSES)
+            ->get(['campaign_content_id', 'payload']);
+        foreach ($activeCampaignJobs as $aj) {
+            if ($aj->campaign_content_id !== null) {
+                $activeJobContentIds[(int) $aj->campaign_content_id] = true;
+            } elseif (is_array($aj->payload) && isset($aj->payload['campaign_action_tag_id'])) {
+                $mjUuid = $planTagUuidById[(int) $aj->payload['campaign_action_tag_id']] ?? null;
+                if ($mjUuid !== null) {
+                    $inFlightTags[$mjUuid] = true;
+                }
+            }
+        }
+
+        $headContentIdByTagUuid = [];
+        $fallbackBlockedTagUuids = [];
+        foreach ($contents as $cRow) {
+            $rowStatus = (string) $cRow->status;
+            $assigns = $assignmentsByContentId[(int) $cRow->id] ?? [];
+            if (count($assigns) !== 1 || ! isset($assigns[0]['plan_tag_id'])) {
+                continue;
+            }
+            $ptUuid = (string) $assigns[0]['plan_tag_id'];
+            if (in_array($rowStatus, [
+                CampaignContentStatus::Pending->value,
+                CampaignContentStatus::WaitingResources->value,
+                CampaignContentStatus::FailedLocked->value,
+                CampaignContentStatus::Unknown->value,
+            ], true) && ! isset($headContentIdByTagUuid[$ptUuid])) {
+                $headContentIdByTagUuid[$ptUuid] = (int) $cRow->id;
+            }
+            if (in_array($rowStatus, [
+                CampaignContentStatus::FailedLocked->value,
+                CampaignContentStatus::Unknown->value,
+            ], true)) {
+                $fallbackBlockedTagUuids[$ptUuid] = true;
+            }
+        }
+
         $counts = [
             'total' => 0,
             'pending' => 0,
@@ -1090,12 +1134,36 @@ final class CampaignV2PlanService
                 }
             }
 
+            $ptUuidForRow = $primaryPlanTagId !== null ? ($planTagUuidById[(int) $primaryPlanTagId] ?? null) : null;
+            $hasActiveJobForRow = $c->current_job_id !== null || isset($activeJobContentIds[(int) $c->id]);
+            $isGateBlockedForRetry = $isBlockedByGate
+                || ($st === CampaignContentStatus::Pending->value
+                    && $primaryPlanTagId !== null
+                    && ! array_key_exists($primaryPlanTagId, $gates)
+                    && $ptUuidForRow !== null
+                    && isset($fallbackBlockedTagUuids[$ptUuidForRow]));
+
+            $canRetry = false;
+            if ($campaignAllowsRetry) {
+                if ($st === CampaignContentStatus::FailedLocked->value || $st === CampaignContentStatus::Unknown->value) {
+                    $canRetry = true;
+                } elseif ($st === CampaignContentStatus::Pending->value
+                    && ! $hasActiveJobForRow
+                    && $isGateBlockedForRetry
+                    && $ptUuidForRow !== null
+                    && ! isset($inFlightTags[$ptUuidForRow])
+                    && (($headContentIdByTagUuid[$ptUuidForRow] ?? null) === (int) $c->id)) {
+                    $canRetry = true;
+                }
+            }
+
             $row = [
                 'id' => (string) $c->content_uuid,
                 'content_uuid' => (string) $c->content_uuid,
                 'external_ref' => $c->external_ref,
                 'status' => $st,
                 'queue_state' => $queueState,
+                'can_retry' => $canRetry,
                 'blocked_by_gate' => $isBlockedByGate ? $contentGate : null,
                 'next_run_at' => $contentNextRunAt,
                 'sort_order' => (int) $c->sort_order,

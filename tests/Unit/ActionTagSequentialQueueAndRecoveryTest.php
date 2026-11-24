@@ -1352,4 +1352,69 @@ final class ActionTagSequentialQueueAndRecoveryTest extends TestCase
         $this->campaigns->resume($camp->campaign_uuid, $this->installationId);
         self::assertSame(CampaignContentStatus::Running->value, $items[1]->fresh()->status);
     }
+
+    public function test_detail_dto_can_retry_eligibility_contract(): void
+    {
+        $tagA = $this->seedActionTagAndScript('maytuicanvas', 'maytuicanvas.create_post');
+        $client = $this->seedClient('maytuicanvas', 'may-acc-3');
+        $setup = $this->createV2RunningCampaign([
+            ['tag' => $tagA['tag'], 'pkg' => $tagA['pkg'], 'rel' => $tagA['rel'], 'count' => 4],
+        ]);
+        $camp = $setup['campaign'];
+        $items = $setup['contents']['maytuicanvas.create_post'];
+
+        // Before failure: Pending items have can_retry=false
+        $dto0 = $this->campaigns->detailDto($camp->fresh());
+        foreach ($dto0['contents'] as $row) {
+            self::assertFalse($row['can_retry']);
+        }
+
+        // Dispatch item 0 -> fails -> blocks gate; FailedLocked item 0 has can_retry=true, Pending items 1..3 have can_retry=false
+        $this->orchestrator->dispatchCampaign($camp);
+        $this->claimAndFinish($client['agent'], $client['session'], 'failed', 'ORC_ERROR');
+        $dtoFailed = $this->campaigns->detailDto($camp->fresh());
+        $byIdFailed = collect($dtoFailed['contents'])->keyBy('id');
+        self::assertTrue($byIdFailed[$items[0]->content_uuid]['can_retry']);
+        self::assertFalse($byIdFailed[$items[1]->content_uuid]['can_retry']);
+        self::assertFalse($byIdFailed[$items[2]->content_uuid]['can_retry']);
+        self::assertFalse($byIdFailed[$items[3]->content_uuid]['can_retry']);
+
+        // Simulate Content 83 legacy Pending state on blocked gate -> queue-head Pending has can_retry=true, items 1..3 have can_retry=false
+        $item0 = $items[0]->fresh();
+        $item0->status = CampaignContentStatus::Pending->value;
+        $item0->current_job_id = null;
+        $item0->last_error_meta = ['manual_recovery_origin' => 'manual_retry', 'idempotency_key' => 'legacy-83'];
+        $item0->save();
+        $dtoLegacyPending = $this->campaigns->detailDto($camp->fresh());
+        $byIdLegacy = collect($dtoLegacyPending['contents'])->keyBy('id');
+        self::assertSame('blocked_by_failure', $byIdLegacy[$items[0]->content_uuid]['queue_state']);
+        self::assertTrue($byIdLegacy[$items[0]->content_uuid]['can_retry']);
+        self::assertFalse($byIdLegacy[$items[1]->content_uuid]['can_retry']);
+        self::assertFalse($byIdLegacy[$items[2]->content_uuid]['can_retry']);
+        self::assertFalse($byIdLegacy[$items[3]->content_uuid]['can_retry']);
+
+        // Explicit Retry -> recovery Job Running -> ALL items (including 0 and 1..3) have can_retry=false
+        $retryResp = $this->contentController->retry(
+            Request::create('/', 'POST', ['idempotency_key' => 'retry-dto-1']),
+            $items[0]->content_uuid,
+        );
+        self::assertSame(200, $retryResp->getStatusCode());
+        $dtoInFlight = $this->campaigns->detailDto($camp->fresh());
+        foreach ($dtoInFlight['contents'] as $row) {
+            self::assertFalse($row['can_retry']);
+        }
+        // Later blocked Content cannot retry while recovery Job is in flight
+        $lateRetry = $this->contentController->retry(
+            Request::create('/', 'POST', ['idempotency_key' => 'retry-dto-late']),
+            $items[1]->content_uuid,
+        );
+        self::assertSame(422, $lateRetry->getStatusCode());
+
+        // Unknown -> can_retry=true on head, false on others
+        $this->claimAndFinish($client['agent'], $client['session'], 'unknown', 'HUMAN_REQUIRED');
+        $dtoUnknown = $this->campaigns->detailDto($camp->fresh());
+        $byIdUnknown = collect($dtoUnknown['contents'])->keyBy('id');
+        self::assertTrue($byIdUnknown[$items[0]->content_uuid]['can_retry']);
+        self::assertFalse($byIdUnknown[$items[1]->content_uuid]['can_retry']);
+    }
 }

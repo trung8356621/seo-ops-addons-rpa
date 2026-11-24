@@ -1269,6 +1269,15 @@ final class CampaignOrchestrator
             return false;
         }
 
+        $hasInFlightInTag = SaCampaignContent::query()
+            ->where('campaign_id', $campaign->id)
+            ->whereIn('id', $tagContentIds)
+            ->where('status', CampaignContentStatus::Running->value)
+            ->exists();
+        if ($hasInFlightInTag) {
+            return false;
+        }
+
         // Only the queue-head non-completed content for this Action Tag may be authorized.
         $headContentId = SaCampaignContent::query()
             ->where('campaign_id', $campaign->id)
