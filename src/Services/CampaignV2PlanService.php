@@ -92,7 +92,7 @@ final class CampaignV2PlanService
             return $this->fail(422, ['invalid_run_mode'], ['run_mode' => ['Invalid run_mode.']]);
         }
 
-        $mode = CampaignExecutionMode::tryFromInput($input['execution_mode'] ?? CampaignExecutionMode::OneAccountOneJob->value);
+        $mode = CampaignExecutionMode::tryFromInput($input['execution_mode'] ?? CampaignExecutionMode::OneAccountManyJobs->value);
         if ($mode === null) {
             return $this->fail(422, ['invalid_execution_mode'], ['execution_mode' => ['Invalid execution_mode.']]);
         }
@@ -319,9 +319,11 @@ final class CampaignV2PlanService
             return $this->fail(503, ['schema_unavailable'], ['schema' => ['Campaign V2 schema is not migrated.']]);
         }
 
-        if ((string) $campaign->status !== CampaignStatus::Draft->value) {
-            return $this->fail(422, ['v2_campaign_not_draft'], ['status' => ['Only V2 Campaigns in draft status can be edited.']]);
+        $initialStatus = (string) $campaign->status;
+        if (! in_array($initialStatus, [CampaignStatus::Draft->value, CampaignStatus::Paused->value], true)) {
+            return $this->fail(422, ['v2_campaign_not_draft'], ['status' => ['Only V2 Campaigns in draft or paused status can be edited.']]);
         }
+        $isPaused = $initialStatus === CampaignStatus::Paused->value;
 
         if (! array_key_exists('plan_version', $input) || (int) $input['plan_version'] !== 2) {
             $code = array_key_exists('plan_version', $input) ? 'invalid_plan_version' : 'plan_version_required';
@@ -329,17 +331,31 @@ final class CampaignV2PlanService
             return $this->fail(422, [$code], ['plan_version' => ['plan_version must be explicitly set to 2 for Campaign V2 updates.']]);
         }
 
-        $name = trim((string) ($input['name'] ?? ''));
-        if ($name === '') {
-            return $this->fail(422, ['name_required'], ['name' => ['Campaign name is required.']]);
+        if ($isPaused) {
+            if (array_key_exists('name', $input) && trim((string) $input['name']) !== trim((string) $campaign->name)) {
+                return $this->fail(422, ['step1_immutable_after_start'], ['name' => ['Campaign name is immutable after start.']]);
+            }
+            $name = (string) $campaign->name;
+            if (array_key_exists('run_mode', $input) && $input['run_mode'] !== null && $input['run_mode'] !== '') {
+                $submittedRunMode = CampaignRunMode::tryFromInput($input['run_mode']);
+                if ($submittedRunMode === null || $submittedRunMode->value !== (string) $campaign->run_mode) {
+                    return $this->fail(422, ['step1_immutable_after_start'], ['run_mode' => ['run_mode is immutable after start.']]);
+                }
+            }
+            $runMode = CampaignRunMode::tryFromInput($campaign->run_mode ?? CampaignRunMode::Live->value) ?? CampaignRunMode::Live;
+        } else {
+            $name = trim((string) ($input['name'] ?? ''));
+            if ($name === '') {
+                return $this->fail(422, ['name_required'], ['name' => ['Campaign name is required.']]);
+            }
+
+            $runMode = CampaignRunMode::tryFromInput($input['run_mode'] ?? $campaign->run_mode ?? CampaignRunMode::Live->value);
+            if ($runMode === null) {
+                return $this->fail(422, ['invalid_run_mode'], ['run_mode' => ['Invalid run_mode.']]);
+            }
         }
 
-        $runMode = CampaignRunMode::tryFromInput($input['run_mode'] ?? $campaign->run_mode ?? CampaignRunMode::Live->value);
-        if ($runMode === null) {
-            return $this->fail(422, ['invalid_run_mode'], ['run_mode' => ['Invalid run_mode.']]);
-        }
-
-        $mode = CampaignExecutionMode::tryFromInput($input['execution_mode'] ?? $campaign->execution_mode ?? CampaignExecutionMode::OneAccountOneJob->value);
+        $mode = CampaignExecutionMode::tryFromInput($input['execution_mode'] ?? $campaign->execution_mode ?? CampaignExecutionMode::OneAccountManyJobs->value);
         if ($mode === null) {
             return $this->fail(422, ['invalid_execution_mode'], ['execution_mode' => ['Invalid execution_mode.']]);
         }
@@ -348,16 +364,22 @@ final class CampaignV2PlanService
             (int) ($input['resource_recheck_seconds'] ?? $campaign->resource_recheck_seconds ?? CampaignRecheckPolicy::DEFAULT_INTERVAL_SECONDS)
         );
 
-        if (! array_key_exists('action_tags', $input) || ! is_array($input['action_tags']) || ! array_is_list($input['action_tags']) || $input['action_tags'] === []) {
-            return $this->fail(422, ['action_tags_required'], ['action_tags' => ['Complete action_tags array with at least one Action Tag is required.']]);
+        $hasActionTagsInput = array_key_exists('action_tags', $input);
+        if (! $isPaused || $hasActionTagsInput) {
+            if (! $hasActionTagsInput || ! is_array($input['action_tags']) || ! array_is_list($input['action_tags']) || $input['action_tags'] === []) {
+                return $this->fail(422, ['action_tags_required'], ['action_tags' => ['Complete action_tags array with at least one Action Tag is required.']]);
+            }
         }
 
-        if (! array_key_exists('contents', $input) || ! is_array($input['contents']) || ! array_is_list($input['contents'])) {
-            return $this->fail(422, ['contents_required'], ['contents' => ['Complete contents array is required for V2 draft update (pass [] to clear).']]);
+        $hasContentsInput = array_key_exists('contents', $input);
+        if (! $isPaused || $hasContentsInput) {
+            if (! $hasContentsInput || ! is_array($input['contents']) || ! array_is_list($input['contents'])) {
+                return $this->fail(422, ['contents_required'], ['contents' => ['Complete contents array is required for V2 draft update (pass [] to clear).']]);
+            }
         }
 
-        $rawTags = $input['action_tags'];
-        $rawContents = $input['contents'];
+        $rawTags = $hasActionTagsInput ? $input['action_tags'] : null;
+        $rawContents = $hasContentsInput ? $input['contents'] : null;
 
         try {
             return DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use (
@@ -374,9 +396,10 @@ final class CampaignV2PlanService
                 if (! $locked instanceof SaCampaign) {
                     return $this->fail(404, ['campaign_not_found'], ['campaign' => ['Campaign not found.']]);
                 }
-                if ((string) $locked->status !== CampaignStatus::Draft->value) {
-                    return $this->fail(422, ['v2_campaign_not_draft'], ['status' => ['Only V2 Campaigns in draft status can be edited.']]);
+                if (! in_array((string) $locked->status, [CampaignStatus::Draft->value, CampaignStatus::Paused->value], true)) {
+                    return $this->fail(422, ['v2_campaign_not_draft'], ['status' => ['Only V2 Campaigns in draft or paused status can be edited.']]);
                 }
+                $isPausedLocked = (string) $locked->status === CampaignStatus::Paused->value;
 
                 $meta = is_array($locked->meta) ? $locked->meta : [];
                 $currentRevision = (int) (($meta['draft_revision'] ?? null) ?: 1);
@@ -421,74 +444,115 @@ final class CampaignV2PlanService
                 $retainedTagIds = [];
                 $platforms = [];
 
-                foreach ($rawTags as $i => $tagRow) {
-                    if (! is_array($tagRow)) {
-                        return $this->fail(422, ['action_tag_invalid:'.$i], ["action_tags.{$i}" => ['Action Tag entry must be an object.']]);
-                    }
-
-                    $planTagUuid = trim((string) ($tagRow['id'] ?? $tagRow['plan_tag_id'] ?? $tagRow['plan_tag_uuid'] ?? ''));
-                    $matchedExisting = null;
-
-                    if ($planTagUuid !== '') {
-                        $matchedExisting = $existingTagsByUuid->get($planTagUuid);
-                        if (! $matchedExisting instanceof SaCampaignActionTag) {
-                            return $this->fail(
-                                422,
-                                ['cross_campaign_tag_reference'],
-                                ["action_tags.{$i}.id" => ["Planned Tag '{$planTagUuid}' does not belong to this Campaign."]]
-                            );
-                        }
-                    } else {
-                        $inTagId = isset($tagRow['action_tag_id']) && $tagRow['action_tag_id'] !== '' ? (int) $tagRow['action_tag_id'] : null;
-                        $inTagKey = strtolower(trim((string) ($tagRow['action_tag_key'] ?? $tagRow['tag_key'] ?? '')));
-                        if ($inTagId !== null && $existingTagsByActionId->has($inTagId)) {
-                            $matchedExisting = $existingTagsByActionId->get($inTagId);
-                        } elseif ($inTagKey !== '' && $existingTagsByActionKey->has($inTagKey)) {
-                            $matchedExisting = $existingTagsByActionKey->get($inTagKey);
-                        }
-                    }
-
-                    if ($matchedExisting instanceof SaCampaignActionTag) {
-                        if (isset($retainedTagIds[(int) $matchedExisting->id])) {
-                            return $this->fail(
-                                422,
-                                ['duplicate_action_tag:'.$matchedExisting->action_tag_key],
-                                ["action_tags.{$i}.action_tag_key" => ["Duplicate Action Tag '{$matchedExisting->action_tag_key}' in campaign plan."]]
-                            );
-                        }
-                        $resolved = $this->validateRetainedTagEntry($matchedExisting, $tagRow, $i, $runMode);
+                if ($rawTags === null) {
+                    foreach ($existingTags->sortBy('sort_order') as $existingPt) {
+                        $resolved = $this->validateRetainedTagEntry($existingPt, [
+                            'shortcode_mapping' => $existingPt->shortcode_mapping,
+                            'interval_minutes' => (int) ($existingPt->interval_minutes ?? 0),
+                        ], count($preparedTags), $runMode);
                         if (! ($resolved['ok'] ?? false)) {
                             return $resolved;
                         }
                         $tagData = $resolved['tag'];
-                        $retainedTagIds[(int) $matchedExisting->id] = true;
-                    } else {
-                        $resolved = $this->resolveAndValidateTagEntry($tagRow, $i, $runMode);
-                        if (! ($resolved['ok'] ?? false)) {
-                            return $resolved;
+                        $retainedTagIds[(int) $existingPt->id] = true;
+                        $idx = count($preparedTags);
+                        $preparedTags[] = $tagData;
+                        $tagsByKey[(string) $tagData['action_tag_key']] = $idx;
+                        $tagsById[(int) $tagData['action_tag_id']] = $idx;
+                        $tagsByPlanUuid[(string) $existingPt->plan_tag_uuid] = $idx;
+                        $platforms[(string) $tagData['site_key']] = true;
+                    }
+                } else {
+                    foreach ($rawTags as $i => $tagRow) {
+                        if (! is_array($tagRow)) {
+                            return $this->fail(422, ['action_tag_invalid:'.$i], ["action_tags.{$i}" => ['Action Tag entry must be an object.']]);
                         }
-                        $tagData = $resolved['tag'];
-                        $tagData['existing_model'] = null;
+
+                        $planTagUuid = trim((string) ($tagRow['id'] ?? $tagRow['plan_tag_id'] ?? $tagRow['plan_tag_uuid'] ?? ''));
+                        $matchedExisting = null;
+
+                        if ($planTagUuid !== '') {
+                            $matchedExisting = $existingTagsByUuid->get($planTagUuid);
+                            if (! $matchedExisting instanceof SaCampaignActionTag) {
+                                return $this->fail(
+                                    422,
+                                    ['cross_campaign_tag_reference'],
+                                    ["action_tags.{$i}.id" => ["Planned Tag '{$planTagUuid}' does not belong to this Campaign."]]
+                                );
+                            }
+                        } else {
+                            $inTagId = isset($tagRow['action_tag_id']) && $tagRow['action_tag_id'] !== '' ? (int) $tagRow['action_tag_id'] : null;
+                            $inTagKey = strtolower(trim((string) ($tagRow['action_tag_key'] ?? $tagRow['tag_key'] ?? '')));
+                            if ($inTagId !== null && $existingTagsByActionId->has($inTagId)) {
+                                $matchedExisting = $existingTagsByActionId->get($inTagId);
+                            } elseif ($inTagKey !== '' && $existingTagsByActionKey->has($inTagKey)) {
+                                $matchedExisting = $existingTagsByActionKey->get($inTagKey);
+                            }
+                        }
+
+                        if ($matchedExisting instanceof SaCampaignActionTag) {
+                            if (isset($retainedTagIds[(int) $matchedExisting->id])) {
+                                return $this->fail(
+                                    422,
+                                    ['duplicate_action_tag:'.$matchedExisting->action_tag_key],
+                                    ["action_tags.{$i}.action_tag_key" => ["Duplicate Action Tag '{$matchedExisting->action_tag_key}' in campaign plan."]]
+                                );
+                            }
+                            if ($isPausedLocked) {
+                                $step1Violation = $this->validatePausedTagStep1Immutability($matchedExisting, $tagRow, $i);
+                                if ($step1Violation !== null) {
+                                    return $step1Violation;
+                                }
+                            }
+                            $resolved = $this->validateRetainedTagEntry($matchedExisting, $tagRow, $i, $runMode);
+                            if (! ($resolved['ok'] ?? false)) {
+                                return $resolved;
+                            }
+                            $tagData = $resolved['tag'];
+                            $retainedTagIds[(int) $matchedExisting->id] = true;
+                        } else {
+                            if ($isPausedLocked) {
+                                return $this->fail(
+                                    422,
+                                    ['step1_immutable_after_start'],
+                                    ["action_tags.{$i}" => ['Action Tags cannot be added after Campaign start.']]
+                                );
+                            }
+                            $resolved = $this->resolveAndValidateTagEntry($tagRow, $i, $runMode);
+                            if (! ($resolved['ok'] ?? false)) {
+                                return $resolved;
+                            }
+                            $tagData = $resolved['tag'];
+                            $tagData['existing_model'] = null;
+                        }
+
+                        $tagId = (int) $tagData['action_tag_id'];
+                        $tagKey = (string) $tagData['action_tag_key'];
+                        if (isset($tagsById[$tagId]) || isset($tagsByKey[$tagKey])) {
+                            return $this->fail(
+                                422,
+                                ['duplicate_action_tag:'.$tagKey],
+                                ["action_tags.{$i}.action_tag_key" => ["Duplicate Action Tag '{$tagKey}' in campaign plan."]]
+                            );
+                        }
+
+                        $idx = count($preparedTags);
+                        $preparedTags[] = $tagData;
+                        $tagsByKey[$tagKey] = $idx;
+                        $tagsById[$tagId] = $idx;
+                        if ($matchedExisting instanceof SaCampaignActionTag) {
+                            $tagsByPlanUuid[(string) $matchedExisting->plan_tag_uuid] = $idx;
+                        }
+                        $platforms[(string) $tagData['site_key']] = true;
                     }
 
-                    $tagId = (int) $tagData['action_tag_id'];
-                    $tagKey = (string) $tagData['action_tag_key'];
-                    if (isset($tagsById[$tagId]) || isset($tagsByKey[$tagKey])) {
+                    if ($isPausedLocked && count($retainedTagIds) !== $existingTags->count()) {
                         return $this->fail(
                             422,
-                            ['duplicate_action_tag:'.$tagKey],
-                            ["action_tags.{$i}.action_tag_key" => ["Duplicate Action Tag '{$tagKey}' in campaign plan."]]
+                            ['step1_immutable_after_start'],
+                            ['action_tags' => ['Action Tags cannot be removed after Campaign start.']]
                         );
                     }
-
-                    $idx = count($preparedTags);
-                    $preparedTags[] = $tagData;
-                    $tagsByKey[$tagKey] = $idx;
-                    $tagsById[$tagId] = $idx;
-                    if ($matchedExisting instanceof SaCampaignActionTag) {
-                        $tagsByPlanUuid[(string) $matchedExisting->plan_tag_uuid] = $idx;
-                    }
-                    $platforms[(string) $tagData['site_key']] = true;
                 }
 
                 $existingContents = SaCampaignContent::query()
@@ -510,261 +574,331 @@ final class CampaignV2PlanService
                 $preparedContents = [];
                 $seenExternalRefs = [];
                 $retainedContentIds = [];
+                $executedContentIds = [];
 
-                foreach ($rawContents as $ci => $contentRow) {
-                    if (! is_array($contentRow)) {
-                        return $this->fail(422, ['content_invalid:'.$ci], ["contents.{$ci}" => ['Content item must be an object.']]);
+                if ($rawContents !== null) {
+                    $jobContentIds = [];
+                    if ($isPausedLocked && SocialAutomationSchema::jobsReady()) {
+                        $jobContentIds = array_flip(
+                            SaJob::query()
+                                ->where('campaign_id', $locked->id)
+                                ->whereNotNull('campaign_content_id')
+                                ->pluck('campaign_content_id')
+                                ->map(static fn ($id): int => (int) $id)
+                                ->all()
+                        );
                     }
-
-                    $contentUuid = trim((string) ($contentRow['id'] ?? $contentRow['content_uuid'] ?? ''));
-                    $existingContent = null;
-                    if ($contentUuid !== '') {
-                        $existingContent = $existingContentsByUuid->get($contentUuid);
-                        if (! $existingContent instanceof SaCampaignContent) {
-                            return $this->fail(
-                                422,
-                                ['cross_campaign_content_reference'],
-                                ["contents.{$ci}.id" => ["Content '{$contentUuid}' does not belong to this Campaign."]]
-                            );
+                    foreach ($existingContents as $ec) {
+                        if ($isPausedLocked && $this->isContentImmutableAfterExecution($ec, $jobContentIds)) {
+                            $executedContentIds[(int) $ec->id] = true;
                         }
-                        if (isset($retainedContentIds[(int) $existingContent->id])) {
-                            return $this->fail(
-                                422,
-                                ['duplicate_content_id'],
-                                ["contents.{$ci}.id" => ["Duplicate Content '{$contentUuid}' in payload."]]
-                            );
+                    }
+
+                    foreach ($rawContents as $ci => $contentRow) {
+                        if (! is_array($contentRow)) {
+                            return $this->fail(422, ['content_invalid:'.$ci], ["contents.{$ci}" => ['Content item must be an object.']]);
                         }
-                        $retainedContentIds[(int) $existingContent->id] = true;
-                    }
 
-                    $externalRef = trim((string) ($contentRow['external_ref'] ?? ''));
-                    $externalRef = $externalRef !== '' ? $externalRef : null;
-                    if ($externalRef !== null) {
-                        if (isset($seenExternalRefs[$externalRef])) {
-                            return $this->fail(
-                                422,
-                                ['external_ref_duplicate'],
-                                ["contents.{$ci}.external_ref" => ["Duplicate external_ref '{$externalRef}'."]]
-                            );
-                        }
-                        $seenExternalRefs[$externalRef] = true;
-                    }
-
-                    $builtContent = $this->prepareContentWithAssignments(
-                        $contentRow,
-                        $ci,
-                        $preparedTags,
-                        $tagsByKey,
-                        $tagsById,
-                        $externalRef,
-                        $tagsByPlanUuid,
-                    );
-                    if (! ($builtContent['ok'] ?? false)) {
-                        return $builtContent;
-                    }
-
-                    $contentPrepared = $builtContent['content'];
-                    $contentPrepared['existing_model'] = $existingContent;
-
-                    // Validate assignment IDs against current campaign & content
-                    $rawAssigns = $contentRow['assignments'] ?? $contentRow['tag_assignments'] ?? [];
-                    if (is_array($rawAssigns)) {
-                        $seenAssignUuids = [];
-                        foreach ($rawAssigns as $ai => $assignRow) {
-                            if (! is_array($assignRow)) {
-                                continue;
-                            }
-                            $assignUuid = trim((string) ($assignRow['id'] ?? $assignRow['assignment_uuid'] ?? ''));
-                            if ($assignUuid === '') {
-                                continue;
-                            }
-                            $ea = $existingAssignByUuid->get($assignUuid);
-                            if (! $ea instanceof SaCampaignContentAssignment
-                                || ! $existingContent instanceof SaCampaignContent
-                                || (int) $ea->campaign_content_id !== (int) $existingContent->id) {
+                        $contentUuid = trim((string) ($contentRow['id'] ?? $contentRow['content_uuid'] ?? ''));
+                        $existingContent = null;
+                        if ($contentUuid !== '') {
+                            $existingContent = $existingContentsByUuid->get($contentUuid);
+                            if (! $existingContent instanceof SaCampaignContent) {
                                 return $this->fail(
                                     422,
-                                    ['cross_campaign_assignment_reference'],
-                                    ["contents.{$ci}.assignments.{$ai}.id" => ["Assignment '{$assignUuid}' does not belong to this Content/Campaign."]]
+                                    ['cross_campaign_content_reference'],
+                                    ["contents.{$ci}.id" => ["Content '{$contentUuid}' does not belong to this Campaign."]]
                                 );
                             }
-                            if (isset($seenAssignUuids[$assignUuid])) {
+                            if (isset($retainedContentIds[(int) $existingContent->id])) {
                                 return $this->fail(
                                     422,
-                                    ['duplicate_assignment_id'],
-                                    ["contents.{$ci}.assignments.{$ai}.id" => ["Duplicate assignment '{$assignUuid}'."]]
+                                    ['duplicate_content_id'],
+                                    ["contents.{$ci}.id" => ["Duplicate Content '{$contentUuid}' in payload."]]
                                 );
                             }
-                            $seenAssignUuids[$assignUuid] = true;
-                            $contentPrepared['assignments'][$ai]['existing_model'] = $ea;
+                            $retainedContentIds[(int) $existingContent->id] = true;
                         }
+
+                        $externalRef = trim((string) ($contentRow['external_ref'] ?? ''));
+                        $externalRef = $externalRef !== '' ? $externalRef : null;
+                        if ($externalRef !== null) {
+                            if (isset($seenExternalRefs[$externalRef])) {
+                                return $this->fail(
+                                    422,
+                                    ['external_ref_duplicate'],
+                                    ["contents.{$ci}.external_ref" => ["Duplicate external_ref '{$externalRef}'."]]
+                                );
+                            }
+                            $seenExternalRefs[$externalRef] = true;
+                        }
+
+                        $builtContent = $this->prepareContentWithAssignments(
+                            $contentRow,
+                            $ci,
+                            $preparedTags,
+                            $tagsByKey,
+                            $tagsById,
+                            $externalRef,
+                            $tagsByPlanUuid,
+                        );
+                        if (! ($builtContent['ok'] ?? false)) {
+                            return $builtContent;
+                        }
+
+                        $contentPrepared = $builtContent['content'];
+                        $contentPrepared['existing_model'] = $existingContent;
+
+                        // Validate assignment IDs against current campaign & content
+                        $rawAssigns = $contentRow['assignments'] ?? $contentRow['tag_assignments'] ?? [];
+                        if (is_array($rawAssigns)) {
+                            $seenAssignUuids = [];
+                            foreach ($rawAssigns as $ai => $assignRow) {
+                                if (! is_array($assignRow)) {
+                                    continue;
+                                }
+                                $assignUuid = trim((string) ($assignRow['id'] ?? $assignRow['assignment_uuid'] ?? ''));
+                                if ($assignUuid === '') {
+                                    continue;
+                                }
+                                $ea = $existingAssignByUuid->get($assignUuid);
+                                if (! $ea instanceof SaCampaignContentAssignment
+                                    || ! $existingContent instanceof SaCampaignContent
+                                    || (int) $ea->campaign_content_id !== (int) $existingContent->id) {
+                                    return $this->fail(
+                                        422,
+                                        ['cross_campaign_assignment_reference'],
+                                        ["contents.{$ci}.assignments.{$ai}.id" => ["Assignment '{$assignUuid}' does not belong to this Content/Campaign."]]
+                                    );
+                                }
+                                if (isset($seenAssignUuids[$assignUuid])) {
+                                    return $this->fail(
+                                        422,
+                                        ['duplicate_assignment_id'],
+                                        ["contents.{$ci}.assignments.{$ai}.id" => ["Duplicate assignment '{$assignUuid}'."]]
+                                    );
+                                }
+                                $seenAssignUuids[$assignUuid] = true;
+                                $contentPrepared['assignments'][$ai]['existing_model'] = $ea;
+                            }
+                        }
+
+                        if ($existingContent instanceof SaCampaignContent && isset($executedContentIds[(int) $existingContent->id])) {
+                            $existingAssignsForContent = $existingAssignments
+                                ->where('campaign_content_id', $existingContent->id)
+                                ->values()
+                                ->all();
+                            $immutableErr = $this->validateImmutableExecutedContent(
+                                $existingContent,
+                                $existingAssignsForContent,
+                                $contentPrepared,
+                                $preparedTags,
+                                $ci,
+                            );
+                            if ($immutableErr !== null) {
+                                return $immutableErr;
+                            }
+                        }
+
+                        $preparedContents[] = $contentPrepared;
                     }
 
-                    $preparedContents[] = $contentPrepared;
+                    if ($isPausedLocked) {
+                        foreach (array_keys($executedContentIds) as $execCid) {
+                            if (! isset($retainedContentIds[$execCid])) {
+                                return $this->fail(
+                                    422,
+                                    ['executed_content_immutable'],
+                                    ['contents' => ['Already executed or claimed Content items cannot be deleted while Paused.']]
+                                );
+                            }
+                        }
+                    }
                 }
 
                 // --- Reconciliation persistence (all validations passed) ---
 
                 // 1. Delete removed Action Tags (and their assignments explicitly for SQLite/FK-agnostic safety)
-                $removedTagIds = $existingTags
-                    ->filter(fn (SaCampaignActionTag $pt): bool => ! isset($retainedTagIds[(int) $pt->id]))
-                    ->pluck('id')
-                    ->all();
-                if ($removedTagIds !== []) {
-                    SaCampaignContentAssignment::query()->whereIn('campaign_action_tag_id', $removedTagIds)->delete();
-                    SaCampaignActionTag::query()->whereIn('id', $removedTagIds)->delete();
+                if (! $isPausedLocked) {
+                    $removedTagIds = $existingTags
+                        ->filter(fn (SaCampaignActionTag $pt): bool => ! isset($retainedTagIds[(int) $pt->id]))
+                        ->pluck('id')
+                        ->all();
+                    if ($removedTagIds !== []) {
+                        SaCampaignContentAssignment::query()->whereIn('campaign_action_tag_id', $removedTagIds)->delete();
+                        SaCampaignActionTag::query()->whereIn('id', $removedTagIds)->delete();
+                    }
                 }
 
                 // 2. Update retained Action Tags & create new Action Tags
                 $tagModelsByIdx = [];
-                foreach ($preparedTags as $idx => $tagData) {
-                    $existingPt = $tagData['existing_model'] ?? null;
-                    if ($existingPt instanceof SaCampaignActionTag) {
-                        $existingPt->shortcode_mapping = $tagData['shortcode_mapping'];
-                        $existingPt->shortcode_mapping_version = $tagData['shortcode_mapping_version'];
-                        $existingPt->sort_order = $idx;
-                        if (Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasColumn('sa_campaign_action_tags', 'interval_minutes')) {
-                            $existingPt->interval_minutes = (int) ($tagData['interval_minutes'] ?? ($existingPt->interval_minutes ?? 0));
-                        }
-                        $existingPt->save();
-                        $tagModelsByIdx[$idx] = $existingPt;
-                    } else {
-                        $newTagAttrs = [
-                            'plan_tag_uuid' => (string) Str::uuid(),
-                            'campaign_id' => $locked->id,
-                            'action_tag_id' => $tagData['action_tag_id'],
-                            'action_tag_key' => $tagData['action_tag_key'],
-                            'site_id' => $tagData['site_id'],
-                            'site_key' => $tagData['site_key'],
-                            'cms_type' => $tagData['cms_type'],
-                            'platform' => $tagData['platform'],
-                            'package_id' => $tagData['package_id'],
-                            'script_id' => $tagData['script_id'],
-                            'script_name' => $tagData['script_name'],
-                            'release_id' => $tagData['release_id'],
-                            'script_version' => $tagData['script_version'],
-                            'script_content_digest' => $tagData['script_content_digest'],
-                            'script_execution_digest' => $tagData['script_execution_digest'],
-                            'resolution_source' => $tagData['resolution_source'],
-                            'source_action_tag_key' => $tagData['source_action_tag_key'],
-                            'cms_scope' => $tagData['cms_scope'],
-                            'manifest_snapshot' => $tagData['manifest_snapshot'],
-                            'shortcode_mapping' => $tagData['shortcode_mapping'],
-                            'shortcode_mapping_version' => $tagData['shortcode_mapping_version'],
-                            'is_enabled' => true,
-                            'sort_order' => $idx,
-                        ];
-                        if (Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasColumn('sa_campaign_action_tags', 'interval_minutes')) {
-                            $newTagAttrs['interval_minutes'] = (int) ($tagData['interval_minutes'] ?? 0);
-                        }
-                        $tagModelsByIdx[$idx] = SaCampaignActionTag::query()->create($newTagAttrs);
+                if ($rawTags === null) {
+                    foreach ($preparedTags as $idx => $tagData) {
+                        $tagModelsByIdx[$idx] = $tagData['existing_model'];
                     }
-                }
-
-                // 3. Delete removed Contents first (prevents external_ref unique index collisions)
-                $removedContentIds = $existingContents
-                    ->filter(fn (SaCampaignContent $c): bool => ! isset($retainedContentIds[(int) $c->id]))
-                    ->pluck('id')
-                    ->all();
-                if ($removedContentIds !== []) {
-                    SaCampaignContentAssignment::query()->whereIn('campaign_content_id', $removedContentIds)->delete();
-                    SaCampaignContent::query()->whereIn('id', $removedContentIds)->delete();
-                }
-
-                // Clear external_ref on retained contents temporarily if needed to prevent swap collisions
-                if ($retainedContentIds !== []) {
-                    SaCampaignContent::query()
-                        ->whereIn('id', array_keys($retainedContentIds))
-                        ->update(['external_ref' => null]);
-                }
-
-                // 4. Update retained Contents / create new Contents, and reconcile their assignments
-                foreach ($preparedContents as $cRow) {
-                    /** @var SaCampaignContent|null $content */
-                    $content = $cRow['existing_model'] ?? null;
-                    if ($content instanceof SaCampaignContent) {
-                        $content->external_ref = $cRow['external_ref'];
-                        $content->sort_order = $cRow['sort_order'];
-                        if (SocialAutomationSchema::campaignShortcodeReady()) {
-                            $content->source_format = $cRow['source_format'];
-                            $content->raw_source = $cRow['raw_source'];
-                        }
-                        $content->save();
-                    } else {
-                        $contentAttrs = [
-                            'content_uuid' => (string) Str::uuid(),
-                            'campaign_id' => $locked->id,
-                            'external_ref' => $cRow['external_ref'],
-                            'sort_order' => $cRow['sort_order'],
-                            'status' => CampaignContentStatus::Pending->value,
-                            'input' => [],
-                            'assigned_account_id' => null,
-                        ];
-                        if (SocialAutomationSchema::campaignShortcodeReady()) {
-                            $contentAttrs['source_format'] = $cRow['source_format'];
-                            $contentAttrs['raw_source'] = $cRow['raw_source'];
-                            $contentAttrs['mapping_version'] = null;
-                        }
-                        $content = SaCampaignContent::query()->create($contentAttrs);
-                    }
-
-                    $retainedAssignIds = [];
-                    foreach ($cRow['assignments'] as $aRow) {
-                        /** @var SaCampaignActionTag $planTag */
-                        $planTag = $tagModelsByIdx[$aRow['tag_idx']];
-                        /** @var SaCampaignContentAssignment|null $existingAssign */
-                        $existingAssign = $aRow['existing_model']
-                            ?? ($existingAssignByContentAndTag[(int) $content->id][(int) $planTag->id] ?? null);
-
-                        if ($existingAssign instanceof SaCampaignContentAssignment) {
-                            $existingAssign->campaign_action_tag_id = $planTag->id;
-                            $existingAssign->package_id = $planTag->package_id;
-                            $existingAssign->release_id = $planTag->release_id;
-                            $existingAssign->script_id = $planTag->script_id;
-                            $existingAssign->script_version = $planTag->script_version;
-                            $existingAssign->source_format = $aRow['source_format'];
-                            $existingAssign->shortcode_mapping = $aRow['shortcode_mapping'];
-                            $existingAssign->mapping_version = $aRow['mapping_version'];
-                            $existingAssign->input = $aRow['input'];
-                            $existingAssign->save();
-                            $retainedAssignIds[(int) $existingAssign->id] = true;
+                } else {
+                    foreach ($preparedTags as $idx => $tagData) {
+                        $existingPt = $tagData['existing_model'] ?? null;
+                        if ($existingPt instanceof SaCampaignActionTag) {
+                            $existingPt->shortcode_mapping = $tagData['shortcode_mapping'];
+                            $existingPt->shortcode_mapping_version = $tagData['shortcode_mapping_version'];
+                            if (! $isPausedLocked) {
+                                $existingPt->sort_order = $idx;
+                            }
+                            if (Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasColumn('sa_campaign_action_tags', 'interval_minutes')) {
+                                $existingPt->interval_minutes = (int) ($tagData['interval_minutes'] ?? ($existingPt->interval_minutes ?? 0));
+                            }
+                            $existingPt->save();
+                            $tagModelsByIdx[$idx] = $existingPt;
                         } else {
-                            $createdAssign = SaCampaignContentAssignment::query()->create([
-                                'assignment_uuid' => (string) Str::uuid(),
+                            $newTagAttrs = [
+                                'plan_tag_uuid' => (string) Str::uuid(),
                                 'campaign_id' => $locked->id,
-                                'campaign_content_id' => $content->id,
-                                'campaign_action_tag_id' => $planTag->id,
-                                'package_id' => $planTag->package_id,
-                                'release_id' => $planTag->release_id,
-                                'script_id' => $planTag->script_id,
-                                'script_version' => $planTag->script_version,
-                                'source_format' => $aRow['source_format'],
-                                'shortcode_mapping' => $aRow['shortcode_mapping'],
-                                'mapping_version' => $aRow['mapping_version'],
-                                'input' => $aRow['input'],
-                                'status' => CampaignContentStatus::Pending->value,
-                            ]);
-                            $retainedAssignIds[(int) $createdAssign->id] = true;
+                                'action_tag_id' => $tagData['action_tag_id'],
+                                'action_tag_key' => $tagData['action_tag_key'],
+                                'site_id' => $tagData['site_id'],
+                                'site_key' => $tagData['site_key'],
+                                'cms_type' => $tagData['cms_type'],
+                                'platform' => $tagData['platform'],
+                                'package_id' => $tagData['package_id'],
+                                'script_id' => $tagData['script_id'],
+                                'script_name' => $tagData['script_name'],
+                                'release_id' => $tagData['release_id'],
+                                'script_version' => $tagData['script_version'],
+                                'script_content_digest' => $tagData['script_content_digest'],
+                                'script_execution_digest' => $tagData['script_execution_digest'],
+                                'resolution_source' => $tagData['resolution_source'],
+                                'source_action_tag_key' => $tagData['source_action_tag_key'],
+                                'cms_scope' => $tagData['cms_scope'],
+                                'manifest_snapshot' => $tagData['manifest_snapshot'],
+                                'shortcode_mapping' => $tagData['shortcode_mapping'],
+                                'shortcode_mapping_version' => $tagData['shortcode_mapping_version'],
+                                'is_enabled' => true,
+                                'sort_order' => $idx,
+                            ];
+                            if (Schema::connection(SocialAutomationServiceConfig::CONNECTION)->hasColumn('sa_campaign_action_tags', 'interval_minutes')) {
+                                $newTagAttrs['interval_minutes'] = (int) ($tagData['interval_minutes'] ?? 0);
+                            }
+                            $tagModelsByIdx[$idx] = SaCampaignActionTag::query()->create($newTagAttrs);
                         }
                     }
-
-                    $assignDeleteQuery = SaCampaignContentAssignment::query()
-                        ->where('campaign_content_id', $content->id);
-                    if ($retainedAssignIds !== []) {
-                        $assignDeleteQuery->whereNotIn('id', array_keys($retainedAssignIds));
-                    }
-                    $assignDeleteQuery->delete();
                 }
 
-                $campaignPlatform = count($platforms) === 1 ? (string) array_key_first($platforms) : 'multi';
+                if ($rawContents !== null) {
+                    // 3. Delete removed Contents first (prevents external_ref unique index collisions)
+                    $removedContentIds = $existingContents
+                        ->filter(fn (SaCampaignContent $c): bool => ! isset($retainedContentIds[(int) $c->id]) && ! isset($executedContentIds[(int) $c->id]))
+                        ->pluck('id')
+                        ->all();
+                    if ($removedContentIds !== []) {
+                        SaCampaignContentAssignment::query()->whereIn('campaign_content_id', $removedContentIds)->delete();
+                        SaCampaignContent::query()->whereIn('id', $removedContentIds)->delete();
+                    }
+
+                    // Clear external_ref on mutable retained contents temporarily to prevent swap collisions
+                    $mutableRetainedIds = array_values(array_filter(
+                        array_keys($retainedContentIds),
+                        static fn (int $cid): bool => ! isset($executedContentIds[$cid])
+                    ));
+                    if ($mutableRetainedIds !== []) {
+                        SaCampaignContent::query()
+                            ->whereIn('id', $mutableRetainedIds)
+                            ->update(['external_ref' => null]);
+                    }
+
+                    // 4. Update retained mutable Contents / create new Contents, and reconcile their assignments
+                    foreach ($preparedContents as $cRow) {
+                        /** @var SaCampaignContent|null $content */
+                        $content = $cRow['existing_model'] ?? null;
+                        if ($content instanceof SaCampaignContent && isset($executedContentIds[(int) $content->id])) {
+                            continue;
+                        }
+                        if ($content instanceof SaCampaignContent) {
+                            $content->external_ref = $cRow['external_ref'];
+                            $content->sort_order = $cRow['sort_order'];
+                            if (SocialAutomationSchema::campaignShortcodeReady()) {
+                                $content->source_format = $cRow['source_format'];
+                                $content->raw_source = $cRow['raw_source'];
+                            }
+                            $content->save();
+                        } else {
+                            $contentAttrs = [
+                                'content_uuid' => (string) Str::uuid(),
+                                'campaign_id' => $locked->id,
+                                'external_ref' => $cRow['external_ref'],
+                                'sort_order' => $cRow['sort_order'],
+                                'status' => CampaignContentStatus::Pending->value,
+                                'input' => [],
+                                'assigned_account_id' => null,
+                            ];
+                            if (SocialAutomationSchema::campaignShortcodeReady()) {
+                                $contentAttrs['source_format'] = $cRow['source_format'];
+                                $contentAttrs['raw_source'] = $cRow['raw_source'];
+                                $contentAttrs['mapping_version'] = null;
+                            }
+                            $content = SaCampaignContent::query()->create($contentAttrs);
+                        }
+
+                        $retainedAssignIds = [];
+                        foreach ($cRow['assignments'] as $aRow) {
+                            /** @var SaCampaignActionTag $planTag */
+                            $planTag = $tagModelsByIdx[$aRow['tag_idx']];
+                            /** @var SaCampaignContentAssignment|null $existingAssign */
+                            $existingAssign = $aRow['existing_model']
+                                ?? ($existingAssignByContentAndTag[(int) $content->id][(int) $planTag->id] ?? null);
+
+                            if ($existingAssign instanceof SaCampaignContentAssignment) {
+                                $existingAssign->campaign_action_tag_id = $planTag->id;
+                                $existingAssign->package_id = $planTag->package_id;
+                                $existingAssign->release_id = $planTag->release_id;
+                                $existingAssign->script_id = $planTag->script_id;
+                                $existingAssign->script_version = $planTag->script_version;
+                                $existingAssign->source_format = $aRow['source_format'];
+                                $existingAssign->shortcode_mapping = $aRow['shortcode_mapping'];
+                                $existingAssign->mapping_version = $aRow['mapping_version'];
+                                $existingAssign->input = $aRow['input'];
+                                $existingAssign->save();
+                                $retainedAssignIds[(int) $existingAssign->id] = true;
+                            } else {
+                                $createdAssign = SaCampaignContentAssignment::query()->create([
+                                    'assignment_uuid' => (string) Str::uuid(),
+                                    'campaign_id' => $locked->id,
+                                    'campaign_content_id' => $content->id,
+                                    'campaign_action_tag_id' => $planTag->id,
+                                    'package_id' => $planTag->package_id,
+                                    'release_id' => $planTag->release_id,
+                                    'script_id' => $planTag->script_id,
+                                    'script_version' => $planTag->script_version,
+                                    'source_format' => $aRow['source_format'],
+                                    'shortcode_mapping' => $aRow['shortcode_mapping'],
+                                    'mapping_version' => $aRow['mapping_version'],
+                                    'input' => $aRow['input'],
+                                    'status' => CampaignContentStatus::Pending->value,
+                                ]);
+                                $retainedAssignIds[(int) $createdAssign->id] = true;
+                            }
+                        }
+
+                        $assignDeleteQuery = SaCampaignContentAssignment::query()
+                            ->where('campaign_content_id', $content->id);
+                        if ($retainedAssignIds !== []) {
+                            $assignDeleteQuery->whereNotIn('id', array_keys($retainedAssignIds));
+                        }
+                        $assignDeleteQuery->delete();
+                    }
+                }
+
                 $meta['v2_plan'] = true;
                 $meta['tag_count'] = count($preparedTags);
                 $meta['draft_revision'] = $currentRevision + 1;
 
-                $locked->name = $name;
-                $locked->platform = $campaignPlatform;
+                if (! $isPausedLocked) {
+                    $campaignPlatform = count($platforms) === 1 ? (string) array_key_first($platforms) : 'multi';
+                    $locked->name = $name;
+                    $locked->platform = $campaignPlatform;
+                    $locked->run_mode = $runMode->value;
+                }
                 $locked->execution_mode = $mode->value;
-                $locked->run_mode = $runMode->value;
                 $locked->resource_recheck_seconds = $recheckSeconds;
                 $locked->meta = $meta;
                 $locked->save();
@@ -1875,5 +2009,141 @@ final class CampaignV2PlanService
             'field_errors' => $fieldErrors,
             'message' => $firstMessage,
         ];
+    }
+
+    /**
+     * Reject Step 1 structural changes on a retained Action Tag when Campaign is paused.
+     *
+     * @param  array<string, mixed>  $tagRow
+     * @return array<string, mixed>|null
+     */
+    private function validatePausedTagStep1Immutability(SaCampaignActionTag $existing, array $tagRow, int $index): ?array
+    {
+        $stringFields = [
+            'site_key' => $existing->site_key,
+            'cms_type' => $existing->cms_type,
+            'platform' => $existing->platform,
+        ];
+        foreach ($stringFields as $field => $persisted) {
+            if (array_key_exists($field, $tagRow) && trim((string) $tagRow[$field]) !== '' && strcasecmp(trim((string) $tagRow[$field]), (string) $persisted) !== 0) {
+                return $this->fail(
+                    422,
+                    ['step1_immutable_after_start'],
+                    ["action_tags.{$index}.{$field}" => ["{$field} is immutable after Campaign start."]]
+                );
+            }
+        }
+
+        $intFields = [
+            'site_id' => $existing->site_id,
+            'package_id' => $existing->package_id,
+        ];
+        foreach ($intFields as $field => $persisted) {
+            if (array_key_exists($field, $tagRow) && $tagRow[$field] !== null && $tagRow[$field] !== '' && (int) $tagRow[$field] !== (int) $persisted) {
+                return $this->fail(
+                    422,
+                    ['step1_immutable_after_start'],
+                    ["action_tags.{$index}.{$field}" => ["{$field} is immutable after Campaign start."]]
+                );
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  array<int, int>  $jobContentIds
+     */
+    private function isContentImmutableAfterExecution(SaCampaignContent $content, array $jobContentIds): bool
+    {
+        if (! in_array((string) $content->status, [
+            CampaignContentStatus::Pending->value,
+            CampaignContentStatus::WaitingResources->value,
+        ], true)) {
+            return true;
+        }
+        if ($content->current_job_id !== null || $content->assigned_account_id !== null) {
+            return true;
+        }
+
+        return isset($jobContentIds[(int) $content->id]);
+    }
+
+    /**
+     * Ensure an already-executed/claimed Content item and its assignments are not modified.
+     *
+     * @param  list<SaCampaignContentAssignment>  $existingAssigns
+     * @param  array<string, mixed>  $contentPrepared
+     * @param  list<array<string, mixed>>  $preparedTags
+     * @return array<string, mixed>|null
+     */
+    private function validateImmutableExecutedContent(
+        SaCampaignContent $existingContent,
+        array $existingAssigns,
+        array $contentPrepared,
+        array $preparedTags,
+        int $ci,
+    ): ?array {
+        if ((string) ($contentPrepared['external_ref'] ?? '') !== (string) ($existingContent->external_ref ?? '')) {
+            return $this->fail(
+                422,
+                ['executed_content_immutable'],
+                ["contents.{$ci}.external_ref" => ['Executed or claimed Content cannot be modified while Paused.']]
+            );
+        }
+        if ((int) $contentPrepared['sort_order'] !== (int) $existingContent->sort_order) {
+            return $this->fail(
+                422,
+                ['executed_content_immutable'],
+                ["contents.{$ci}.sort_order" => ['Executed or claimed Content order cannot be modified while Paused.']]
+            );
+        }
+        if (SocialAutomationSchema::campaignShortcodeReady()) {
+            if ((string) ($contentPrepared['raw_source'] ?? '') !== (string) ($existingContent->raw_source ?? '')
+                || (string) ($contentPrepared['source_format'] ?? '') !== (string) ($existingContent->source_format ?? '')) {
+                return $this->fail(
+                    422,
+                    ['executed_content_immutable'],
+                    ["contents.{$ci}.raw_source" => ['Executed or claimed Content source cannot be modified while Paused.']]
+                );
+            }
+        }
+
+        $submittedAssigns = $contentPrepared['assignments'] ?? [];
+        if (count($submittedAssigns) !== count($existingAssigns)) {
+            return $this->fail(
+                422,
+                ['executed_content_immutable'],
+                ["contents.{$ci}.assignments" => ['Executed or claimed Content assignments cannot be modified while Paused.']]
+            );
+        }
+
+        $existingByTagId = [];
+        foreach ($existingAssigns as $ea) {
+            $existingByTagId[(int) $ea->campaign_action_tag_id] = $ea;
+        }
+        foreach ($submittedAssigns as $ai => $aRow) {
+            $pt = $preparedTags[$aRow['tag_idx']]['existing_model'] ?? null;
+            $ptId = $pt instanceof SaCampaignActionTag ? (int) $pt->id : 0;
+            $ea = $existingByTagId[$ptId] ?? null;
+            if (! $ea instanceof SaCampaignContentAssignment) {
+                return $this->fail(
+                    422,
+                    ['executed_content_immutable'],
+                    ["contents.{$ci}.assignments.{$ai}" => ['Executed or claimed Content Action Tag assignment cannot be changed.']]
+                );
+            }
+            $existingInput = is_array($ea->input) ? $ea->input : [];
+            $submittedInput = is_array($aRow['input'] ?? null) ? $aRow['input'] : [];
+            if ($existingInput != $submittedInput) {
+                return $this->fail(
+                    422,
+                    ['executed_content_immutable'],
+                    ["contents.{$ci}.assignments.{$ai}.input" => ['Executed or claimed Content input cannot be modified while Paused.']]
+                );
+            }
+        }
+
+        return null;
     }
 }
