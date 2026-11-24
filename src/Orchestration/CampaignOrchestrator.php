@@ -477,7 +477,10 @@ final class CampaignOrchestrator
                     if ($selection['selected'] === []) {
                         $content->status = CampaignContentStatus::WaitingResources->value;
                         $content->last_error_code = 'waiting_resources';
-                        $content->last_error_message = 'No eligible online client/account/browser for target site '.$planTag->site_key;
+                        $content->last_error_message = $this->formatWaitingResourcesMessage(
+                            (string) $planTag->site_key,
+                            $selection['skip_reasons'] ?? [],
+                        );
                         $content->save();
                         $stillWaiting++;
                         continue;
@@ -1478,6 +1481,7 @@ final class CampaignOrchestrator
         // Unknown keeps global lock (ACTIVE_STATUSES includes unknown).
 
         $sessions = [];
+        $prefilterSkipReasons = [];
         foreach (SaBrowserSession::query()->get() as $session) {
             $agent = null;
             foreach ($agents as $a) {
@@ -1487,10 +1491,15 @@ final class CampaignOrchestrator
                 }
             }
             if ($agent === null) {
+                $prefilterSkipReasons[] = 'agent_installation_mismatch';
                 continue;
             }
-            if (! (bool) ($session->dispatch_enabled ?? true)
-                || ! in_array((string) ($session->session_state ?? 'candidate'), ['candidate', 'verified'], true)) {
+            if (! (bool) ($session->dispatch_enabled ?? true)) {
+                $prefilterSkipReasons[] = 'session_dispatch_disabled';
+                continue;
+            }
+            if (! in_array((string) ($session->session_state ?? 'candidate'), ['candidate', 'verified'], true)) {
+                $prefilterSkipReasons[] = 'session_state_ineligible';
                 continue;
             }
 
@@ -1500,13 +1509,16 @@ final class CampaignOrchestrator
                 ->first();
             $accountId = $activeBind?->account_id ?? $session->account_id;
             if ($accountId === null || (int) $accountId <= 0) {
+                $prefilterSkipReasons[] = 'account_unbound';
                 continue;
             }
             $account = SaAccount::query()->find($accountId);
             if (! $account instanceof SaAccount) {
+                $prefilterSkipReasons[] = 'account_unbound';
                 continue;
             }
             if ((string) $account->installation_id !== (string) $campaign->installation_id) {
+                $prefilterSkipReasons[] = 'account_installation_mismatch';
                 continue;
             }
             $targetPlatform = $planTag instanceof SaCampaignActionTag
@@ -1515,18 +1527,24 @@ final class CampaignOrchestrator
             $matchesPlatform = strcasecmp((string) $account->platform, $targetPlatform) === 0
                 || ($planTag instanceof SaCampaignActionTag && strcasecmp((string) $account->platform, (string) $planTag->site_key) === 0);
             if (! $matchesPlatform) {
+                $prefilterSkipReasons[] = 'platform_mismatch';
                 continue;
             }
             if ($requiredAccountId !== null && (int) $accountId !== $requiredAccountId) {
+                $prefilterSkipReasons[] = 'account_pin_mismatch';
                 continue;
             }
             if (! $this->modePolicy->canAssignAccount($mode, (int) $accountId, $assignedIds, $busyInCampaign)) {
+                $prefilterSkipReasons[] = $mode === CampaignExecutionMode::OneAccountOneJob
+                    ? 'account_already_assigned_in_campaign'
+                    : 'account_busy_in_campaign';
                 continue;
             }
 
             $affinity = SaAccountDeviceAffinity::query()->where('account_id', $accountId)->first();
             if ($affinity instanceof SaAccountDeviceAffinity && $affinity->affinity_until?->isFuture()
                 && (int) $affinity->agent_id !== (int) $session->agent_id) {
+                $prefilterSkipReasons[] = 'account_device_affinity_mismatch';
                 continue;
             }
 
@@ -1576,11 +1594,51 @@ final class CampaignOrchestrator
         }
 
         $result = $this->eligibility->select($agents, $sessions, $criteria);
+        $skipReasons = array_values(array_unique(array_merge($result['skip_reasons'], $prefilterSkipReasons)));
 
         return [
             'selected' => $result['selected'],
-            'skip_reasons' => $result['skip_reasons'],
+            'skip_reasons' => $skipReasons,
         ];
+    }
+
+    /**
+     * Format a safe, specific waiting_resources diagnostic message from selector skip reasons.
+     *
+     * @param  list<string>  $skipReasons
+     */
+    private function formatWaitingResourcesMessage(string $siteKey, array $skipReasons): string
+    {
+        $priorityMap = [
+            'account_already_assigned_in_campaign' => "Account already consumed in this campaign (execution_mode=one_account_one_job) for target site {$siteKey}",
+            'account_busy_in_campaign' => "Account is currently busy with another job in this campaign for target site {$siteKey}",
+            'account_locked' => "Account lease/job is currently occupied for target site {$siteKey}",
+            'session_dispatch_disabled' => "Browser session is not dispatch-enabled for target site {$siteKey}",
+            'session_not_ready' => "No ready browser session for target site {$siteKey}",
+            'session_busy' => "Browser session is currently busy for target site {$siteKey}",
+            'session_state_ineligible' => "Browser session state is not eligible for target site {$siteKey}",
+            'agent_offline' => "No active client heartbeat (client offline) for target site {$siteKey}",
+            'agent_unavailable' => "Client is paused, disabled, or in error state for target site {$siteKey}",
+            'agent_at_capacity' => "Client concurrency capacity is full for target site {$siteKey}",
+            'admin_not_runner' => "Only admin client online (runner required) for target site {$siteKey}",
+            'runtime_incompatible' => "Client runtime version incompatible for target site {$siteKey}",
+            'runtime_version_missing' => "Client runtime version missing for target site {$siteKey}",
+            'capability_mismatch' => "Client/browser missing required capabilities for target site {$siteKey}",
+            'account_device_affinity_mismatch' => "Account device affinity pinned to another client for target site {$siteKey}",
+            'account_unbound' => "No matching account bound to browser session for target site {$siteKey}",
+            'account_installation_mismatch' => "Account installation mismatch for target site {$siteKey}",
+            'agent_installation_mismatch' => "Client installation mismatch for target site {$siteKey}",
+            'account_pin_mismatch' => "Pinned account does not match available session for target site {$siteKey}",
+            'platform_mismatch' => "No matching account/browser assignment for target site {$siteKey}",
+        ];
+
+        foreach ($priorityMap as $reason => $message) {
+            if (in_array($reason, $skipReasons, true)) {
+                return $message;
+            }
+        }
+
+        return 'No eligible online client/account/browser for target site '.$siteKey;
     }
 
     /**
