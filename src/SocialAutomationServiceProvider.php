@@ -567,6 +567,12 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                         ->name('social-automation.campaigns.articles.destroy');
                 });
                 Route::prefix('api/campaign-contents')->group(function (): void {
+                    Route::post('/{id}/block', [StaffCampaignContentController::class, 'block'])
+                        ->whereUuid('id')
+                        ->name('social-automation.campaign-contents.block');
+                    Route::post('/{id}/unblock', [StaffCampaignContentController::class, 'unblock'])
+                        ->whereUuid('id')
+                        ->name('social-automation.campaign-contents.unblock');
                     Route::post('/{id}/retry', [StaffCampaignContentController::class, 'retry'])
                         ->whereUuid('id')
                         ->name('social-automation.campaign-contents.retry');

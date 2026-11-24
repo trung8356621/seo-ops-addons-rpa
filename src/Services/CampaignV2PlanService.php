@@ -1089,6 +1089,7 @@ final class CampaignV2PlanService
             'total' => 0,
             'pending' => 0,
             'waiting_resources' => 0,
+            'user_blocked' => 0,
             'running' => 0,
             'success' => 0,
             'failed_locked' => 0,
@@ -1157,12 +1158,24 @@ final class CampaignV2PlanService
                 }
             }
 
+            $canBlock = false;
+            $canUnblock = false;
+            if ($campaignAllowsRetry && ! $hasActiveJobForRow) {
+                if ($st === CampaignContentStatus::Pending->value || $st === CampaignContentStatus::WaitingResources->value) {
+                    $canBlock = true;
+                } elseif ($st === CampaignContentStatus::UserBlocked->value) {
+                    $canUnblock = true;
+                }
+            }
+
             $row = [
                 'id' => (string) $c->content_uuid,
                 'content_uuid' => (string) $c->content_uuid,
                 'external_ref' => $c->external_ref,
                 'status' => $st,
                 'queue_state' => $queueState,
+                'can_block' => $canBlock,
+                'can_unblock' => $canUnblock,
                 'can_retry' => $canRetry,
                 'blocked_by_gate' => $isBlockedByGate ? $contentGate : null,
                 'next_run_at' => $contentNextRunAt,

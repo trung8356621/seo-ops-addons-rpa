@@ -1417,4 +1417,131 @@ final class ActionTagSequentialQueueAndRecoveryTest extends TestCase
         self::assertTrue($byIdUnknown[$items[0]->content_uuid]['can_retry']);
         self::assertFalse($byIdUnknown[$items[1]->content_uuid]['can_retry']);
     }
+
+    public function test_user_block_and_unblock_semantics_concurrency_idempotency_and_legacy_compat(): void
+    {
+        $tagA = $this->seedActionTagAndScript('maytuicanvas', 'maytuicanvas.create_post');
+        $tagB = $this->seedActionTagAndScript('congtybalo', 'congtybalo.create_post');
+        $clientA = $this->seedClient('maytuicanvas', 'may-blk-1');
+        $clientB = $this->seedClient('congtybalo', 'balo-blk-1');
+        $setup = $this->createV2RunningCampaign([
+            ['tag' => $tagA['tag'], 'pkg' => $tagA['pkg'], 'rel' => $tagA['rel'], 'count' => 4],
+            ['tag' => $tagB['tag'], 'pkg' => $tagB['pkg'], 'rel' => $tagB['rel'], 'count' => 2],
+        ]);
+        $camp = $setup['campaign'];
+        $aItems = $setup['contents']['maytuicanvas.create_post'];
+        $bItems = $setup['contents']['congtybalo.create_post'];
+        $origSortOrder0 = (int) $aItems[0]->sort_order;
+
+        // 1. Block Pending Content aItems[0]
+        $blk0 = $this->contentController->block(
+            Request::create('/', 'POST', ['idempotency_key' => 'blk-0']),
+            $aItems[0]->content_uuid,
+        );
+        self::assertSame(200, $blk0->getStatusCode(), $blk0->getContent());
+        self::assertSame(CampaignContentStatus::UserBlocked->value, $aItems[0]->fresh()->status);
+        self::assertSame(CampaignStatus::Running->value, $camp->fresh()->status);
+        self::assertEmpty($camp->fresh()->meta['action_tag_gates'] ?? []);
+
+        // Duplicate Block is idempotent
+        $blk0Dup = $this->contentController->block(
+            Request::create('/', 'POST', ['idempotency_key' => 'blk-0-dup']),
+            $aItems[0]->content_uuid,
+        );
+        self::assertSame(200, $blk0Dup->getStatusCode());
+        self::assertTrue($blk0Dup->getData(true)['idempotent'] ?? false);
+
+        // Detail DTO exposes user_blocked, can_block=false, can_unblock=true, can_retry=false
+        $dto1 = $this->campaigns->detailDto($camp->fresh());
+        $byId1 = collect($dto1['contents'])->keyBy('id');
+        self::assertSame('user_blocked', $byId1[$aItems[0]->content_uuid]['status']);
+        self::assertSame('user_blocked', $byId1[$aItems[0]->content_uuid]['queue_state']);
+        self::assertFalse($byId1[$aItems[0]->content_uuid]['can_block']);
+        self::assertTrue($byId1[$aItems[0]->content_uuid]['can_unblock']);
+        self::assertFalse($byId1[$aItems[0]->content_uuid]['can_retry']);
+        self::assertTrue($byId1[$aItems[1]->content_uuid]['can_block']);
+        self::assertSame(1, $dto1['summary']['user_blocked']);
+
+        // 3 & 4 & 12. Scheduler skips user_blocked aItems[0], dispatches aItems[1] and independent bItems[0]
+        $this->orchestrator->dispatchCampaign($camp->fresh());
+        self::assertSame(CampaignContentStatus::UserBlocked->value, $aItems[0]->fresh()->status);
+        self::assertSame(CampaignContentStatus::Running->value, $aItems[1]->fresh()->status);
+        self::assertSame(CampaignContentStatus::Pending->value, $aItems[2]->fresh()->status);
+        self::assertSame(CampaignContentStatus::Running->value, $bItems[0]->fresh()->status);
+
+        // 8. Block while Running (aItems[1]) is safely rejected (409)
+        $blkRunning = $this->contentController->block(
+            Request::create('/', 'POST', ['idempotency_key' => 'blk-running']),
+            $aItems[1]->content_uuid,
+        );
+        self::assertSame(409, $blkRunning->getStatusCode());
+        self::assertSame(CampaignContentStatus::Running->value, $aItems[1]->fresh()->status);
+
+        // 5, 6, 7. Unblock aItems[0] while aItems[1] is Running -> Pending, sort_order preserved, no concurrent dispatch
+        $unblk0 = $this->contentController->unblock(
+            Request::create('/', 'POST', ['idempotency_key' => 'unblk-0']),
+            $aItems[0]->content_uuid,
+        );
+        self::assertSame(200, $unblk0->getStatusCode(), $unblk0->getContent());
+        self::assertSame(CampaignContentStatus::Pending->value, $aItems[0]->fresh()->status);
+        self::assertSame($origSortOrder0, (int) $aItems[0]->fresh()->sort_order);
+        self::assertSame(CampaignContentStatus::Running->value, $aItems[1]->fresh()->status);
+        self::assertCount(0, SaJob::query()->where('campaign_content_id', $aItems[0]->id)->get());
+
+        // Duplicate Unblock with same idempotency_key is idempotent
+        $unblk0Dup = $this->contentController->unblock(
+            Request::create('/', 'POST', ['idempotency_key' => 'unblk-0']),
+            $aItems[0]->content_uuid,
+        );
+        self::assertSame(200, $unblk0Dup->getStatusCode());
+        self::assertTrue($unblk0Dup->getData(true)['idempotent'] ?? false);
+
+        // Finish aItems[1] -> next scheduler evaluation dispatches aItems[0] (earlier sort_order)
+        $this->claimAndFinish($clientA['agent'], $clientA['session'], 'succeeded');
+        self::assertSame(CampaignContentStatus::Success->value, $aItems[1]->fresh()->status);
+        $this->orchestrator->recheckDueCampaigns(now()->addSeconds(5));
+        self::assertSame(CampaignContentStatus::Running->value, $aItems[0]->fresh()->status);
+
+        // 10. Failure on aItems[0] creates blocked_by_failure on aItems[2], NOT user_blocked
+        $this->claimAndFinish($clientA['agent'], $clientA['session'], 'failed', 'ORC_ERROR');
+        $dtoGate = $this->campaigns->detailDto($camp->fresh());
+        $byIdGate = collect($dtoGate['contents'])->keyBy('id');
+        self::assertSame('pending', $byIdGate[$aItems[2]->content_uuid]['status']);
+        self::assertSame('blocked_by_failure', $byIdGate[$aItems[2]->content_uuid]['queue_state']);
+        self::assertFalse($byIdGate[$aItems[2]->content_uuid]['can_unblock']);
+        self::assertFalse($byIdGate[$aItems[2]->content_uuid]['can_retry']);
+        self::assertTrue($byIdGate[$aItems[0]->content_uuid]['can_retry']);
+
+        // 2. Block WaitingResources Content + 14. Paused Campaign stays Paused on Unblock
+        $aItems[3]->status = CampaignContentStatus::WaitingResources->value;
+        $aItems[3]->last_error_code = 'waiting_resources';
+        $aItems[3]->last_error_message = 'Client offline';
+        $aItems[3]->save();
+        $blkWaiting = $this->contentController->block(
+            Request::create('/', 'POST', ['idempotency_key' => 'blk-wait']),
+            $aItems[3]->content_uuid,
+        );
+        self::assertSame(200, $blkWaiting->getStatusCode());
+        self::assertSame(CampaignContentStatus::UserBlocked->value, $aItems[3]->fresh()->status);
+        self::assertNull($aItems[3]->fresh()->last_error_code);
+
+        $this->campaigns->pause($camp->campaign_uuid, $this->installationId);
+        $unblkPaused = $this->contentController->unblock(
+            Request::create('/', 'POST', ['idempotency_key' => 'unblk-paused']),
+            $aItems[3]->content_uuid,
+        );
+        self::assertSame(200, $unblkPaused->getStatusCode());
+        self::assertSame(CampaignStatus::Paused->value, $camp->fresh()->status);
+        self::assertSame(CampaignContentStatus::Pending->value, $aItems[3]->fresh()->status);
+
+        // 15. Legacy Skip/Cancel on bItems[0] (Running -> Unknown -> Cancel) remains compatible
+        $this->claimAndFinish($clientB['agent'], $clientB['session'], 'unknown', 'HUMAN_REQUIRED');
+        $cancelLegacy = $this->contentController->cancel(
+            Request::create('/', 'POST', ['idempotency_key' => 'cancel-legacy']),
+            $bItems[0]->content_uuid,
+        );
+        self::assertSame(200, $cancelLegacy->getStatusCode());
+        self::assertSame(CampaignContentStatus::Cancelled->value, $bItems[0]->fresh()->status);
+        self::assertSame(0, SaAccountExecutionLease::query()->where('status', 'active')->count());
+    }
 }

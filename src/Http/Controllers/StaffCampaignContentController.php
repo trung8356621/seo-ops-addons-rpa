@@ -171,6 +171,67 @@ final class StaffCampaignContentController extends Controller
         ]);
     }
 
+    public function block(Request $request, string $id): JsonResponse
+    {
+        $this->access->assertCanManageCampaigns();
+        $content = $this->campaigns->findContent($id, $this->installation->resolveInstallationId());
+        if ($content === null) {
+            return response()->json(['ok' => false, 'errors' => ['content_not_found']], 404);
+        }
+
+        $idem = trim((string) ($request->header('Idempotency-Key') ?: $request->input('idempotency_key', '')));
+        if ($idem === '') {
+            $idem = 'block:'.$content->content_uuid.':'.substr(sha1((string) $request->user()?->id.':'.now()->format('YmdHi')), 0, 16);
+        }
+
+        $result = $this->orchestrator->adminBlock($content, $idem);
+        if (! ($result['ok'] ?? false)) {
+            $errors = $result['errors'] ?? ['block_failed'];
+            $status = in_array('content_in_flight', $errors, true) ? 409 : 422;
+
+            return response()->json(['ok' => false, 'errors' => $errors], $status);
+        }
+
+        return response()->json([
+            'ok' => true,
+            'data' => $result['content'] ?? null,
+            'idempotent' => (bool) ($result['idempotent'] ?? false),
+        ]);
+    }
+
+    public function unblock(Request $request, string $id): JsonResponse
+    {
+        $this->access->assertCanManageCampaigns();
+        $content = $this->campaigns->findContent($id, $this->installation->resolveInstallationId());
+        if ($content === null) {
+            return response()->json(['ok' => false, 'errors' => ['content_not_found']], 404);
+        }
+
+        $idem = trim((string) ($request->header('Idempotency-Key') ?: $request->input('idempotency_key', '')));
+        if ($idem === '') {
+            $idem = 'unblock:'.$content->content_uuid.':'.substr(sha1((string) $request->user()?->id.':'.now()->format('YmdHi')), 0, 16);
+        }
+
+        $result = $this->orchestrator->adminUnblock($content, $idem);
+        if (! ($result['ok'] ?? false)) {
+            $errors = $result['errors'] ?? ['unblock_failed'];
+            $status = in_array('content_in_flight', $errors, true) ? 409 : 422;
+
+            return response()->json(['ok' => false, 'errors' => $errors], $status);
+        }
+
+        $camp = $content->campaign()->first();
+        if ($camp && (string) $camp->status === \Omnichannel\Addons\SocialAutomation\Enums\CampaignStatus::Running->value) {
+            $this->orchestrator->dispatchCampaign($camp);
+        }
+
+        return response()->json([
+            'ok' => true,
+            'data' => $result['content'] ?? null,
+            'idempotent' => (bool) ($result['idempotent'] ?? false),
+        ]);
+    }
+
     public function skip(Request $request, string $id): JsonResponse
     {
         return $this->adminTerminal($request, $id, 'skip');

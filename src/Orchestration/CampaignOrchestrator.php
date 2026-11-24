@@ -1347,6 +1347,170 @@ final class CampaignOrchestrator
     }
 
     /**
+     * Operator Block: reversibly exclude a Pending/WaitingResources Content from scheduling
+     * without interrupting running jobs or setting Action Tag failure gates.
+     *
+     * @return array{ok: bool, content?: array<string, mixed>, errors?: list<string>, idempotent?: bool}
+     */
+    public function adminBlock(SaCampaignContent $content, string $idempotencyKey): array
+    {
+        if (! SocialAutomationSchema::campaignsReady()) {
+            return ['ok' => false, 'errors' => ['schema_unavailable']];
+        }
+        $idempotencyKey = trim($idempotencyKey);
+        if ($idempotencyKey === '') {
+            return ['ok' => false, 'errors' => ['idempotency_key_required']];
+        }
+
+        try {
+            return DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($content, $idempotencyKey): array {
+                $locked = SaCampaignContent::query()->where('id', $content->id)->lockForUpdate()->first();
+                if (! $locked instanceof SaCampaignContent) {
+                    return ['ok' => false, 'errors' => ['content_not_found']];
+                }
+
+                $campaign = SaCampaign::query()->notDeleted()->where('id', $locked->campaign_id)->lockForUpdate()->first();
+                if (! $campaign instanceof SaCampaign) {
+                    return ['ok' => false, 'errors' => ['campaign_not_found']];
+                }
+                $cStatus = CampaignStatus::tryFrom((string) $campaign->status);
+                if ($cStatus === null || $cStatus->isTerminal()) {
+                    return ['ok' => false, 'errors' => ['campaign_not_dispatchable']];
+                }
+
+                $from = CampaignContentStatus::tryFrom((string) $locked->status);
+                if ($from === CampaignContentStatus::UserBlocked) {
+                    return [
+                        'ok' => true,
+                        'idempotent' => true,
+                        'content' => ['id' => $locked->content_uuid, 'status' => $locked->status],
+                    ];
+                }
+
+                $hasActiveJob = $locked->current_job_id !== null
+                    || SaJob::query()
+                        ->where('campaign_content_id', $locked->id)
+                        ->whereIn('status', AccountLockPolicy::ACTIVE_STATUSES)
+                        ->exists();
+                if ($from === CampaignContentStatus::Running || $hasActiveJob) {
+                    return ['ok' => false, 'errors' => ['content_in_flight']];
+                }
+
+                if ($from !== CampaignContentStatus::Pending && $from !== CampaignContentStatus::WaitingResources) {
+                    return ['ok' => false, 'errors' => ['content_not_blockable']];
+                }
+
+                $locked->status = CampaignContentStatus::UserBlocked->value;
+                $locked->last_error_code = null;
+                $locked->last_error_message = null;
+                $locked->admin_action_idempotency = $idempotencyKey;
+                $locked->admin_action_at = now();
+                $locked->save();
+
+                if ((int) ($campaign->plan_version ?? 1) >= 2 && SocialAutomationSchema::campaignV2Ready()) {
+                    SaCampaignContentAssignment::query()
+                        ->where('campaign_content_id', $locked->id)
+                        ->whereIn('status', [
+                            CampaignContentStatus::Pending->value,
+                            CampaignContentStatus::WaitingResources->value,
+                        ])
+                        ->update(['status' => CampaignContentStatus::UserBlocked->value]);
+                }
+
+                return [
+                    'ok' => true,
+                    'content' => ['id' => $locked->content_uuid, 'status' => $locked->status],
+                ];
+            });
+        } catch (Throwable) {
+            return ['ok' => false, 'errors' => ['block_failed']];
+        }
+    }
+
+    /**
+     * Operator Unblock: restore a UserBlocked Content to Pending (preserving sort_order)
+     * without interrupting running jobs or resuming Paused campaigns.
+     *
+     * @return array{ok: bool, content?: array<string, mixed>, errors?: list<string>, idempotent?: bool}
+     */
+    public function adminUnblock(SaCampaignContent $content, string $idempotencyKey): array
+    {
+        if (! SocialAutomationSchema::campaignsReady()) {
+            return ['ok' => false, 'errors' => ['schema_unavailable']];
+        }
+        $idempotencyKey = trim($idempotencyKey);
+        if ($idempotencyKey === '') {
+            return ['ok' => false, 'errors' => ['idempotency_key_required']];
+        }
+
+        try {
+            return DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($content, $idempotencyKey): array {
+                $locked = SaCampaignContent::query()->where('id', $content->id)->lockForUpdate()->first();
+                if (! $locked instanceof SaCampaignContent) {
+                    return ['ok' => false, 'errors' => ['content_not_found']];
+                }
+
+                $campaign = SaCampaign::query()->notDeleted()->where('id', $locked->campaign_id)->lockForUpdate()->first();
+                if (! $campaign instanceof SaCampaign) {
+                    return ['ok' => false, 'errors' => ['campaign_not_found']];
+                }
+                $cStatus = CampaignStatus::tryFrom((string) $campaign->status);
+                if ($cStatus === null || $cStatus->isTerminal()) {
+                    return ['ok' => false, 'errors' => ['campaign_not_dispatchable']];
+                }
+
+                $from = CampaignContentStatus::tryFrom((string) $locked->status);
+                if ($from === CampaignContentStatus::Pending && $locked->admin_action_idempotency === $idempotencyKey) {
+                    return [
+                        'ok' => true,
+                        'idempotent' => true,
+                        'content' => ['id' => $locked->content_uuid, 'status' => $locked->status],
+                    ];
+                }
+
+                if ($from !== CampaignContentStatus::UserBlocked) {
+                    return ['ok' => false, 'errors' => ['content_not_unblockable']];
+                }
+
+                $hasActiveJob = $locked->current_job_id !== null
+                    || SaJob::query()
+                        ->where('campaign_content_id', $locked->id)
+                        ->whereIn('status', AccountLockPolicy::ACTIVE_STATUSES)
+                        ->exists();
+                if ($hasActiveJob) {
+                    return ['ok' => false, 'errors' => ['content_in_flight']];
+                }
+
+                $locked->status = CampaignContentStatus::Pending->value;
+                $locked->last_error_code = null;
+                $locked->last_error_message = null;
+                $locked->admin_action_idempotency = $idempotencyKey;
+                $locked->admin_action_at = now();
+                $locked->save();
+
+                if ((int) ($campaign->plan_version ?? 1) >= 2 && SocialAutomationSchema::campaignV2Ready()) {
+                    SaCampaignContentAssignment::query()
+                        ->where('campaign_content_id', $locked->id)
+                        ->where('status', CampaignContentStatus::UserBlocked->value)
+                        ->update(['status' => CampaignContentStatus::Pending->value]);
+                }
+
+                if ((string) $campaign->status === CampaignStatus::Running->value) {
+                    $campaign->next_recheck_at = now();
+                    $campaign->save();
+                }
+
+                return [
+                    'ok' => true,
+                    'content' => ['id' => $locked->content_uuid, 'status' => $locked->status],
+                ];
+            });
+        } catch (Throwable) {
+            return ['ok' => false, 'errors' => ['unblock_failed']];
+        }
+    }
+
+    /**
      * Lease reconciliation for campaign jobs — unknown, never auto-retry.
      *
      * @return array{reconciled: int}

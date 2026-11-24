@@ -8,6 +8,7 @@ enum CampaignContentStatus: string
 {
     case Pending = 'pending';
     case WaitingResources = 'waiting_resources';
+    case UserBlocked = 'user_blocked';
     case Running = 'running';
     case Success = 'success';
     case FailedLocked = 'failed_locked';

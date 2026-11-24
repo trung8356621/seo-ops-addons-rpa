@@ -517,6 +517,7 @@ final class CampaignService
                 ->whereIn('status', [
                     CampaignContentStatus::Pending->value,
                     CampaignContentStatus::WaitingResources->value,
+                    CampaignContentStatus::UserBlocked->value,
                 ])
                 ->update(['status' => CampaignContentStatus::Cancelled->value]);
 
@@ -1758,6 +1759,7 @@ final class CampaignService
                 'total' => $counts['total'],
                 'pending' => $counts['pending'],
                 'waiting_resources' => $counts['waiting_resources'],
+                'user_blocked' => $counts['user_blocked'],
                 'running' => $counts['running'],
                 'success' => $counts['success'],
                 'failed_locked' => $counts['failed_locked'],
@@ -1791,6 +1793,7 @@ final class CampaignService
             'total' => 0,
             'pending' => 0,
             'waiting_resources' => 0,
+            'user_blocked' => 0,
             'running' => 0,
             'success' => 0,
             'failed_locked' => 0,
