@@ -21,6 +21,7 @@ use Omnichannel\Addons\SocialAutomation\Domain\EligibilitySelector;
 use Omnichannel\Addons\SocialAutomation\Domain\JobIdempotencyKey;
 use Omnichannel\Addons\SocialAutomation\Domain\OnlineStateCalculator;
 use Omnichannel\Addons\SocialAutomation\Domain\SessionLockPolicy;
+use Omnichannel\Addons\SocialAutomation\Domain\VariantPreferenceService;
 use Omnichannel\Addons\SocialAutomation\Enums\AgentAvailability;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignAttemptStatus;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignContentStatus;
@@ -77,6 +78,7 @@ final class CampaignOrchestrator
         private readonly CampaignScriptVariableSchema $variableSchema = new CampaignScriptVariableSchema,
         private readonly SocialAutomationSettingsService $settings = new SocialAutomationSettingsService,
         private readonly ActionEntryUrlResolver $actionEntryUrls = new ActionEntryUrlResolver,
+        private readonly VariantPreferenceService $variantPreferences = new VariantPreferenceService,
     ) {}
 
     /**
@@ -1781,8 +1783,19 @@ final class CampaignOrchestrator
             $jobPayload['release_id'] = $v2Override['release_id'] ?? null;
             $jobPayload['execution_origin'] = $v2Override['execution_origin'] ?? 'scheduler';
             if (! empty($v2Override['script_variants']) && is_array($v2Override['script_variants'])) {
-                $jobPayload['variant_group_id'] = $v2Override['variant_group_id'] ?? null;
-                $jobPayload['script_variants'] = array_values($v2Override['script_variants']);
+                $vgUuid = isset($v2Override['variant_group_id']) ? (string) $v2Override['variant_group_id'] : null;
+                $ordered = $this->variantPreferences->applyPreferenceToVariants(
+                    array_values($v2Override['script_variants']),
+                    (string) $campaign->installation_id,
+                    $accountId,
+                    (string) ($v2Override['action_tag_key'] ?? ''),
+                    $vgUuid,
+                );
+                $jobPayload['variant_group_id'] = $vgUuid;
+                $jobPayload['script_variants'] = $ordered['script_variants'];
+                if ($ordered['preferred_variant'] !== null) {
+                    $jobPayload['preferred_variant'] = $ordered['preferred_variant'];
+                }
                 $jobPayload['fallback_policy'] = [
                     'allowed_only_on' => 'first_step_not_found_before_mutation',
                     'single_attempt_identity' => true,
@@ -1933,6 +1946,18 @@ final class CampaignOrchestrator
                 }
 
                 $from = (string) $job->status;
+                if ($attemptStatus === CampaignAttemptStatus::Succeeded) {
+                    $jobPayloadArr = is_array($job->payload) ? $job->payload : [];
+                    $pinnedVariants = is_array($jobPayloadArr['script_variants'] ?? null) ? $jobPayloadArr['script_variants'] : [];
+                    if ($pinnedVariants !== []) {
+                        $succeededVariant = $this->variantPreferences->extractSucceededVariant($payload, $pinnedVariants, $artifactRefs);
+                        if ($succeededVariant !== null) {
+                            $existingRes = is_array($attrs['result'] ?? null) ? $attrs['result'] : [];
+                            $existingRes['succeeded_variant'] = $succeededVariant;
+                            $attrs['result'] = $existingRes;
+                        }
+                    }
+                }
                 foreach ($attrs as $k => $v) {
                     $job->{$k} = $v;
                 }
@@ -2312,6 +2337,27 @@ final class CampaignOrchestrator
                     'release_id' => (int) $planTag->release_id,
                     'execution_origin' => 'manual_test',
                 ];
+                if (is_array($planTag->pinned_variants ?? null) && $planTag->pinned_variants !== []) {
+                    $vgUuid = $planTag->variant_group_uuid ? (string) $planTag->variant_group_uuid : null;
+                    $ordered = $this->variantPreferences->applyPreferenceToVariants(
+                        array_values($planTag->pinned_variants),
+                        (string) $locked->installation_id,
+                        $accountId,
+                        (string) $planTag->action_tag_key,
+                        $vgUuid,
+                    );
+                    $jobPayload['variant_group_id'] = $vgUuid;
+                    $jobPayload['script_variants'] = $ordered['script_variants'];
+                    if ($ordered['preferred_variant'] !== null) {
+                        $jobPayload['preferred_variant'] = $ordered['preferred_variant'];
+                    }
+                    $jobPayload['fallback_policy'] = [
+                        'allowed_only_on' => 'first_step_not_found_before_mutation',
+                        'single_attempt_identity' => true,
+                        'success_screenshots' => 1,
+                        'failure_screenshots_per_attempted_variant' => 1,
+                    ];
+                }
 
                 $job = SaJob::query()->create([
                     'job_uuid' => (string) Str::uuid(),
@@ -2643,6 +2689,9 @@ final class CampaignOrchestrator
             if (! empty($payload['script_variants']) && is_array($payload['script_variants'])) {
                 $out['variant_group_id'] = $payload['variant_group_id'] ?? null;
                 $out['script_variants'] = array_values($payload['script_variants']);
+                if (is_array($payload['preferred_variant'] ?? null)) {
+                    $out['preferred_variant'] = $payload['preferred_variant'];
+                }
                 $out['fallback_policy'] = $payload['fallback_policy'] ?? [
                     'allowed_only_on' => 'first_step_not_found_before_mutation',
                     'single_attempt_identity' => true,

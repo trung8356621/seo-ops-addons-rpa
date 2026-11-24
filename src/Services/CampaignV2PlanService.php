@@ -13,6 +13,7 @@ use Omnichannel\Addons\SocialAutomation\Domain\CampaignScriptVariableSchema;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignShortcodeMappingValidator;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignShortcodePipeline;
 use Omnichannel\Addons\SocialAutomation\Domain\CampaignTestScriptPolicy;
+use Omnichannel\Addons\SocialAutomation\Domain\VariantPreferenceService;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignContentStatus;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignExecutionMode;
 use Omnichannel\Addons\SocialAutomation\Enums\CampaignRunMode;
@@ -43,6 +44,7 @@ final class CampaignV2PlanService
         private readonly CampaignScriptVariableSchema $variableSchema = new CampaignScriptVariableSchema,
         private readonly CampaignInputSanitizer $sanitizer = new CampaignInputSanitizer,
         private readonly CampaignContentHistoryService $contentHistory = new CampaignContentHistoryService,
+        private readonly VariantPreferenceService $variantPreferences = new VariantPreferenceService,
     ) {}
 
     public function isV2CreatePayload(array $input): bool
@@ -958,6 +960,13 @@ final class CampaignV2PlanService
                 'release_id' => (int) $pt->release_id,
                 'variant_group_id' => SocialAutomationSchema::scriptVariantGroupsReady() ? $pt->variant_group_uuid : null,
                 'pinned_variants' => SocialAutomationSchema::scriptVariantGroupsReady() ? $pt->pinned_variants : null,
+                'variant_preferences' => SocialAutomationSchema::scriptVariantGroupsReady()
+                    ? $this->variantPreferences->listPreferencesForActionTag(
+                        (string) $campaign->installation_id,
+                        (string) $pt->action_tag_key,
+                        $pt->variant_group_uuid ? (string) $pt->variant_group_uuid : null,
+                    )
+                    : [],
                 'script_version' => (string) $pt->script_version,
                 'script_content_digest' => $pt->script_content_digest,
                 'script_execution_digest' => $pt->script_execution_digest,
