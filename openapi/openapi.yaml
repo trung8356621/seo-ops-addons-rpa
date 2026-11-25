@@ -4961,6 +4961,11 @@ paths:
     post:
       tags: [Staff Session]
       summary: Create client API key (raw key returned once)
+      description: |
+        Legacy body `{name}` still works: designated owner = authenticated actor.
+        Owner/Admin may optionally set `assigned_to_user_id` to designate another eligible
+        Staff/Owner as `created_by` (enrollment ownership). Minting actor is stored as `issued_by`.
+        Request fields `created_by` / `issued_by` are ignored (never trusted from the client).
       operationId: clientKeysStore
       security:
         - SeoOpsSessionCookie: []
@@ -4972,6 +4977,10 @@ paths:
               properties:
                 name:
                   type: string
+                assigned_to_user_id:
+                  type: integer
+                  nullable: true
+                  description: Owner/Admin only. Designated key owner (Staff/Owner in account scope).
       responses:
         '201':
           content:
@@ -4989,6 +4998,43 @@ paths:
                   key:
                     type: object
                     additionalProperties: true
+        '403':
+          description: Non-Owner attempted assigned_to_user_id
+        '422':
+          description: Invalid or ineligible assigned_to_user_id
+
+  /social-automation/api/client-keys/assignable-users:
+    get:
+      tags: [Staff Session]
+      summary: List users eligible for Owner-assigned Client API Keys
+      operationId: clientKeysAssignableUsers
+      security:
+        - SeoOpsSessionCookie: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  users:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        name:
+                          type: string
+                        email:
+                          type: string
+                          nullable: true
+                        role:
+                          type: string
+        '403':
+          description: Caller is not Owner/Admin
 
   /social-automation/api/client-keys/active-or-candidate:
     get:

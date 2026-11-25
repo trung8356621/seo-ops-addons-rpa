@@ -131,6 +131,21 @@ class SocialAutomationAccess
         return $this->canManageClientKeys($user);
     }
 
+    /**
+     * Owner/Admin may assign a newly minted Client API Key to another eligible user.
+     */
+    public function canAssignClientKeys(?User $user = null): bool
+    {
+        return $this->canAccessAdminPages($user);
+    }
+
+    public function assertCanAssignClientKeys(?User $user = null): void
+    {
+        if (! $this->canAssignClientKeys($user)) {
+            $this->abort403();
+        }
+    }
+
     public function canManageAccounts(?User $user = null): bool
     {
         $user ??= Auth::user();

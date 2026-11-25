@@ -17,7 +17,8 @@ use Omnichannel\Addons\SocialAutomation\Models\Concerns\UsesSocialAutomationConn
  * @property string $key_prefix
  * @property string $key_hash
  * @property string|null $encrypted_key
- * @property int|null $created_by
+ * @property int|null $created_by Designated owner (Staff/Owner enrollment slot).
+ * @property int|null $issued_by Authenticated minting actor (audit).
  * @property \Illuminate\Support\Carbon|null $last_used_at
  * @property \Illuminate\Support\Carbon|null $revoked_at
  * @property \Illuminate\Support\Carbon $created_at
@@ -38,6 +39,7 @@ final class SaClientApiKey extends Model
         'key_hash',
         'encrypted_key',
         'created_by',
+        'issued_by',
         'last_used_at',
         'revoked_at',
     ];
@@ -54,6 +56,7 @@ final class SaClientApiKey extends Model
     {
         return [
             'created_by' => 'integer',
+            'issued_by' => 'integer',
             'last_used_at' => 'datetime',
             'revoked_at' => 'datetime',
         ];
@@ -120,5 +123,10 @@ final class SaClientApiKey extends Model
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    public function issuer(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'issued_by');
     }
 }

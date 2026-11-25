@@ -143,6 +143,7 @@ final class RpaAdminSpaMountTest extends TestCase
 
         self::assertStringContainsString("prefix('api/action-registry')", $source);
         self::assertStringContainsString("prefix('api/client-keys')", $source);
+        self::assertStringContainsString('assignable-users', $source);
         self::assertStringContainsString("prefix('api/accounts')", $source);
         self::assertStringContainsString("'/script-media/{mediaId}'", $source);
         self::assertStringContainsString('social-automation.script-media.show', $source);

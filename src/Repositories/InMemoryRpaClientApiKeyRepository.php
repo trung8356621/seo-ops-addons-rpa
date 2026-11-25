@@ -28,6 +28,7 @@ final class InMemoryRpaClientApiKeyRepository implements RpaClientApiKeyReposito
             'key_hash' => (string) ($attributes['key_hash'] ?? ''),
             'encrypted_key' => isset($attributes['encrypted_key']) ? (string) $attributes['encrypted_key'] : null,
             'created_by' => isset($attributes['created_by']) ? (int) $attributes['created_by'] : null,
+            'issued_by' => isset($attributes['issued_by']) ? (int) $attributes['issued_by'] : null,
             'last_used_at' => null,
             'revoked_at' => null,
             'created_at' => $now,

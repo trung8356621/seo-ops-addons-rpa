@@ -188,6 +188,7 @@ final class RpaClientApiKeyService
             'key_hash' => $this->generator->hash($rawKey),
             'encrypted_key' => $this->encryptRawKey($rawKey),
             'created_by' => $userId,
+            'issued_by' => $userId,
             'revoked_at' => null,
             'last_used_at' => null,
         ]);
@@ -204,9 +205,11 @@ final class RpaClientApiKeyService
     /**
      * Create a new Client API Key scoped to the current SEO-OPS Installation.
      *
+     * @param  int|null  $createdByUserId  Designated owner (enrollment slot). Never from untrusted request body.
+     * @param  int|null  $issuedByUserId   Authenticated minting actor (audit). Defaults to createdBy when omitted.
      * @return array{key: SaClientApiKey, raw_key: string}
      */
-    public function create(string $name, ?int $createdByUserId = null): array
+    public function create(string $name, ?int $createdByUserId = null, ?int $issuedByUserId = null): array
     {
         $name = trim($name);
         if ($name === '') {
@@ -215,6 +218,7 @@ final class RpaClientApiKeyService
 
         $installationId = $this->installationResolver->resolveInstallationId();
         $generated = $this->generator->generate();
+        $issuedBy = $issuedByUserId ?? $createdByUserId;
 
         $key = $this->repository->create([
             'installation_id' => $installationId,
@@ -223,6 +227,7 @@ final class RpaClientApiKeyService
             'key_hash' => $generated['key_hash'],
             'encrypted_key' => $this->encryptRawKey($generated['raw_key']),
             'created_by' => $createdByUserId,
+            'issued_by' => $issuedBy,
             'revoked_at' => null,
             'last_used_at' => null,
         ]);

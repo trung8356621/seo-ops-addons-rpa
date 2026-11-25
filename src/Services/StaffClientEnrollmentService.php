@@ -173,6 +173,7 @@ final class StaffClientEnrollmentService
                 'key_hash' => $this->generator->hash($rawKey),
                 'encrypted_key' => $this->encryptRawKey($rawKey),
                 'created_by' => $staffUserId,
+                'issued_by' => $staffUserId,
                 'revoked_at' => null,
                 'last_used_at' => null,
             ]);
