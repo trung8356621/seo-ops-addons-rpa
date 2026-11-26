@@ -12,12 +12,16 @@ final class CampaignScriptVariableSchema
     /** @var list<string> */
     public const SHORTCODE_SUPPORTED_TYPES = [
         'string', 'text', 'integer', 'number', 'boolean', 'url', 'enum',
-    ];
-
-    /** @var list<string> */
-    public const SHORTCODE_UNSUPPORTED_TYPES = [
         'file', 'files',
     ];
+
+    /**
+     * Types that shortcode mapping must never target.
+     * file/files are supported as Client-local absolute path refs (not free text).
+     *
+     * @var list<string>
+     */
+    public const SHORTCODE_UNSUPPORTED_TYPES = [];
 
     /**
      * @param  array<string, mixed>  $manifest

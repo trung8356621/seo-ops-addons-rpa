@@ -51,7 +51,10 @@ final class CampaignShortcodeMockGeneratorTest extends TestCase
         ];
         $fileMap = (new \Omnichannel\Addons\SocialAutomation\Domain\CampaignShortcodeMappingValidator)
             ->validate(['entries' => [['shortcode' => 'body', 'variable' => 'img']]], $fileVars);
-        self::assertFalse($fileMap['ok']);
+        self::assertTrue($fileMap['ok']);
+        $fileGen = $gen->generate(1, ['entries' => [['shortcode' => 'body', 'variable' => 'img']]], $fileVars);
+        self::assertTrue($fileGen['ok']);
+        self::assertStringStartsWith('C:\\mock\\campaign\\', $fileGen['articles'][0]['input']['img']);
     }
 
     public function test_max_batch_bound(): void

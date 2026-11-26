@@ -53,6 +53,11 @@ final class CampaignShortcodeTypedValidatorTest extends TestCase
 
         $badFile = $t->validate(['file' => 'x'], ['file' => $vars['file']]);
         self::assertFalse($badFile['ok']);
+        self::assertContains('variable_file_path_invalid:file', $badFile['errors']);
+
+        $okFile = $t->validate(['file' => 'D:\\qa\\ok.jpg'], ['file' => $vars['file']]);
+        self::assertTrue($okFile['ok']);
+        self::assertSame('D:\\qa\\ok.jpg', $okFile['input']['file']);
     }
 
     public function test_pipeline_body_maps_to_title(): void

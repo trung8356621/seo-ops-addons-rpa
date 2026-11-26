@@ -83,6 +83,9 @@ final class CampaignShortcodeTypedValidator
             'number' => $this->asNumber($key, $raw, $var),
             'boolean' => $this->asBoolean($key, $raw, $var),
             'enum' => $this->asEnum($key, $raw, $var),
+            // Client-local absolute path refs for UPLOAD_FILE (pass through claim as-is).
+            'file' => $this->asFile($key, $raw, $var),
+            'files' => $this->asFiles($key, $raw, $var),
             default => ['ok' => false, 'errors' => ['unsupported_variable_type:'.$key.':'.$type]],
         };
     }
@@ -230,5 +233,111 @@ final class CampaignShortcodeTypedValidator
         }
 
         return ['ok' => false, 'errors' => ['variable_enum_invalid:'.$key]];
+    }
+
+    /**
+     * Single Client-local absolute image path for UPLOAD_FILE (type=file).
+     * Stored and claimed as a string — never rewritten to a server URL.
+     *
+     * @param  array<string, mixed>  $var
+     * @return array{ok: bool, value?: string, errors?: list<string>}
+     */
+    private function asFile(string $key, mixed $raw, array $var): array
+    {
+        unset($var);
+        $path = $this->extractAbsolutePath($raw);
+        if ($path === null) {
+            return ['ok' => false, 'errors' => ['variable_file_path_invalid:'.$key]];
+        }
+
+        return ['ok' => true, 'value' => $path];
+    }
+
+    /**
+     * Multi Client-local absolute image paths for UPLOAD_FILE (type=files).
+     * Canonical stored/claim shape is string[] — never semicolon-joined.
+     *
+     * @param  array<string, mixed>  $var
+     * @return array{ok: bool, value?: list<string>, errors?: list<string>}
+     */
+    private function asFiles(string $key, mixed $raw, array $var): array
+    {
+        unset($var);
+        $items = $this->normalizeFilesRaw($raw);
+        if ($items === null) {
+            return ['ok' => false, 'errors' => ['variable_type_invalid:'.$key]];
+        }
+        if ($items === []) {
+            return ['ok' => false, 'errors' => ['required_variable_missing:'.$key]];
+        }
+
+        $paths = [];
+        foreach ($items as $i => $item) {
+            $path = $this->extractAbsolutePath($item);
+            if ($path === null) {
+                return ['ok' => false, 'errors' => ['variable_file_path_invalid:'.$key.':'.$i]];
+            }
+            $paths[] = $path;
+        }
+
+        return ['ok' => true, 'value' => $paths];
+    }
+
+    /**
+     * @return list<mixed>|null
+     */
+    private function normalizeFilesRaw(mixed $raw): ?array
+    {
+        if (is_array($raw)) {
+            return array_values($raw);
+        }
+        if (! is_string($raw)) {
+            return null;
+        }
+        $trimmed = trim($raw);
+        if ($trimmed === '') {
+            return [];
+        }
+        if ($trimmed[0] === '[') {
+            $decoded = json_decode($trimmed, true);
+            if (! is_array($decoded) || ! array_is_list($decoded)) {
+                return null;
+            }
+
+            return array_values($decoded);
+        }
+
+        return [$trimmed];
+    }
+
+    private function extractAbsolutePath(mixed $raw): ?string
+    {
+        if (is_array($raw) && isset($raw['path']) && is_string($raw['path'])) {
+            $raw = $raw['path'];
+        }
+        if (! is_string($raw)) {
+            return null;
+        }
+        $path = trim($raw);
+        if ($path === '') {
+            return null;
+        }
+        if (preg_match('#^C:\\\\fakepath\\\\#i', $path) === 1) {
+            return null;
+        }
+        if (preg_match('#^https?://#i', $path) === 1) {
+            return null;
+        }
+        // Absolute: Windows drive, UNC, or POSIX root. Relative / prose rejected.
+        if (preg_match('#^[A-Za-z]:[\\\\/]#', $path) !== 1
+            && ! str_starts_with($path, '\\\\')
+            && ! str_starts_with($path, '/')) {
+            return null;
+        }
+        if (mb_strlen($path) > 32768) {
+            return null;
+        }
+
+        return $path;
     }
 }

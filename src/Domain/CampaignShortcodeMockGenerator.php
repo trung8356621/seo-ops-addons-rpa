@@ -112,6 +112,12 @@ final class CampaignShortcodeMockGenerator
             'number' => $this->sampleNumber($key, $var, $index),
             'boolean' => ['ok' => true, 'value' => ($index % 2) === 1],
             'enum' => $this->sampleEnum($key, $var, $index),
+            // Fixture absolute paths for unit/mock-batch only — not live Client media.
+            'file' => ['ok' => true, 'value' => 'C:\\mock\\campaign\\'.$ref.'-'.$index.'.jpg'],
+            'files' => ['ok' => true, 'value' => json_encode([
+                'C:\\mock\\campaign\\'.$ref.'-'.$index.'-a.jpg',
+                'C:\\mock\\campaign\\'.$ref.'-'.$index.'-b.jpg',
+            ], JSON_THROW_ON_ERROR)],
             default => ['ok' => false, 'errors' => ['mock_unsupported_type:'.$key.':'.$type]],
         };
     }

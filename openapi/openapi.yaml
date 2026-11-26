@@ -315,10 +315,16 @@ components:
         type:
           type: string
           example: string
-          description: Normalized type (text→string; select→enum when allowed values present)
+          description: |
+            Normalized type (text→string; select→enum when allowed values present).
+            Includes file/files (Client-local absolute path refs for UPLOAD_FILE).
         required: { type: boolean }
         allow_multiple: { type: boolean }
-        shortcode_compatible: { type: boolean }
+        shortcode_compatible:
+          type: boolean
+          description: |
+            True when the type may be targeted by Campaign shortcode mapping.
+            file/files are compatible (path refs, not free text).
         min: { type: number, nullable: true }
         max: { type: number, nullable: true }
         minLength: { type: integer, nullable: true }
@@ -1309,6 +1315,10 @@ components:
         Must cover ALL required variables of the pinned published Script release.
         Default editor shortcode name is `body`; the Script is NOT assumed to have a `body` variable
         (e.g. WordPress POC may map `[body]` → Script variable `title`).
+        `file` / `files` Script variables are mappable. Their content values must be
+        Client-local absolute image paths (`file` = string, `files` = string[]), passed
+        through Job claim unchanged for UPLOAD_FILE. Not free text; not server media URLs.
+        Arrays are never semicolon-joined.
       properties:
         entries:
           type: array

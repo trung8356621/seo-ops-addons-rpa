@@ -3005,6 +3005,9 @@ final class CampaignOrchestrator
     }
 
     /**
+     * Redact accidental secrets for Client claim. Pass file/files path values through
+     * unchanged (file=string, files=string[]) — never semicolon-join or rewrite paths.
+     *
      * @param  array<string, mixed>  $input
      * @return array<string, mixed>
      */
@@ -3013,6 +3016,21 @@ final class CampaignOrchestrator
         $out = [];
         foreach ($input as $key => $value) {
             if (is_array($value)) {
+                // Preserve list shape (e.g. files string[]) and recurse into assoc maps.
+                if (array_is_list($value)) {
+                    $list = [];
+                    foreach ($value as $item) {
+                        if (is_array($item)) {
+                            $list[] = $this->publicJobInput($item);
+                        } elseif (is_string($item)) {
+                            $list[] = $item;
+                        } else {
+                            $list[] = $item;
+                        }
+                    }
+                    $out[$key] = $list;
+                    continue;
+                }
                 $out[$key] = $this->publicJobInput($value);
                 continue;
             }
