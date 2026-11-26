@@ -698,20 +698,43 @@ final class CampaignOrchestrator
 
                 $leaseToken = (string) ($job->lease_token ?: Str::random(40));
                 $fencing = (int) $job->fencing_generation;
-                $attemptNo = (int) SaJobAttempt::query()->where('job_id', $job->id)->max('attempt_no') + 1;
-                $attempt = SaJobAttempt::query()->create([
-                    'attempt_uuid' => (string) Str::uuid(),
-                    'lease_token' => $leaseToken,
-                    'job_id' => $job->id,
-                    'attempt_no' => max(1, $attemptNo),
-                    'fencing_generation' => $fencing,
-                    'status' => CampaignAttemptStatus::Claimed->value,
-                    'agent_id' => $job->agent_id,
-                    'browser_session_id' => $job->browser_session_id,
-                    'account_id' => $job->account_id,
-                    'started_at' => now(),
-                    'lease_expires_at' => now()->addSeconds(self::DEFAULT_LEASE_SECONDS),
-                ]);
+
+                // Promote the reservation placeholder Attempt created at reserve time.
+                // Creating a second row here produced duplicate history ("Attempt #1" Queued + real claim).
+                $attempt = SaJobAttempt::query()
+                    ->where('job_id', $job->id)
+                    ->where('status', CampaignAttemptStatus::Queued->value)
+                    ->orderBy('attempt_no')
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->first();
+
+                if ($attempt instanceof SaJobAttempt) {
+                    $attempt->lease_token = $leaseToken;
+                    $attempt->fencing_generation = $fencing;
+                    $attempt->status = CampaignAttemptStatus::Claimed->value;
+                    $attempt->agent_id = $job->agent_id;
+                    $attempt->browser_session_id = $job->browser_session_id;
+                    $attempt->account_id = $job->account_id;
+                    $attempt->started_at = now();
+                    $attempt->lease_expires_at = now()->addSeconds(self::DEFAULT_LEASE_SECONDS);
+                    $attempt->save();
+                } else {
+                    $attemptNo = (int) SaJobAttempt::query()->where('job_id', $job->id)->max('attempt_no') + 1;
+                    $attempt = SaJobAttempt::query()->create([
+                        'attempt_uuid' => (string) Str::uuid(),
+                        'lease_token' => $leaseToken,
+                        'job_id' => $job->id,
+                        'attempt_no' => max(1, $attemptNo),
+                        'fencing_generation' => $fencing,
+                        'status' => CampaignAttemptStatus::Claimed->value,
+                        'agent_id' => $job->agent_id,
+                        'browser_session_id' => $job->browser_session_id,
+                        'account_id' => $job->account_id,
+                        'started_at' => now(),
+                        'lease_expires_at' => now()->addSeconds(self::DEFAULT_LEASE_SECONDS),
+                    ]);
+                }
 
                 $job->status = JobStatus::Claimed->value;
                 $job->claimed_at = now();

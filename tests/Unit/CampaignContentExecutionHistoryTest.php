@@ -330,6 +330,80 @@ final class CampaignContentExecutionHistoryTest extends TestCase
         self::assertSame([], $detailData['contents'][2]['attempts']);
     }
 
+    public function test_queued_reservation_placeholder_is_hidden_when_real_attempt_exists(): void
+    {
+        $agent = SaAgent::query()->create([
+            'agent_uuid' => (string) Str::uuid(),
+            'installation_id' => 'inst-history-test',
+            'name' => 'Runner',
+        ]);
+        $session = SaBrowserSession::query()->create([
+            'session_uuid' => (string) Str::uuid(),
+            'agent_id' => $agent->id,
+        ]);
+        $campaign = SaCampaign::query()->create([
+            'campaign_uuid' => (string) Str::uuid(),
+            'installation_id' => 'inst-history-test',
+            'name' => 'Hist Placeholder',
+            'platform' => 'wordpress',
+            'execution_mode' => 'one_account_many_jobs',
+            'run_mode' => 'live',
+            'status' => CampaignStatus::Completed->value,
+            'plan_version' => 2,
+            'script_id' => 'v2:hist',
+            'script_version' => '1',
+        ]);
+        $content = SaCampaignContent::query()->create([
+            'content_uuid' => (string) Str::uuid(),
+            'campaign_id' => $campaign->id,
+            'sort_order' => 1,
+            'status' => CampaignContentStatus::Success->value,
+            'input' => ['wp_title' => 'OK'],
+        ]);
+        $job = SaJob::query()->create([
+            'job_uuid' => (string) Str::uuid(),
+            'campaign_id' => $campaign->id,
+            'campaign_content_id' => $content->id,
+            'agent_id' => $agent->id,
+            'browser_session_id' => $session->id,
+            'package_key' => 'wp-create-post',
+            'package_version' => '1.0.0',
+            'status' => 'completed',
+            'started_at' => now()->subMinutes(2),
+            'finished_at' => now()->subMinute(),
+        ]);
+        // Legacy defect residue: reserve placeholder left Queued after a separate claim Attempt.
+        SaJobAttempt::query()->create([
+            'attempt_uuid' => (string) Str::uuid(),
+            'job_id' => $job->id,
+            'attempt_no' => 1,
+            'status' => 'queued',
+            'agent_id' => $agent->id,
+            'browser_session_id' => $session->id,
+            'started_at' => null,
+            'finished_at' => null,
+        ]);
+        $real = SaJobAttempt::query()->create([
+            'attempt_uuid' => (string) Str::uuid(),
+            'job_id' => $job->id,
+            'attempt_no' => 2,
+            'status' => 'succeeded',
+            'agent_id' => $agent->id,
+            'browser_session_id' => $session->id,
+            'started_at' => now()->subMinutes(2),
+            'finished_at' => now()->subMinute(),
+        ]);
+
+        $res = $this->contentController->index($campaign->campaign_uuid);
+        self::assertSame(200, $res->getStatusCode());
+        $rows = json_decode((string) $res->getContent(), true)['data'];
+        self::assertCount(1, $rows);
+        self::assertCount(1, $rows[0]['attempts']);
+        self::assertSame($real->attempt_uuid, $rows[0]['attempts'][0]['attempt_uuid']);
+        self::assertSame(2, $rows[0]['attempts'][0]['attempt_no']);
+        self::assertSame('succeeded', $rows[0]['attempts'][0]['status']);
+    }
+
     public function test_unauthorized_access_rejected_on_contents_history(): void
     {
         $this->denyAccess = true;

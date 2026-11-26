@@ -735,6 +735,10 @@ final class CampaignResumeHistoryArtifactTest extends TestCase
         $started = $this->campaigns->start($campaign->campaign_uuid, $this->installationId);
         self::assertTrue($started['ok'], json_encode($started));
 
+        $jobBeforeClaim = SaJob::query()->where('campaign_id', $campaign->id)->firstOrFail();
+        self::assertSame(1, SaJobAttempt::query()->where('job_id', $jobBeforeClaim->id)->count());
+        self::assertSame('queued', SaJobAttempt::query()->where('job_id', $jobBeforeClaim->id)->value('status'));
+
         $claim = $this->orchestrator->claimNext(
             $env['agent']->agent_uuid,
             [$env['session']->session_uuid],
@@ -745,6 +749,14 @@ final class CampaignResumeHistoryArtifactTest extends TestCase
         $jobUuid = (string) $claim['data']['job_id'];
         $attemptUuid = (string) $claim['data']['attempt_id'];
         $leaseToken = (string) $claim['data']['lease_token'];
+
+        // Claim must promote the reserve placeholder — not create Attempt #2.
+        self::assertSame(1, SaJobAttempt::query()->where('job_id', $jobBeforeClaim->id)->count());
+        $promoted = SaJobAttempt::query()->where('job_id', $jobBeforeClaim->id)->firstOrFail();
+        self::assertSame(1, (int) $promoted->attempt_no);
+        self::assertSame('claimed', (string) $promoted->status);
+        self::assertSame($attemptUuid, (string) $promoted->attempt_uuid);
+        self::assertNotNull($promoted->started_at);
 
         // 9. Screenshot upload associates with correct Job & Attempt
         $pngBytes = "\x89PNG\r\n\x1a\nfake-png-evidence-bytes";

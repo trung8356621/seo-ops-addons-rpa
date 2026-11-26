@@ -132,6 +132,14 @@ final class CampaignContentHistoryService
                 continue;
             }
 
+            // Reservation placeholders (Queued, never started) are not execution history.
+            // They were left behind when claim used to create a second Attempt row.
+            if ((string) $attempt->status === 'queued'
+                && $attempt->started_at === null
+                && $attempt->finished_at === null) {
+                continue;
+            }
+
             $contentId = (int) $job->campaign_content_id;
             $effectiveAgentId = $attempt->agent_id ?? $job->agent_id;
             $effectiveSessionId = $attempt->browser_session_id ?? $job->browser_session_id;
