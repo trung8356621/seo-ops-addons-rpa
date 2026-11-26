@@ -1564,6 +1564,21 @@ final class CampaignOrchestrator
                         $content = SaCampaignContent::query()->where('id', $locked->campaign_content_id)->lockForUpdate()->first();
                         if ($content instanceof SaCampaignContent
                             && (string) $content->status === CampaignContentStatus::Running->value) {
+                            $campaign = $locked->campaign_id
+                                ? SaCampaign::query()->notDeleted()->find($locked->campaign_id)
+                                : null;
+                            $meta = $campaign instanceof SaCampaign && is_array($campaign->meta) ? $campaign->meta : [];
+                            $hasCampaignPin = trim((string) ($meta['pinned_account_id'] ?? '')) !== '';
+
+                            // Soft content pin came only from this never-claimed reservation — always clear
+                            // unless the campaign itself hard-pins the account. Prior Completed jobs on the
+                            // same account must not trap the head item on an offline client.
+                            if (! $hasCampaignPin && $locked->account_id
+                                && (int) $content->assigned_account_id === (int) $locked->account_id) {
+                                $content->assigned_account_id = null;
+                            }
+
+                            // Durable Mode A assignment row: keep if another execution already consumed the account.
                             $hasOtherExecutionForAccount = $locked->campaign_id && $locked->account_id
                                 ? SaJob::query()
                                     ->where('campaign_id', $locked->campaign_id)
@@ -1588,22 +1603,32 @@ final class CampaignOrchestrator
                                     ->where('content_id', $content->id)
                                     ->lockForUpdate()
                                     ->delete();
+                            }
 
-                                $campaign = SaCampaign::query()->notDeleted()->find($locked->campaign_id);
-                                $meta = $campaign instanceof SaCampaign && is_array($campaign->meta) ? $campaign->meta : [];
-                                $hasCampaignPin = trim((string) ($meta['pinned_account_id'] ?? '')) !== '';
-                                if (! $hasCampaignPin && (int) $content->assigned_account_id === (int) $locked->account_id) {
-                                    $content->assigned_account_id = null;
-                                }
+                            // Unclaimed reservation never executed — drop device affinity so another
+                            // eligible client/account bind can be selected on redispach.
+                            if ($locked->account_id) {
+                                SaAccountDeviceAffinity::query()
+                                    ->where('account_id', $locked->account_id)
+                                    ->where('agent_id', $locked->agent_id)
+                                    ->delete();
                             }
 
                             $content->status = CampaignContentStatus::WaitingResources->value;
                             $content->current_job_id = null;
+                            $content->last_error_code = 'waiting_resources';
+                            $content->last_error_message = null;
                             $content->save();
                             if (SocialAutomationSchema::campaignV2Ready()) {
                                 SaCampaignContentAssignment::query()
                                     ->where('campaign_content_id', $content->id)
                                     ->update(['status' => CampaignContentStatus::WaitingResources->value]);
+                            }
+
+                            if ($campaign instanceof SaCampaign
+                                && (string) $campaign->status === CampaignStatus::Running->value) {
+                                $campaign->next_recheck_at = now();
+                                $campaign->save();
                             }
                         }
                         $count++;
@@ -2457,7 +2482,8 @@ final class CampaignOrchestrator
                     : null;
             }
 
-            // Automatic Succeeded on a Running campaign marks campaign due at next eligible time.
+            // Automatic Succeeded: honor posting interval; interval 0 wakes immediate redispach
+            // so cadence is not gated by schedule-tick (~60s).
             if ((string) $campaign->status === CampaignStatus::Running->value) {
                 $intervalMinutes = max(0, (int) ($planTag->interval_minutes ?? 0));
                 $succeededAt = $job->finished_at ?? now();
@@ -2465,9 +2491,9 @@ final class CampaignOrchestrator
                     ? \Carbon\CarbonImmutable::instance($succeededAt)->addMinutes($intervalMinutes)
                     : now();
                 $campaign->save();
-            }
 
-            return null;
+                return $intervalMinutes === 0 ? (int) $campaign->id : null;
+            }
         }
 
         return null;

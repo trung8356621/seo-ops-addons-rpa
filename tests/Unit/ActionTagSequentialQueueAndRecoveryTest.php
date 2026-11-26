@@ -682,6 +682,44 @@ final class ActionTagSequentialQueueAndRecoveryTest extends TestCase
         self::assertSame(CampaignStatus::Completed->value, $camp->fresh()->status);
     }
 
+    public function test_two_tags_two_clients_concurrent_claims_and_zero_interval_wake(): void
+    {
+        $tagA = $this->seedActionTagAndScript('site_x', 'site_x.create_post');
+        $tagB = $this->seedActionTagAndScript('site_y', 'site_y.create_post');
+        $cA = $this->seedClient('site_x', 'acc_x');
+        $cB = $this->seedClient('site_y', 'acc_y');
+
+        $setup = $this->createV2RunningCampaign([
+            ['tag' => $tagA['tag'], 'pkg' => $tagA['pkg'], 'rel' => $tagA['rel'], 'count' => 2, 'interval_minutes' => 0],
+            ['tag' => $tagB['tag'], 'pkg' => $tagB['pkg'], 'rel' => $tagB['rel'], 'count' => 2, 'interval_minutes' => 0],
+        ]);
+        $camp = $setup['campaign'];
+        $aItems = $setup['contents']['site_x.create_post'];
+        $bItems = $setup['contents']['site_y.create_post'];
+
+        $this->orchestrator->dispatchCampaign($camp);
+        self::assertSame(2, SaJob::query()->where('campaign_id', $camp->id)->where('status', 'reserved')->count());
+
+        $claimA = $this->orchestrator->claimNext($cA['agent']->agent_uuid, [$cA['session']->session_uuid], null, $this->installationId);
+        $claimB = $this->orchestrator->claimNext($cB['agent']->agent_uuid, [$cB['session']->session_uuid], null, $this->installationId);
+        self::assertTrue($claimA['ok'] && is_array($claimA['data']));
+        self::assertTrue($claimB['ok'] && is_array($claimB['data']));
+        self::assertNotSame($claimA['data']['job_id'], $claimB['data']['job_id']);
+
+        $this->orchestrator->acknowledge($claimA['data']['job_id'], ['attempt_id' => $claimA['data']['attempt_id'], 'lease_token' => $claimA['data']['lease_token']], null, $this->installationId);
+        $this->orchestrator->result($claimA['data']['job_id'], [
+            'status' => 'succeeded',
+            'attempt_id' => $claimA['data']['attempt_id'],
+            'lease_token' => $claimA['data']['lease_token'],
+        ], null, $this->installationId);
+
+        // Zero posting interval must wake next independent tag-A job without waiting for schedule-tick
+        self::assertSame(CampaignContentStatus::Success->value, $aItems[0]->fresh()->status);
+        self::assertSame(CampaignContentStatus::Running->value, $aItems[1]->fresh()->status);
+        self::assertSame(CampaignContentStatus::Running->value, $bItems[0]->fresh()->status);
+        self::assertSame(CampaignContentStatus::Pending->value, $bItems[1]->fresh()->status);
+    }
+
     public function test_2_3_4_5_6_7_10_13_14_15_16_17_18_failure_gate_and_manual_success_recovery(): void
     {
         $tagA = $this->seedActionTagAndScript('maytuicanvas', 'maytuicanvas.create_post');

@@ -20,7 +20,9 @@ use Omnichannel\Addons\SocialAutomation\Enums\AgentAvailability;
 use Omnichannel\Addons\SocialAutomation\Enums\SessionReadyStatus;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\StaffCampaignController;
 use Omnichannel\Addons\SocialAutomation\Models\SaAccount;
+use Omnichannel\Addons\SocialAutomation\Models\SaAccountDeviceAffinity;
 use Omnichannel\Addons\SocialAutomation\Models\SaAccountExecutionLease;
+use Omnichannel\Addons\SocialAutomation\Models\SaClientApiKey;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTag;
 use Omnichannel\Addons\SocialAutomation\Models\SaActionTagScript;
 use Omnichannel\Addons\SocialAutomation\Models\SaAgent;
@@ -265,10 +267,127 @@ final class CampaignV2UnclaimedLeaseRecoveryTest extends TestCase
         $this->orchestrator->acknowledge((string) $p1['job_id'], ['attempt_id' => $p1['attempt_id'], 'lease_token' => $p1['lease_token']], null, 'inst-lease-recovery');
         $this->orchestrator->result((string) $p1['job_id'], ['status' => 'succeeded', 'attempt_id' => $p1['attempt_id'], 'lease_token' => $p1['lease_token']], null, 'inst-lease-recovery');
 
-        // Next tick dispatches 2nd content onto same account
-        $cycle = $this->orchestrator->recheckDueCampaigns(now()->addMinutes(65));
-        self::assertSame(1, $cycle['dispatched']);
+        // interval_minutes=0 wakes immediate redispach (not schedule-tick gated)
         self::assertSame(2, SaJob::query()->where('campaign_id', $camp->id)->count());
+        self::assertSame(1, SaJob::query()->where('campaign_id', $camp->id)->where('status', 'reserved')->count());
+        $cycle = $this->orchestrator->recheckDueCampaigns(now()->addMinutes(65));
+        self::assertSame(0, $cycle['dispatched']);
+    }
+
+    public function test_unclaimed_after_prior_completed_clears_pin_affinity_and_allows_other_client(): void
+    {
+        $this->seedSite();
+        $c1 = $this->seedOnlineClient('site_a', 'acc_c1', ownerUserId: 9);
+        $c2 = $this->seedOnlineClient('site_a', 'acc_c2', ownerUserId: 6);
+
+        $uuid = $this->createV2Draft('Mode B Failover', 'one_account_many_jobs', ['f-1', 'f-2']);
+        $this->controller->start($uuid);
+        $camp = SaCampaign::query()->where('campaign_uuid', $uuid)->firstOrFail();
+
+        $claim1 = $this->orchestrator->claimNext(
+            (string) $c1['agent']->agent_uuid,
+            [(string) $c1['session']->session_uuid],
+            (int) $c1['key']->id,
+            'inst-lease-recovery',
+        );
+        self::assertTrue($claim1['ok'] && is_array($claim1['data']));
+        $p1 = $claim1['data'];
+        $this->orchestrator->acknowledge((string) $p1['job_id'], ['attempt_id' => $p1['attempt_id'], 'lease_token' => $p1['lease_token']], (int) $c1['key']->id, 'inst-lease-recovery');
+        $this->orchestrator->result((string) $p1['job_id'], ['status' => 'succeeded', 'attempt_id' => $p1['attempt_id'], 'lease_token' => $p1['lease_token']], (int) $c1['key']->id, 'inst-lease-recovery');
+
+        // Head job 2 reserved to c1; c2 claim is null (not reserved for c2)
+        $job2 = SaJob::query()->where('campaign_id', $camp->id)->where('status', 'reserved')->firstOrFail();
+        self::assertSame((int) $c1['agent']->id, (int) $job2->agent_id);
+        $nullClaim = $this->orchestrator->claimNext(
+            (string) $c2['agent']->agent_uuid,
+            [(string) $c2['session']->session_uuid],
+            (int) $c2['key']->id,
+            'inst-lease-recovery',
+        );
+        self::assertTrue($nullClaim['ok']);
+        self::assertNull($nullClaim['data']);
+
+        // Wrong API key cannot claim c1's reserved job
+        $forbidden = $this->orchestrator->claimNext(
+            (string) $c1['agent']->agent_uuid,
+            [(string) $c1['session']->session_uuid],
+            (int) $c2['key']->id,
+            'inst-lease-recovery',
+        );
+        self::assertFalse($forbidden['ok']);
+        self::assertContains('agent_not_found', $forbidden['errors'] ?? []);
+
+        // Unclaimed expiry must clear soft pin + affinity even though account has Completed history
+        $job2->update(['lease_expires_at' => now()->subMinute()]);
+        SaAccountDeviceAffinity::query()->updateOrCreate(
+            ['account_id' => $job2->account_id],
+            ['agent_id' => $c1['agent']->id, 'last_used_at' => now(), 'affinity_until' => now()->addHour()],
+        );
+        $this->orchestrator->reconcileExpiredCampaignLeases();
+
+        $content2 = SaCampaignContent::query()->where('campaign_id', $camp->id)->orderBy('id')->skip(1)->firstOrFail();
+        self::assertNull($content2->fresh()->assigned_account_id);
+        self::assertSame(0, SaAccountDeviceAffinity::query()->where('account_id', $job2->account_id)->count());
+
+        // Take c1 offline; c2 with distinct account must be able to claim after redispach
+        $c1['agent']->update(['last_heartbeat_at' => now()->subHour()]);
+        $this->orchestrator->recheckDueCampaigns(now());
+        $claim2 = $this->orchestrator->claimNext(
+            (string) $c2['agent']->agent_uuid,
+            [(string) $c2['session']->session_uuid],
+            (int) $c2['key']->id,
+            'inst-lease-recovery',
+        );
+        self::assertTrue($claim2['ok'] && is_array($claim2['data']), json_encode($claim2));
+        self::assertSame((int) $c2['account']->id, (int) SaJob::query()->where('job_uuid', $claim2['data']['job_id'])->value('account_id'));
+    }
+
+    public function test_same_account_stays_locked_across_clients(): void
+    {
+        $this->seedSite();
+        $shared = SaAccount::query()->create([
+            'account_uuid' => (string) Str::uuid(),
+            'installation_id' => 'inst-lease-recovery',
+            'platform' => 'site_a',
+            'platform_account_id' => 'shared_acc',
+            'verified' => true,
+        ]);
+        $c1 = $this->seedOnlineClient('site_a', 'shared_acc', ownerUserId: 9, sharedAccount: $shared);
+        $c2 = $this->seedOnlineClient('site_a', 'shared_acc', ownerUserId: 6, sharedAccount: $shared);
+
+        $uuid = $this->createV2Draft('Shared Account Lock', 'one_account_many_jobs', ['s-1', 's-2']);
+        $this->controller->start($uuid);
+        $camp = SaCampaign::query()->where('campaign_uuid', $uuid)->firstOrFail();
+
+        $job = SaJob::query()->where('campaign_id', $camp->id)->firstOrFail();
+        $owner = (int) $job->agent_id === (int) $c1['agent']->id ? $c1 : $c2;
+        $other = $owner === $c1 ? $c2 : $c1;
+
+        $claim = $this->orchestrator->claimNext(
+            (string) $owner['agent']->agent_uuid,
+            [(string) $owner['session']->session_uuid],
+            (int) $owner['key']->id,
+            'inst-lease-recovery',
+        );
+        self::assertTrue($claim['ok'] && is_array($claim['data']));
+        $this->orchestrator->acknowledge(
+            (string) $claim['data']['job_id'],
+            ['attempt_id' => $claim['data']['attempt_id'], 'lease_token' => $claim['data']['lease_token']],
+            (int) $owner['key']->id,
+            'inst-lease-recovery',
+        );
+
+        // Other client must not receive a concurrent job for the locked shared account
+        $otherClaim = $this->orchestrator->claimNext(
+            (string) $other['agent']->agent_uuid,
+            [(string) $other['session']->session_uuid],
+            (int) $other['key']->id,
+            'inst-lease-recovery',
+        );
+        self::assertTrue($otherClaim['ok']);
+        self::assertNull($otherClaim['data']);
+        self::assertSame(1, SaJob::query()->where('campaign_id', $camp->id)->count());
+        self::assertSame(1, SaAccountExecutionLease::query()->where('account_id', $shared->id)->where('status', 'active')->count());
     }
 
     /**
@@ -318,10 +437,23 @@ final class CampaignV2UnclaimedLeaseRecoveryTest extends TestCase
     }
 
     /**
-     * @return array{agent: SaAgent, account: SaAccount, session: SaBrowserSession}
+     * @return array{agent: SaAgent, account: SaAccount, session: SaBrowserSession, key: \Omnichannel\Addons\SocialAutomation\Models\SaClientApiKey}
      */
-    private function seedOnlineClient(string $siteKey, string $accName): array
-    {
+    private function seedOnlineClient(
+        string $siteKey,
+        string $accName,
+        ?int $ownerUserId = null,
+        ?SaAccount $sharedAccount = null,
+    ): array {
+        $key = SaClientApiKey::query()->create([
+            'installation_id' => 'inst-lease-recovery',
+            'name' => 'Key '.$accName.uniqid('', true),
+            'key_prefix' => 'rpa_client_'.substr(hash('sha256', $accName.uniqid('', true)), 0, 8),
+            'key_hash' => hash('sha256', 'secret-'.$accName.uniqid('', true)),
+            'created_by' => $ownerUserId,
+            'issued_by' => $ownerUserId === 9 ? 2 : null,
+        ]);
+
         $agent = SaAgent::query()->create([
             'agent_uuid' => (string) Str::uuid(),
             'installation_id' => 'inst-lease-recovery',
@@ -331,8 +463,9 @@ final class CampaignV2UnclaimedLeaseRecoveryTest extends TestCase
             'max_concurrency' => 2,
             'last_heartbeat_at' => now(),
             'agent_kind' => 'runner',
+            'client_api_key_id' => $key->id,
         ]);
-        $account = SaAccount::query()->create([
+        $account = $sharedAccount ?? SaAccount::query()->create([
             'account_uuid' => (string) Str::uuid(),
             'installation_id' => 'inst-lease-recovery',
             'platform' => $siteKey,
@@ -353,7 +486,7 @@ final class CampaignV2UnclaimedLeaseRecoveryTest extends TestCase
             'is_active' => true,
         ]);
 
-        return ['agent' => $agent, 'account' => $account, 'session' => $session];
+        return ['agent' => $agent, 'account' => $account, 'session' => $session, 'key' => $key];
     }
 
     private function runMigration(string $path): void
@@ -445,6 +578,20 @@ final class CampaignV2UnclaimedLeaseRecoveryTest extends TestCase
             $table->string('runtime_version', 64)->nullable();
             $table->timestamp('last_heartbeat_at')->nullable();
             $table->string('agent_kind', 32)->default('runner');
+            $table->unsignedBigInteger('client_api_key_id')->nullable();
+            $table->timestamps();
+        });
+        $schema->create('sa_client_api_keys', function (Blueprint $table): void {
+            $table->id();
+            $table->string('installation_id', 128);
+            $table->string('name', 255)->nullable();
+            $table->string('key_prefix', 64)->nullable();
+            $table->string('key_hash', 128)->nullable();
+            $table->text('encrypted_key')->nullable();
+            $table->unsignedBigInteger('created_by')->nullable();
+            $table->unsignedBigInteger('issued_by')->nullable();
+            $table->timestamp('last_used_at')->nullable();
+            $table->timestamp('revoked_at')->nullable();
             $table->timestamps();
         });
         $schema->create('sa_accounts', function (Blueprint $table): void {
