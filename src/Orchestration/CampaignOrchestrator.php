@@ -322,33 +322,9 @@ final class CampaignOrchestrator
                 $campaignMeta = is_array($locked->meta) ? $locked->meta : [];
                 $gates = is_array($campaignMeta['action_tag_gates'] ?? null) ? $campaignMeta['action_tag_gates'] : [];
 
-                // Active in-flight Action Tag queues (1 active job per Action Tag queue).
-                $inFlightTagIds = [];
-                $runningContentIds = SaCampaignContent::query()
-                    ->where('campaign_id', $locked->id)
-                    ->where('status', CampaignContentStatus::Running->value)
-                    ->pluck('id')
-                    ->all();
-                if ($runningContentIds !== []) {
-                    $runningAssignments = SaCampaignContentAssignment::query()
-                        ->whereIn('campaign_content_id', $runningContentIds)
-                        ->pluck('campaign_action_tag_id')
-                        ->all();
-                    foreach ($runningAssignments as $tid) {
-                        $inFlightTagIds[(int) $tid] = true;
-                    }
-                }
-                $activeManualJobs = SaJob::query()
-                    ->where('campaign_id', $locked->id)
-                    ->whereNull('campaign_content_id')
-                    ->whereIn('status', AccountLockPolicy::ACTIVE_STATUSES)
-                    ->get(['payload']);
-                foreach ($activeManualJobs as $mj) {
-                    $mjTagId = is_array($mj->payload) ? (int) ($mj->payload['campaign_action_tag_id'] ?? 0) : 0;
-                    if ($mjTagId > 0) {
-                        $inFlightTagIds[$mjTagId] = true;
-                    }
-                }
+                // Failure-gate recovery: at most one manual_retry unlock per Action Tag per cycle.
+                // Action Tag is NOT a concurrency lock — resource locks (account/session/agent) serialize work.
+                $gateRecoveryUsed = [];
 
                 // Fallback failure gate detection for legacy FailedLocked/Unknown contents without gate metadata.
                 $blockedTagIds = [];
@@ -388,10 +364,10 @@ final class CampaignOrchestrator
                         ->groupBy('campaign_content_id')
                     : collect();
 
-                $handledQueues = [];
                 $dispatched = 0;
                 $stillWaiting = 0;
                 $earliestNextRunAt = null;
+                $hardWaitMarkedByTag = [];
                 $lastSuccessByTagId = $this->lastSuccessByActionTag($locked);
 
                 foreach ($contents as $content) {
@@ -437,21 +413,14 @@ final class CampaignOrchestrator
                         && is_string($errMeta['gate_recovery_token'] ?? null)
                         && trim((string) $errMeta['gate_recovery_token']) !== '';
 
-                    // Blocked by Failure: stop automatic dispatch for this Action Tag queue unless this head item
-                    // holds an explicit one-shot manual_retry authorization; keep following items Pending.
+                    // Blocked by Failure: no automatic dispatch for this Action Tag unless this content
+                    // holds one-shot manual_retry auth (at most one recovery reservation per tag/cycle).
                     if (isset($blockedTagIds[$planTagId])) {
-                        if (! $hasOneShotGateRecovery || isset($inFlightTagIds[$planTagId]) || isset($handledQueues[$planTagId])) {
+                        if (! $hasOneShotGateRecovery || isset($gateRecoveryUsed[$planTagId])) {
                             $this->normalizeNonHeadWaitingToPending($content);
                             continue;
                         }
                     }
-
-                    // Sequential queue: at most one active/head item evaluated per Action Tag queue.
-                    if (isset($inFlightTagIds[$planTagId]) || isset($handledQueues[$planTagId])) {
-                        $this->normalizeNonHeadWaitingToPending($content);
-                        continue;
-                    }
-                    $handledQueues[$planTagId] = true;
 
                     // Posting interval check (before resource selection).
                     $intervalMinutes = max(0, (int) ($planTag->interval_minutes ?? 0));
@@ -486,11 +455,20 @@ final class CampaignOrchestrator
                         $planTag,
                     );
                     if ($selection['selected'] === []) {
+                        $skipReasons = $selection['skip_reasons'] ?? [];
+                        // Resource saturation (other Jobs already hold account/session/agent) — keep Pending
+                        // so a later wake/tick can allocate without sticky waiting_resources noise.
+                        if ($this->isTransientResourceSaturation($skipReasons)
+                            || isset($hardWaitMarkedByTag[$planTagId])) {
+                            $this->normalizeNonHeadWaitingToPending($content);
+                            continue;
+                        }
+                        $hardWaitMarkedByTag[$planTagId] = true;
                         $content->status = CampaignContentStatus::WaitingResources->value;
                         $content->last_error_code = 'waiting_resources';
                         $content->last_error_message = $this->formatWaitingResourcesMessage(
                             (string) $planTag->site_key,
-                            $selection['skip_reasons'] ?? [],
+                            $skipReasons,
                         );
                         $content->save();
                         $stillWaiting++;
@@ -519,6 +497,10 @@ final class CampaignOrchestrator
                         'execution_origin' => $executionOrigin,
                     ]);
                     if ($job === null) {
+                        if ($this->isTransientResourceSaturation(['account_locked', 'session_busy', 'agent_at_capacity'])) {
+                            $this->normalizeNonHeadWaitingToPending($content);
+                            continue;
+                        }
                         $content->status = CampaignContentStatus::WaitingResources->value;
                         $content->save();
                         $stillWaiting++;
@@ -549,7 +531,9 @@ final class CampaignOrchestrator
                         $assignedIds[] = $accountId;
                         $busyInCampaign[] = $accountId;
                     }
-                    $inFlightTagIds[$planTagId] = true;
+                    if ($hasOneShotGateRecovery) {
+                        $gateRecoveryUsed[$planTagId] = true;
+                    }
                     $dispatched++;
                 }
 
@@ -2512,6 +2496,31 @@ final class CampaignOrchestrator
             $content->last_error_message = null;
             $content->save();
         }
+    }
+
+    /**
+     * True when at least one otherwise-eligible resource is busy/at-capacity.
+     * Other skip reasons (e.g. platform_mismatch from unrelated sessions) may also appear.
+     *
+     * @param  list<string>  $skipReasons
+     */
+    private function isTransientResourceSaturation(array $skipReasons): bool
+    {
+        $transient = [
+            'agent_at_capacity',
+            'account_locked',
+            'session_busy',
+            'account_busy_in_campaign',
+            'account_already_assigned_in_campaign',
+        ];
+
+        foreach ($skipReasons as $reason) {
+            if (in_array((string) $reason, $transient, true)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

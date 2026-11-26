@@ -167,6 +167,19 @@ final class EligibilitySelector
             $slotsLeft[$aid] = max(0, $max - $active);
         }
 
+        // Fair allocation: prefer least-loaded agents, then stable session id.
+        usort($unique, static function (array $a, array $b) use ($agentsById): int {
+            $aAid = (string) ($a['agent_id'] ?? '');
+            $bAid = (string) ($b['agent_id'] ?? '');
+            $aLoad = (int) ($agentsById[$aAid]['active_jobs'] ?? 0);
+            $bLoad = (int) ($agentsById[$bAid]['active_jobs'] ?? 0);
+            if ($aLoad !== $bLoad) {
+                return $aLoad <=> $bLoad;
+            }
+
+            return ((int) ($a['session_id'] ?? 0)) <=> ((int) ($b['session_id'] ?? 0));
+        });
+
         $selected = [];
         foreach ($unique as $row) {
             $aid = (string) $row['agent_id'];
@@ -175,6 +188,10 @@ final class EligibilitySelector
                 continue;
             }
             $slotsLeft[$aid]--;
+            // Reflect load so subsequent picks in the same select() prefer other agents.
+            if (isset($agentsById[$aid])) {
+                $agentsById[$aid]['active_jobs'] = (int) ($agentsById[$aid]['active_jobs'] ?? 0) + 1;
+            }
             $selected[] = $row;
             if (count($selected) >= $target) {
                 break;

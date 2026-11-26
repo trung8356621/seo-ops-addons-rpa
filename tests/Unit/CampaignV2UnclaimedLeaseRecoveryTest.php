@@ -295,33 +295,36 @@ final class CampaignV2UnclaimedLeaseRecoveryTest extends TestCase
         $this->orchestrator->acknowledge((string) $p1['job_id'], ['attempt_id' => $p1['attempt_id'], 'lease_token' => $p1['lease_token']], (int) $c1['key']->id, 'inst-lease-recovery');
         $this->orchestrator->result((string) $p1['job_id'], ['status' => 'succeeded', 'attempt_id' => $p1['attempt_id'], 'lease_token' => $p1['lease_token']], (int) $c1['key']->id, 'inst-lease-recovery');
 
-        // Head job 2 reserved to c1; c2 claim is null (not reserved for c2)
+        // interval=0 wake reserves job 2 onto some eligible client (fair allocation)
         $job2 = SaJob::query()->where('campaign_id', $camp->id)->where('status', 'reserved')->firstOrFail();
-        self::assertSame((int) $c1['agent']->id, (int) $job2->agent_id);
+        $owner = (int) $job2->agent_id === (int) $c1['agent']->id ? $c1 : $c2;
+        $other = $owner === $c1 ? $c2 : $c1;
+
+        // Other client has no reserved job → data null
         $nullClaim = $this->orchestrator->claimNext(
-            (string) $c2['agent']->agent_uuid,
-            [(string) $c2['session']->session_uuid],
-            (int) $c2['key']->id,
+            (string) $other['agent']->agent_uuid,
+            [(string) $other['session']->session_uuid],
+            (int) $other['key']->id,
             'inst-lease-recovery',
         );
         self::assertTrue($nullClaim['ok']);
         self::assertNull($nullClaim['data']);
 
-        // Wrong API key cannot claim c1's reserved job
+        // Wrong API key cannot claim owner's reserved job
         $forbidden = $this->orchestrator->claimNext(
-            (string) $c1['agent']->agent_uuid,
-            [(string) $c1['session']->session_uuid],
-            (int) $c2['key']->id,
+            (string) $owner['agent']->agent_uuid,
+            [(string) $owner['session']->session_uuid],
+            (int) $other['key']->id,
             'inst-lease-recovery',
         );
         self::assertFalse($forbidden['ok']);
         self::assertContains('agent_not_found', $forbidden['errors'] ?? []);
 
-        // Unclaimed expiry must clear soft pin + affinity even though account has Completed history
+        // Unclaimed expiry clears soft pin + affinity even with prior Completed history
         $job2->update(['lease_expires_at' => now()->subMinute()]);
         SaAccountDeviceAffinity::query()->updateOrCreate(
             ['account_id' => $job2->account_id],
-            ['agent_id' => $c1['agent']->id, 'last_used_at' => now(), 'affinity_until' => now()->addHour()],
+            ['agent_id' => $owner['agent']->id, 'last_used_at' => now(), 'affinity_until' => now()->addHour()],
         );
         $this->orchestrator->reconcileExpiredCampaignLeases();
 
@@ -329,17 +332,17 @@ final class CampaignV2UnclaimedLeaseRecoveryTest extends TestCase
         self::assertNull($content2->fresh()->assigned_account_id);
         self::assertSame(0, SaAccountDeviceAffinity::query()->where('account_id', $job2->account_id)->count());
 
-        // Take c1 offline; c2 with distinct account must be able to claim after redispach
-        $c1['agent']->update(['last_heartbeat_at' => now()->subHour()]);
+        // Owner offline → other client with distinct account claims after redispach
+        $owner['agent']->update(['last_heartbeat_at' => now()->subHour()]);
         $this->orchestrator->recheckDueCampaigns(now());
         $claim2 = $this->orchestrator->claimNext(
-            (string) $c2['agent']->agent_uuid,
-            [(string) $c2['session']->session_uuid],
-            (int) $c2['key']->id,
+            (string) $other['agent']->agent_uuid,
+            [(string) $other['session']->session_uuid],
+            (int) $other['key']->id,
             'inst-lease-recovery',
         );
         self::assertTrue($claim2['ok'] && is_array($claim2['data']), json_encode($claim2));
-        self::assertSame((int) $c2['account']->id, (int) SaJob::query()->where('job_uuid', $claim2['data']['job_id'])->value('account_id'));
+        self::assertSame((int) $other['account']->id, (int) SaJob::query()->where('job_uuid', $claim2['data']['job_id'])->value('account_id'));
     }
 
     public function test_same_account_stays_locked_across_clients(): void

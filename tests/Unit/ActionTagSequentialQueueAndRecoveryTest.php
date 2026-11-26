@@ -654,32 +654,125 @@ final class ActionTagSequentialQueueAndRecoveryTest extends TestCase
         ], null, $this->installationId);
     }
 
-    public function test_1_11_five_jobs_in_one_action_tag_execute_sequentially_with_no_duplicate_cron_ticks(): void
+    public function test_1_11_one_action_tag_two_clients_dispatch_concurrently_without_duplicate_ticks(): void
     {
         $t = $this->seedActionTagAndScript('site_a', 'site_a.create_post');
         $c1 = $this->seedClient('site_a', 'acc_1');
-        $c2 = $this->seedClient('site_a', 'acc_2'); // Even with 2 clients, 1 Action Tag runs sequentially!
+        $c2 = $this->seedClient('site_a', 'acc_2');
+        $c1['agent']->update(['max_concurrency' => 1]);
+        $c2['agent']->update(['max_concurrency' => 1]);
         $setup = $this->createV2RunningCampaign([['tag' => $t['tag'], 'pkg' => $t['pkg'], 'rel' => $t['rel'], 'count' => 5]]);
         $camp = $setup['campaign'];
         $items = $setup['contents']['site_a.create_post'];
 
-        for ($i = 0; $i < 5; $i++) {
-            $this->orchestrator->dispatchCampaign($camp);
-            // 11. Repeated cron ticks create no duplicate Jobs
-            $this->orchestrator->recheckDueCampaigns(now()->addMinutes(5));
-            self::assertSame($i + 1, SaJob::query()->where('campaign_id', $camp->id)->count());
+        $this->orchestrator->dispatchCampaign($camp);
+        // Same Action Tag + 2 distinct accounts/clients → 2 concurrent reserved Jobs
+        self::assertSame(2, SaJob::query()->where('campaign_id', $camp->id)->where('status', 'reserved')->count());
+        $agentIds = SaJob::query()->where('campaign_id', $camp->id)->pluck('agent_id')->unique()->sort()->values()->all();
+        self::assertSame([(int) $c1['agent']->id, (int) $c2['agent']->id], array_map('intval', $agentIds));
+        // Duplicate cron ticks must not create extras while both are in-flight
+        $this->orchestrator->recheckDueCampaigns(now()->addMinutes(5));
+        self::assertSame(2, SaJob::query()->where('campaign_id', $camp->id)->count());
 
-            for ($j = $i + 1; $j < 5; $j++) {
-                self::assertSame(CampaignContentStatus::Pending->value, $items[$j]->fresh()->status);
+        $finished = 0;
+        while ($finished < 5) {
+            $active = SaJob::query()
+                ->where('campaign_id', $camp->id)
+                ->whereIn('status', ['reserved', 'claimed', 'running'])
+                ->orderBy('id')
+                ->get();
+            self::assertNotEmpty($active);
+            foreach ($active as $job) {
+                $useClient = (int) $job->agent_id === (int) $c1['agent']->id ? $c1 : $c2;
+                $this->claimAndFinish($useClient['agent'], $useClient['session'], 'succeeded');
+                $finished++;
             }
-
-            $activeJob = SaJob::query()->where('campaign_id', $camp->id)->orderByDesc('id')->firstOrFail();
-            $useClient = (int) $activeJob->agent_id === $c1['agent']->id ? $c1 : $c2;
-            $this->claimAndFinish($useClient['agent'], $useClient['session'], 'succeeded');
-            self::assertSame(CampaignContentStatus::Success->value, $items[$i]->fresh()->status);
+            // interval=0 wake should top up remaining slots without waiting for schedule-tick
+            if ($finished < 5) {
+                $pendingLeft = 5 - $finished;
+                $reserved = SaJob::query()->where('campaign_id', $camp->id)->where('status', 'reserved')->count();
+                self::assertSame(min(2, $pendingLeft), $reserved);
+            }
         }
 
+        foreach ($items as $item) {
+            self::assertSame(CampaignContentStatus::Success->value, $item->fresh()->status);
+        }
         self::assertSame(CampaignStatus::Completed->value, $camp->fresh()->status);
+        self::assertSame(5, SaJob::query()->where('campaign_id', $camp->id)->count());
+    }
+
+    public function test_one_action_tag_three_clients_three_accounts_three_concurrent_jobs(): void
+    {
+        $t = $this->seedActionTagAndScript('site_b', 'site_b.create_post');
+        $clients = [];
+        foreach (['acc_1', 'acc_2', 'acc_3'] as $acc) {
+            $c = $this->seedClient('site_b', $acc);
+            $c['agent']->update(['max_concurrency' => 1]);
+            $clients[] = $c;
+        }
+        $setup = $this->createV2RunningCampaign([['tag' => $t['tag'], 'pkg' => $t['pkg'], 'rel' => $t['rel'], 'count' => 10]]);
+        $camp = $setup['campaign'];
+
+        $result = $this->orchestrator->dispatchCampaign($camp);
+        self::assertSame(3, $result['dispatched']);
+        $jobs = SaJob::query()->where('campaign_id', $camp->id)->where('status', 'reserved')->get();
+        self::assertCount(3, $jobs);
+        self::assertCount(3, $jobs->pluck('agent_id')->unique());
+        self::assertCount(3, $jobs->pluck('account_id')->unique());
+
+        // Second tick while all 3 in-flight → no duplicates
+        $this->orchestrator->dispatchCampaign($camp->fresh());
+        self::assertSame(3, SaJob::query()->where('campaign_id', $camp->id)->count());
+
+        // Claims succeed independently on each client
+        $claimed = [];
+        foreach ($jobs as $job) {
+            $client = collect($clients)->first(fn ($c) => (int) $c['agent']->id === (int) $job->agent_id);
+            self::assertNotNull($client);
+            $claim = $this->orchestrator->claimNext($client['agent']->agent_uuid, [$client['session']->session_uuid], null, $this->installationId);
+            self::assertTrue($claim['ok'] && is_array($claim['data']));
+            $claimed[] = $claim['data']['job_id'];
+        }
+        self::assertCount(3, array_unique($claimed));
+    }
+
+    public function test_one_client_two_browser_profiles_still_max_one_job_when_concurrency_one(): void
+    {
+        $t = $this->seedActionTagAndScript('site_c', 'site_c.create_post');
+        $c = $this->seedClient('site_c', 'acc_c1');
+        $c['agent']->update(['max_concurrency' => 1]);
+        $session2 = SaBrowserSession::query()->create([
+            'session_uuid' => (string) Str::uuid(),
+            'agent_id' => $c['agent']->id,
+            'ready_status' => SessionReadyStatus::Ready->value,
+            'status' => 'ready',
+            'execution_lock_state' => 'unlocked',
+        ]);
+        $acc2 = SaAccount::query()->create([
+            'account_uuid' => (string) Str::uuid(),
+            'installation_id' => $this->installationId,
+            'platform' => 'site_c',
+            'domain' => 'site_c.test',
+            'platform_account_id' => 'acc_c2',
+            'verified' => true,
+            'identity_source' => 'browser',
+            'username' => 'acc_c2',
+            'status' => 'active',
+            'lock_state' => 'unlocked',
+        ]);
+        SaSessionAccount::query()->create([
+            'browser_session_id' => $session2->id,
+            'account_id' => $acc2->id,
+            'is_active' => true,
+            'status' => 'active',
+            'is_primary' => true,
+        ]);
+
+        $setup = $this->createV2RunningCampaign([['tag' => $t['tag'], 'pkg' => $t['pkg'], 'rel' => $t['rel'], 'count' => 3]]);
+        $camp = $setup['campaign'];
+        $this->orchestrator->dispatchCampaign($camp);
+        self::assertSame(1, SaJob::query()->where('campaign_id', $camp->id)->count());
     }
 
     public function test_two_tags_two_clients_concurrent_claims_and_zero_interval_wake(): void
@@ -848,18 +941,27 @@ final class ActionTagSequentialQueueAndRecoveryTest extends TestCase
         $camp = $setup['campaign'];
         $items = $setup['contents']['baloquatang.create_post'];
 
-        // 8 & 9. Only head (item 0) becomes WaitingResources; items 1 & 2 remain Pending; next_recheck_at set
+        // Offline: first content waits for resources; siblings stay Pending (no AT global lock)
         $this->orchestrator->dispatchCampaign($camp);
         self::assertSame(CampaignContentStatus::WaitingResources->value, $items[0]->fresh()->status);
         self::assertSame(CampaignContentStatus::Pending->value, $items[1]->fresh()->status);
         self::assertSame(CampaignContentStatus::Pending->value, $items[2]->fresh()->status);
         self::assertNotNull($camp->fresh()->next_recheck_at);
 
-        // 12. Both clients come online sharing one Account -> only 1 Job & 1 active Lease created
-        $c1['agent']->update(['availability' => AgentAvailability::Available->value, 'last_heartbeat_at' => now()]);
-        $c2['agent']->update(['availability' => AgentAvailability::Available->value, 'last_heartbeat_at' => now()]);
+        // Shared account across 2 clients → still only 1 concurrent Job / 1 active Lease
+        $c1['agent']->update([
+            'availability' => AgentAvailability::Available->value,
+            'last_heartbeat_at' => now(),
+            'max_concurrency' => 1,
+        ]);
+        $c2['agent']->update([
+            'availability' => AgentAvailability::Available->value,
+            'last_heartbeat_at' => now(),
+            'max_concurrency' => 1,
+        ]);
 
         $this->orchestrator->recheckDueCampaigns(now()->addMinutes(65));
+        self::assertSame(1, SaJob::query()->where('campaign_id', $camp->id)->count());
         self::assertSame(CampaignContentStatus::Running->value, $items[0]->fresh()->status);
         self::assertSame(CampaignContentStatus::Pending->value, $items[1]->fresh()->status);
         self::assertSame(1, SaAccountExecutionLease::query()->where('account_id', $sharedAcc->id)->where('status', 'active')->count());
