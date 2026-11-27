@@ -775,6 +775,226 @@ final class ActionTagSequentialQueueAndRecoveryTest extends TestCase
         self::assertSame(1, SaJob::query()->where('campaign_id', $camp->id)->count());
     }
 
+    public function test_unknown_frees_agent_capacity_keeps_account_lease_and_allows_sibling_account(): void
+    {
+        // Independent Action Tags: Unknown gates Tag A but must not monopolize Client concurrency for Tag B.
+        $tagA = $this->seedActionTagAndScript('site_unk_a', 'site_unk_a.create_post');
+        $tagB = $this->seedActionTagAndScript('site_unk_b', 'site_unk_b.create_post');
+        $cA = $this->seedClient('site_unk_a', 'acc_locked');
+        $cA['agent']->update(['max_concurrency' => 1]);
+        $sessionB = SaBrowserSession::query()->create([
+            'session_uuid' => (string) Str::uuid(),
+            'agent_id' => $cA['agent']->id,
+            'ready_status' => SessionReadyStatus::Ready->value,
+            'status' => 'ready',
+            'execution_lock_state' => 'unlocked',
+        ]);
+        $accB = SaAccount::query()->create([
+            'account_uuid' => (string) Str::uuid(),
+            'installation_id' => $this->installationId,
+            'platform' => 'site_unk_b',
+            'domain' => 'site_unk_b.test',
+            'platform_account_id' => 'acc_free',
+            'verified' => true,
+            'identity_source' => 'browser',
+            'username' => 'acc_free',
+            'status' => 'active',
+            'lock_state' => 'unlocked',
+        ]);
+        SaSessionAccount::query()->create([
+            'browser_session_id' => $sessionB->id,
+            'account_id' => $accB->id,
+            'is_active' => true,
+            'status' => 'active',
+            'is_primary' => true,
+        ]);
+
+        $setup = $this->createV2RunningCampaign([
+            ['tag' => $tagA['tag'], 'pkg' => $tagA['pkg'], 'rel' => $tagA['rel'], 'count' => 2],
+            ['tag' => $tagB['tag'], 'pkg' => $tagB['pkg'], 'rel' => $tagB['rel'], 'count' => 2],
+        ]);
+        $camp = $setup['campaign'];
+        $this->orchestrator->dispatchCampaign($camp);
+        // Concurrency 1 → only one Job despite two eligible Accounts/Tags.
+        self::assertSame(1, SaJob::query()->where('campaign_id', $camp->id)->count());
+
+        $firstJob = SaJob::query()->where('campaign_id', $camp->id)->firstOrFail();
+        $useSession = (int) $firstJob->browser_session_id === (int) $cA['session']->id ? $cA['session'] : $sessionB;
+        $this->claimAndFinish($cA['agent'], $useSession, 'unknown', 'LEASE_ORPHAN');
+
+        $unknownJob = $firstJob->fresh();
+        self::assertSame('unknown', $unknownJob->status);
+        self::assertSame(0, (int) $cA['agent']->fresh()->active_jobs);
+        self::assertNull($useSession->fresh()->locked_job_id);
+        self::assertSame(
+            1,
+            SaAccountExecutionLease::query()->where('job_id', $unknownJob->id)->where('status', 'active')->count()
+        );
+
+        // Sibling Tag/Account on same Client must dispatch despite Unknown Account lease + stale counter risk.
+        $this->orchestrator->dispatchCampaign($camp->fresh());
+        $active = SaJob::query()
+            ->where('campaign_id', $camp->id)
+            ->whereIn('status', ['reserved', 'claimed', 'running'])
+            ->get();
+        self::assertCount(1, $active);
+        self::assertNotSame((int) $firstJob->account_id, (int) $active[0]->account_id);
+        self::assertSame((int) $cA['agent']->id, (int) $active[0]->agent_id);
+    }
+
+    public function test_unbound_account_excluded_bound_peer_dispatches_and_pin_respected(): void
+    {
+        $t = $this->seedActionTagAndScript('site_bind', 'site_bind.create_post');
+        $bound = $this->seedClient('site_bind', 'acc_bound');
+        $bound['agent']->update(['max_concurrency' => 1]);
+
+        // Online Client with Account row but NO session bind (mirrors live Acc#6 exclusion).
+        $unboundAgent = SaAgent::query()->create([
+            'agent_uuid' => (string) Str::uuid(),
+            'installation_id' => $this->installationId,
+            'agent_kind' => 'client',
+            'availability' => AgentAvailability::Available->value,
+            'last_heartbeat_at' => now(),
+            'max_concurrency' => 1,
+        ]);
+        SaBrowserSession::query()->create([
+            'session_uuid' => (string) Str::uuid(),
+            'agent_id' => $unboundAgent->id,
+            'ready_status' => SessionReadyStatus::Ready->value,
+            'status' => 'ready',
+            'execution_lock_state' => 'unlocked',
+        ]);
+        SaAccount::query()->create([
+            'account_uuid' => (string) Str::uuid(),
+            'installation_id' => $this->installationId,
+            'platform' => 'site_bind',
+            'domain' => 'site_bind.test',
+            'platform_account_id' => 'acc_unbound',
+            'verified' => true,
+            'identity_source' => 'browser',
+            'username' => 'acc_unbound',
+            'status' => 'active',
+            'lock_state' => 'unlocked',
+        ]);
+
+        $setup = $this->createV2RunningCampaign([['tag' => $t['tag'], 'pkg' => $t['pkg'], 'rel' => $t['rel'], 'count' => 4]]);
+        $camp = $setup['campaign'];
+        $this->orchestrator->dispatchCampaign($camp);
+        $jobs = SaJob::query()->where('campaign_id', $camp->id)->where('status', 'reserved')->get();
+        self::assertCount(1, $jobs);
+        self::assertSame((int) $bound['agent']->id, (int) $jobs[0]->agent_id);
+        self::assertSame((int) $bound['account']->id, (int) $jobs[0]->account_id);
+
+        // Hard pin to bound Account → still only that Account; unbound Client stays excluded.
+        $camp->update(['meta' => ['pinned_account_id' => $bound['account']->account_uuid]]);
+        $this->claimAndFinish($bound['agent'], $bound['session'], 'succeeded');
+        $this->orchestrator->dispatchCampaign($camp->fresh());
+        $next = SaJob::query()->where('campaign_id', $camp->id)->where('status', 'reserved')->first();
+        self::assertNotNull($next);
+        self::assertSame((int) $bound['account']->id, (int) $next->account_id);
+        self::assertSame((int) $bound['agent']->id, (int) $next->agent_id);
+    }
+
+    public function test_ten_jobs_distribute_to_two_clients_and_shared_account_never_concurrent(): void
+    {
+        $t = $this->seedActionTagAndScript('site_dist', 'site_dist.create_post');
+        $c1 = $this->seedClient('site_dist', 'acc_d1');
+        $c2 = $this->seedClient('site_dist', 'acc_d2');
+        $c1['agent']->update(['max_concurrency' => 1]);
+        $c2['agent']->update(['max_concurrency' => 1]);
+
+        $setup = $this->createV2RunningCampaign([['tag' => $t['tag'], 'pkg' => $t['pkg'], 'rel' => $t['rel'], 'count' => 10]]);
+        $camp = $setup['campaign'];
+
+        $seenAgents = [];
+        $finished = 0;
+        while ($finished < 10) {
+            $this->orchestrator->dispatchCampaign($camp->fresh());
+            $active = SaJob::query()
+                ->where('campaign_id', $camp->id)
+                ->whereIn('status', ['reserved', 'claimed', 'running'])
+                ->orderBy('id')
+                ->get();
+            self::assertLessThanOrEqual(2, $active->count());
+            if ($finished === 0) {
+                self::assertCount(2, $active);
+                self::assertCount(2, $active->pluck('agent_id')->unique());
+                self::assertCount(2, $active->pluck('account_id')->unique());
+            }
+            foreach ($active as $job) {
+                $seenAgents[(int) $job->agent_id] = true;
+                $client = (int) $job->agent_id === (int) $c1['agent']->id ? $c1 : $c2;
+                $claim = $this->orchestrator->claimNext(
+                    $client['agent']->agent_uuid,
+                    [$client['session']->session_uuid],
+                    null,
+                    $this->installationId
+                );
+                self::assertTrue($claim['ok'] && is_array($claim['data']));
+                $attempts = SaJobAttempt::query()->where('job_id', $job->id)->count();
+                self::assertSame(1, $attempts);
+                $this->orchestrator->acknowledge($claim['data']['job_id'], [
+                    'attempt_id' => $claim['data']['attempt_id'],
+                    'lease_token' => $claim['data']['lease_token'],
+                ], null, $this->installationId);
+                $this->orchestrator->result($claim['data']['job_id'], [
+                    'status' => 'succeeded',
+                    'attempt_id' => $claim['data']['attempt_id'],
+                    'lease_token' => $claim['data']['lease_token'],
+                ], null, $this->installationId);
+                self::assertSame(1, SaJobAttempt::query()->where('job_id', $job->id)->count());
+                $finished++;
+            }
+        }
+        self::assertArrayHasKey((int) $c1['agent']->id, $seenAgents);
+        self::assertArrayHasKey((int) $c2['agent']->id, $seenAgents);
+        self::assertSame(10, SaJob::query()->where('campaign_id', $camp->id)->where('status', 'completed')->count());
+
+        // Same Account bound on two Clients → never concurrent for that Account.
+        $shared = $this->seedClient('site_dist', 'acc_shared');
+        $peer = $this->seedClient('site_dist', 'acc_shared_peer', true, $shared['account']);
+        $shared['agent']->update(['max_concurrency' => 1]);
+        $peer['agent']->update(['max_concurrency' => 1]);
+        $setup2 = $this->createV2RunningCampaign([['tag' => $t['tag'], 'pkg' => $t['pkg'], 'rel' => $t['rel'], 'count' => 3]]);
+        $camp2 = $setup2['campaign'];
+        $camp2->update(['meta' => ['pinned_account_id' => $shared['account']->account_uuid]]);
+        $this->orchestrator->dispatchCampaign($camp2);
+        self::assertSame(1, SaJob::query()->where('campaign_id', $camp2->id)->count());
+    }
+
+    public function test_offline_client_unclaimed_lease_reassigns_and_foreign_installation_excluded(): void
+    {
+        $t = $this->seedActionTagAndScript('site_fail', 'site_fail.create_post');
+        $online = $this->seedClient('site_fail', 'acc_on');
+        $offline = $this->seedClient('site_fail', 'acc_off', false);
+        $online['agent']->update(['max_concurrency' => 1]);
+        $offline['agent']->update(['max_concurrency' => 1]);
+
+        // Foreign installation Client must never receive Jobs.
+        $foreign = $this->seedClient('site_fail', 'acc_foreign');
+        $foreign['agent']->update(['installation_id' => 'inst-other', 'max_concurrency' => 1]);
+        $foreign['account']->update(['installation_id' => 'inst-other']);
+
+        $setup = $this->createV2RunningCampaign([['tag' => $t['tag'], 'pkg' => $t['pkg'], 'rel' => $t['rel'], 'count' => 2]]);
+        $camp = $setup['campaign'];
+        $this->orchestrator->dispatchCampaign($camp);
+        $job = SaJob::query()->where('campaign_id', $camp->id)->where('status', 'reserved')->firstOrFail();
+        self::assertSame((int) $online['agent']->id, (int) $job->agent_id);
+        self::assertNotSame((int) $foreign['agent']->id, (int) $job->agent_id);
+
+        // Expire unclaimed reservation → waiting_resources → redispatch to remaining online Client.
+        $job->update(['lease_expires_at' => now()->subMinute()]);
+        $online['agent']->update(['last_heartbeat_at' => now()->subHours(3), 'availability' => 'offline']);
+        $offline['agent']->update(['last_heartbeat_at' => now(), 'availability' => AgentAvailability::Available->value]);
+        $this->orchestrator->reconcileExpiredCampaignLeases();
+        self::assertSame('cancelled', $job->fresh()->status);
+        $this->orchestrator->dispatchCampaign($camp->fresh());
+        $reassigned = SaJob::query()->where('campaign_id', $camp->id)->where('status', 'reserved')->first();
+        self::assertNotNull($reassigned);
+        self::assertSame((int) $offline['agent']->id, (int) $reassigned->agent_id);
+        self::assertNotSame((int) $foreign['agent']->id, (int) $reassigned->agent_id);
+    }
+
     public function test_two_tags_two_clients_concurrent_claims_and_zero_interval_wake(): void
     {
         $tagA = $this->seedActionTagAndScript('site_x', 'site_x.create_post');

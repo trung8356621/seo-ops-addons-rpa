@@ -436,7 +436,8 @@ final class CampaignOrchestrator
                         }
                     }
 
-                    $requiredAccountId = $content->assigned_account_id ? (int) $content->assigned_account_id : null;
+                    // Same pin precedence as V1: content.assigned_account_id → campaign.meta.pinned_account_id.
+                    $requiredAccountId = $this->resolveRequiredAccountId($locked, $content);
                     $blockedAssigned = $assignedIds;
                     if ($mode === CampaignExecutionMode::OneAccountOneJob && $requiredAccountId !== null) {
                         $blockedAssigned = array_values(array_filter(
@@ -465,17 +466,31 @@ final class CampaignOrchestrator
                         }
                         $hardWaitMarkedByTag[$planTagId] = true;
                         $content->status = CampaignContentStatus::WaitingResources->value;
-                        $content->last_error_code = 'waiting_resources';
-                        $content->last_error_message = $this->formatWaitingResourcesMessage(
-                            (string) $planTag->site_key,
-                            $skipReasons,
-                        );
+                        $content->last_error_code = $requiredAccountId !== null
+                            ? 'pinned_account_unavailable'
+                            : 'waiting_resources';
+                        $content->last_error_message = $requiredAccountId !== null
+                            ? 'Pinned account is offline or not eligible; no fallback'
+                            : $this->formatWaitingResourcesMessage(
+                                (string) $planTag->site_key,
+                                $skipReasons,
+                            );
                         $content->save();
                         $stillWaiting++;
                         continue;
                     }
 
                     $row = $selection['selected'][0];
+                    $selectedAccountId = (int) ($row['account_id'] ?? 0);
+                    if ($requiredAccountId !== null && $selectedAccountId !== $requiredAccountId) {
+                        $content->status = CampaignContentStatus::WaitingResources->value;
+                        $content->last_error_code = 'pinned_account_mismatch';
+                        $content->last_error_message = 'Dispatch refused non-pinned account (no silent fallback)';
+                        $content->save();
+                        $stillWaiting++;
+                        continue;
+                    }
+
                     $errMeta = is_array($content->last_error_meta) ? $content->last_error_meta : [];
                     $executionOrigin = ($errMeta['manual_recovery_origin'] ?? null) === 'manual_retry'
                         ? 'manual_retry'
@@ -1643,7 +1658,8 @@ final class CampaignOrchestrator
                         return;
                     }
 
-                    // Claimed/running → unknown; keep account lock until admin acts.
+                    // Claimed/running → unknown; keep ACCOUNT lease until admin acts.
+                    // Release session/agent capacity so the Client can run other Accounts.
                     $attempt = $this->activeAttempt($locked);
                     if ($attempt instanceof SaJobAttempt) {
                         $attempt->status = CampaignAttemptStatus::Unknown->value;
@@ -1670,7 +1686,7 @@ final class CampaignOrchestrator
                                 ->update(['status' => CampaignContentStatus::Unknown->value]);
                         }
                     }
-                    // Do NOT release account lease for unknown — prevents concurrent re-execution.
+                    $this->releaseExecutionCapacityKeepAccountLease($locked);
                     $count++;
                 });
             } catch (Throwable) {
@@ -1773,15 +1789,28 @@ final class CampaignOrchestrator
         ?int $requiredAccountId = null,
         ?SaCampaignActionTag $planTag = null,
     ): array {
+        // Agent capacity = live executing Jobs only. Unknown keeps the Account locked but must not
+        // permanently consume Client concurrency (otherwise one stale Unknown blocks all other Accounts).
+        $executingByAgent = SaJob::query()
+            ->whereIn('status', [
+                JobStatus::Reserved->value,
+                JobStatus::Claimed->value,
+                JobStatus::Running->value,
+            ])
+            ->whereNotNull('agent_id')
+            ->selectRaw('agent_id, COUNT(*) as cnt')
+            ->groupBy('agent_id')
+            ->pluck('cnt', 'agent_id');
+
         $agents = SaAgent::query()
             ->where('installation_id', $campaign->installation_id)
             ->get()
-            ->map(function (SaAgent $a): array {
+            ->map(function (SaAgent $a) use ($executingByAgent): array {
                 return [
                     'agent_id' => $a->id,
                     'online' => $this->online->isOnline($a->last_heartbeat_at),
                     'availability' => (string) $a->availability,
-                    'active_jobs' => (int) $a->active_jobs,
+                    'active_jobs' => (int) ($executingByAgent[$a->id] ?? 0),
                     'max_concurrency' => max(1, (int) $a->max_concurrency),
                     'capabilities' => is_array($a->capabilities) ? $a->capabilities : [],
                     'runtime_version' => $a->runtime_version,
@@ -2312,6 +2341,9 @@ final class CampaignOrchestrator
 
                 if ($releaseLock || $to->isTerminal()) {
                     $this->releaseJobLocks($job);
+                } elseif ($to === JobStatus::Unknown) {
+                    // Account lease stays active; free Client/session slots for other Accounts.
+                    $this->releaseExecutionCapacityKeepAccountLease($job);
                 }
 
                 if ($terminalContent && $job->campaign_content_id) {
@@ -2804,6 +2836,16 @@ final class CampaignOrchestrator
             'released_at' => now(),
             'heartbeat_at' => now(),
         ]);
+        $this->releaseExecutionCapacityKeepAccountLease($job);
+    }
+
+    /**
+     * Free Client/session concurrency without releasing the Account execution lease.
+     * Used for Unknown outcomes so the same Account cannot be re-posted while other
+     * Accounts on the same Client remain dispatchable.
+     */
+    private function releaseExecutionCapacityKeepAccountLease(SaJob $job): void
+    {
         if ($job->browser_session_id) {
             $session = SaBrowserSession::query()->lockForUpdate()->find($job->browser_session_id);
             if ($session instanceof SaBrowserSession && (int) $session->locked_job_id === (int) $job->id) {
