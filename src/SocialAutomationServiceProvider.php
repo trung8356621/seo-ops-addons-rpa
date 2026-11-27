@@ -31,6 +31,9 @@ use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaAdmin\RpaAdminAuthCo
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaAdmin\RpaAdminScriptSyncController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaAdmin\RpaAdminSpaController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaClientApiController;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\ClientRecoveryController;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\RecoveryRegistryController;
+use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaAdmin\RpaAdminRecoveryController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\RpaClientApiKeyManagementController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ScriptRegistry\StaffScriptRegistryController;
 use Omnichannel\Addons\SocialAutomation\Http\Controllers\ScriptRegistry\StaffScriptVariantGroupController;
@@ -111,6 +114,7 @@ final class SocialAutomationServiceProvider extends ServiceProvider
         $this->app->singleton(JobOrchestrator::class);
         $this->app->singleton(CampaignOrchestrator::class);
         $this->app->singleton(CampaignService::class);
+        $this->app->singleton(\Omnichannel\Addons\SocialAutomation\Services\RecoveryRegistryService::class);
         $this->app->singleton(ScheduleDispatcher::class);
         $this->app->singleton(DashboardMetrics::class);
         $this->app->singleton(RpaClientApiKeyGenerator::class);
@@ -588,6 +592,16 @@ final class SocialAutomationServiceProvider extends ServiceProvider
 
                 Route::post('/api/clients/sessions/{sessionId}/notifications', [\Omnichannel\Addons\SocialAutomation\Http\Controllers\ClientManagementController::class, 'notify'])
                     ->whereNumber('sessionId')->name('social-automation.clients.notifications.store');
+
+                Route::prefix('api/recovery-registry')->group(function (): void {
+                    Route::get('/error-tags', [RecoveryRegistryController::class, 'index']);
+                    Route::post('/error-tags', [RecoveryRegistryController::class, 'store']);
+                    Route::patch('/error-tags/{id}', [RecoveryRegistryController::class, 'update'])->whereUuid('id');
+                    Route::post('/error-tags/{id}/templates', [RecoveryRegistryController::class, 'addTemplate'])->whereUuid('id');
+                    Route::patch('/error-tags/{id}/templates/{templateId}', [RecoveryRegistryController::class, 'updateTemplate'])->whereUuid('id')->whereUuid('templateId');
+                    Route::put('/error-tags/{id}/handler', [RecoveryRegistryController::class, 'bind'])->whereUuid('id');
+                    Route::post('/error-tags/{id}/handler-request', [RecoveryRegistryController::class, 'requestHandler'])->whereUuid('id');
+                });
             });
 
         // RPA Client Key Endpoints (Bearer <client_api_key>)
@@ -627,6 +641,10 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     ->whereUuid('notificationId');
                 Route::post('/session-confirm-login', [RpaClientApiController::class, 'confirmLogin'])
                     ->name('social-automation.client.session-confirm-login');
+                Route::get('/recovery-registry', [ClientRecoveryController::class, 'registry'])
+                    ->name('social-automation.client.recovery-registry');
+                Route::post('/recovery-results', [ClientRecoveryController::class, 'report'])
+                    ->name('social-automation.client.recovery-results');
 
                 // CP8 Auth Script + Action Script pull/asset — API key + active connection lease
                 Route::middleware([EnsureClientConnectionLease::class])->group(function (): void {
@@ -730,6 +748,9 @@ final class SocialAutomationServiceProvider extends ServiceProvider
                     Route::post('/script-requests/{requestId}/claim', [RpaAdminScriptSyncController::class, 'claimScriptRequest'])
                         ->where('requestId', '[A-Za-z0-9._-]+')
                         ->name('social-automation.rpa-admin.script-requests.claim');
+                    Route::get('/recovery-handler-requests', [RpaAdminRecoveryController::class, 'requests']);
+                    Route::post('/recovery-handler-requests/{requestId}/claim', [RpaAdminRecoveryController::class, 'claim'])
+                        ->whereUuid('requestId');
                 });
             });
 

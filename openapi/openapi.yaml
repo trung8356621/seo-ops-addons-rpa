@@ -172,6 +172,37 @@ components:
         type: integer
 
   schemas:
+    NormalizedRoi:
+      type: object
+      required: [x, y, width, height]
+      properties:
+        x: { type: number, minimum: 0, maximum: 1 }
+        y: { type: number, minimum: 0, maximum: 1 }
+        width: { type: number, minimum: 0, maximum: 1 }
+        height: { type: number, minimum: 0, maximum: 1 }
+    RecoveryVisualTemplateInput:
+      type: object
+      required: [attempt_uuid, artifact_uuid, modal_roi]
+      properties:
+        attempt_uuid: { type: string, format: uuid }
+        artifact_uuid: { type: string, format: uuid }
+        modal_roi: { $ref: '#/components/schemas/NormalizedRoi' }
+        target_roi: { $ref: '#/components/schemas/NormalizedRoi' }
+        ocr_anchors: { type: array, items: { type: object } }
+        recognition_config: { type: object }
+        match_threshold: { type: number, minimum: 0.5, maximum: 1.0, default: 0.85 }
+    RecoveryErrorTagCreate:
+      allOf:
+        - { $ref: '#/components/schemas/RecoveryVisualTemplateInput' }
+        - type: object
+          required: [name, platform]
+          properties:
+            name: { type: string }
+            description: { type: string, nullable: true }
+            platform: { type: string }
+            site_scope: { type: string, nullable: true }
+            max_attempts_per_step: { type: integer, minimum: 1, maximum: 5, default: 1 }
+            recovery_policy: { type: object }
     OkTrue:
       type: object
       required: [ok]
@@ -1983,6 +2014,101 @@ components:
             $ref: '#/components/schemas/ErrorEnvelope'
 
 paths:
+  /social-automation/api/recovery-registry/error-tags:
+    get:
+      tags: [Staff Session]
+      summary: List/search tenant-owned Error Tags
+      security: [{ SeoOpsSessionCookie: [] }]
+      responses: { '200': { description: Authorized Recovery Registry rows } }
+    post:
+      tags: [Staff Session]
+      summary: Create Error Tag and first Visual Template from a failed Attempt screenshot
+      security: [{ SeoOpsSessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecoveryErrorTagCreate' }
+            example:
+              name: Facebook expired session modal
+              platform: facebook
+              site_scope: business.facebook.com
+              attempt_uuid: 3425c3d5-9d47-4d8d-a2af-d121cef3e166
+              artifact_uuid: ec83c15c-e411-4da0-a32a-8a7c9fc5a9c1
+              modal_roi: { x: 0.25, y: 0.2, width: 0.5, height: 0.45 }
+              target_roi: { x: 0.52, y: 0.54, width: 0.12, height: 0.07 }
+              recognition_config: { algorithm: template_v1, grayscale: true }
+              match_threshold: 0.9
+              max_attempts_per_step: 1
+              recovery_policy: { verify_after_handler: true, uncertain_publish: reject }
+      responses: { '201': { description: Created }, '422': { description: Invalid or unauthorized failed source } }
+  /social-automation/api/recovery-registry/error-tags/{errorTagId}/templates:
+    post:
+      tags: [Staff Session]
+      summary: Add a Visual Template
+      security: [{ SeoOpsSessionCookie: [] }]
+      parameters: [{ in: path, name: errorTagId, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RecoveryVisualTemplateInput' } } }
+      responses: { '201': { description: Template created } }
+  /social-automation/api/recovery-registry/error-tags/{errorTagId}/handler:
+    put:
+      tags: [Staff Session]
+      summary: Bind or unbind an owned published Recovery Handler release
+      security: [{ SeoOpsSessionCookie: [] }]
+      parameters: [{ in: path, name: errorTagId, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { release_id: { type: integer, nullable: true } } }, example: { release_id: 418 } } }
+      responses: { '200': { description: Binding updated }, '422': { description: Published compatible owned release required } }
+  /social-automation/api/recovery-registry/error-tags/{errorTagId}/handler-request:
+    post:
+      tags: [Staff Session]
+      summary: Request a Recovery Handler Script from RPA Admin
+      security: [{ SeoOpsSessionCookie: [] }]
+      parameters: [{ in: path, name: errorTagId, required: true, schema: { type: string, format: uuid } }]
+      requestBody: { content: { application/json: { example: { notes: Handle modal and verify original step can resume } } } }
+      responses: { '201': { description: Idempotent request created or returned } }
+  /api/v1/social-automation/client/recovery-registry:
+    get:
+      tags: [RPA Client]
+      summary: Pull published, enabled and tenant-authorized Recovery configurations
+      security: [{ RpaClientApiKey: [] }]
+      responses:
+        '200':
+          description: Executable registry with enabled Templates only
+          content: { application/json: { example: { ok: true, schema_version: 1, runtime_input_contract: { matched_error_tag_id: integer, matched_visual_template_id: integer, modal_bounding_box: normalized_roi, selected_target_bounding_box: normalized_roi, click_coordinates: viewport_pixels, viewport: { width: integer, height: integer } }, error_tags: [] } } }
+  /api/v1/social-automation/client/recovery-results:
+    post:
+      tags: [RPA Client]
+      summary: Report Recovery on the existing Attempt and lease
+      description: Never creates a Campaign Job or Attempt. Rejects stale leases, recursion, low confidence, and attempt-limit overflow.
+      security: [{ RpaClientApiKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            example:
+              attempt_uuid: 3425c3d5-9d47-4d8d-a2af-d121cef3e166
+              lease_token: 3f735c841d164dd6a7e43f4800e8a1a0
+              error_tag_id: 31
+              visual_template_id: 72
+              handler_release_id: 418
+              failed_step_id: publish_post
+              recovery_attempt_no: 1
+              match_confidence: 0.9472
+              is_handler_execution: false
+              runtime_input: { matched_error_tag_id: 31, matched_visual_template_id: 72, modal_bounding_box: { x: 320, y: 180, width: 640, height: 420 }, selected_target_bounding_box: { x: 721, y: 564, width: 151, height: 52 }, click_coordinates: { x: 796, y: 590 }, viewport: { width: 1440, height: 900 } }
+              verification_outcome: passed
+              final_job_outcome: resumed
+              idempotency_key: recovery:3425c3d5:publish_post:1
+      responses: { '201': { description: Stored on same Attempt }, '200': { description: Idempotent replay }, '409': { description: Stale lease }, '422': { description: Safety or validation failure } }
+  /api/v1/social-automation/rpa-admin/recovery-handler-requests:
+    get:
+      tags: [RPA Admin]
+      summary: List Recovery Handler requests
+      security: [{ RpaAdminBearer: [] }]
+      responses: { '200': { description: Sanitized request list } }
   /api/v1/social-automation/docs:
     get:
       tags: [Docs]
