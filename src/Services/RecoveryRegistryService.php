@@ -6,6 +6,8 @@ namespace Omnichannel\Addons\SocialAutomation\Services;
 
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Omnichannel\Addons\SocialAutomation\Domain\RecoveryClientAuthorization;
+use Omnichannel\Addons\SocialAutomation\Models\SaAgent;
 use Omnichannel\Addons\SocialAutomation\Models\SaArtifact;
 use Omnichannel\Addons\SocialAutomation\Models\SaCampaign;
 use Omnichannel\Addons\SocialAutomation\Models\SaJobAttempt;
@@ -107,28 +109,41 @@ final class RecoveryRegistryService
         return ['ok'=>true,'idempotent'=>false,'request_uuid'=>$row->request_uuid];
     }
 
-    /** @return array<string,mixed> */
-    public function runtimeRegistry(int $ownerUserId,string $installationId,?string $platform=null): array
+    /**
+     * @param  int|list<int>  $ownerUserIds
+     * @return array<string,mixed>
+     */
+    public function runtimeRegistry(int|array $ownerUserIds,string $installationId,?string $platform=null): array
     {
-        $q=SaRecoveryErrorTag::query()->with(['templates'=>fn($x)=>$x->where('is_enabled',true)])->where('owner_user_id',$ownerUserId)->where('installation_id',$installationId)->where('is_enabled',true)->whereNotNull('handler_release_id');
+        $permittedOwners=RecoveryClientAuthorization::normalizeOwnerIds($ownerUserIds);
+        if($permittedOwners===[])return ['ok'=>true,'schema_version'=>1,'runtime_input_contract'=>$this->runtimeInputContract(),'error_tags'=>[]];
+        $q=SaRecoveryErrorTag::query()->with(['templates'=>fn($x)=>$x->where('is_enabled',true)])->whereIn('owner_user_id',$permittedOwners)->where('installation_id',$installationId)->where('is_enabled',true)->whereNotNull('handler_release_id');
         if($platform)$q->where('platform',strtolower($platform));
         $rows=[]; foreach($q->get() as $tag){
             $release=SaPackageRelease::query()->with('package')->whereKey($tag->handler_release_id)->where('status','published')->first();
-            if(!$release||!$release->package||!($release->package->is_enabled??true)||(int)($release->package->created_by_user_id??0)!==$ownerUserId||!$this->compatibleHandler($release)||$tag->templates->isEmpty())continue;
+            if(!$release||!$release->package||!($release->package->is_enabled??true)||(int)($release->package->created_by_user_id??0)!==(int)$tag->owner_user_id||!$this->compatibleHandler($release)||$tag->templates->isEmpty())continue;
             $dto=$this->tagDto($tag,$tag->templates->all()); $dto['handler']=$this->releaseDto($release); $rows[]=$dto;
         }
         return ['ok'=>true,'schema_version'=>1,'runtime_input_contract'=>$this->runtimeInputContract(),'error_tags'=>$rows];
     }
 
-    /** @return array<string,mixed> */
-    public function report(int $ownerUserId,string $installationId,array $input): array
+    /**
+     * @param  int|list<int>  $ownerUserIds
+     * @return array<string,mixed>
+     */
+    public function report(int|array $ownerUserIds,string $installationId,array $input,?int $clientApiKeyId=null): array
     {
+        $permittedOwners=RecoveryClientAuthorization::normalizeOwnerIds($ownerUserIds);
         foreach(['attempt_uuid','lease_token','error_tag_id','visual_template_id','handler_release_id','failed_step_id','recovery_attempt_no','match_confidence','verification_outcome','idempotency_key'] as $f)if(!isset($input[$f])||$input[$f]==='')return ['ok'=>false,'errors'=>['recovery_'.$f.'_required']];
         $attempt=SaJobAttempt::query()->with('job')->where('attempt_uuid',(string)$input['attempt_uuid'])->first();
         if(!$attempt||!$attempt->job||!hash_equals((string)$attempt->lease_token,(string)$input['lease_token']))return ['ok'=>false,'errors'=>['stale_attempt_or_lease']];
+        if($clientApiKeyId!==null && $attempt->job->agent_id){
+            $agent=SaAgent::query()->find((int)$attempt->job->agent_id);
+            if(!$agent || (int)$agent->client_api_key_id!==$clientApiKeyId || (string)$agent->installation_id!==$installationId)return ['ok'=>false,'errors'=>['attempt_not_authorized']];
+        }
         $campaign=$attempt->job->campaign_id?SaCampaign::query()->find($attempt->job->campaign_id):null;
-        if(!$campaign||$campaign->installation_id!==$installationId||(int)$campaign->created_by_user_id!==$ownerUserId)return ['ok'=>false,'errors'=>['attempt_not_authorized']];
-        $tag=SaRecoveryErrorTag::query()->where('owner_user_id',$ownerUserId)->where('id',(int)$input['error_tag_id'])->first();
+        if(!$campaign||$campaign->installation_id!==$installationId||!in_array((int)$campaign->created_by_user_id,$permittedOwners,true))return ['ok'=>false,'errors'=>['attempt_not_authorized']];
+        $tag=SaRecoveryErrorTag::query()->where('owner_user_id',(int)$campaign->created_by_user_id)->where('installation_id',$installationId)->where('id',(int)$input['error_tag_id'])->first();
         $tpl=$tag?SaRecoveryVisualTemplate::query()->where('error_tag_id',$tag->id)->where('id',(int)$input['visual_template_id'])->first():null;
         if(!$tag||!$tag->is_enabled||!$tpl||!$tpl->is_enabled||(int)$tag->handler_release_id!==(int)$input['handler_release_id'])return ['ok'=>false,'errors'=>['recovery_configuration_mismatch']];
         if((float)$input['match_confidence']<(float)$tpl->match_threshold)return ['ok'=>false,'errors'=>['confidence_below_threshold']];

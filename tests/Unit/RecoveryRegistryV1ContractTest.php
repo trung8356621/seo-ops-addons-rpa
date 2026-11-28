@@ -52,7 +52,7 @@ final class RecoveryRegistryV1ContractTest extends TestCase
     public function test_authorization_is_owner_and_installation_scoped(): void
     {
         $s=$this->read('src/Services/RecoveryRegistryService.php');
-        self::assertStringContainsString("where('owner_user_id',\$ownerUserId)",$s);
+        self::assertStringContainsString("whereIn('owner_user_id',\$permittedOwners)",$s);
         self::assertStringContainsString("where('installation_id',\$installationId)",$s);
         self::assertStringContainsString('attempt_not_authorized',$s);
     }
@@ -69,7 +69,7 @@ final class RecoveryRegistryV1ContractTest extends TestCase
     public function test_runtime_asset_access_is_owner_installation_and_exact_binding_scoped(): void
     {
         $service=$this->read('src/Services/RecoveryRuntimeAssetService.php');
-        foreach(["where('owner_user_id', \$ownerUserId)","where('installation_id', \$installationId)","where('is_enabled', true)",'handler_release_not_bound','handler_release_unavailable','recovery_handler_v1'] as $gate)self::assertStringContainsString($gate,$service);
+        foreach(["whereIn('owner_user_id', \$permittedOwners)","where('installation_id', \$installationId)","where('is_enabled', true)",'handler_release_not_bound','handler_release_unavailable','recovery_handler_v1'] as $gate)self::assertStringContainsString($gate,$service);
         self::assertStringContainsString('ScriptReleaseAssetReader',$service);
         self::assertStringContainsString("where('kind', 'screenshot')",$service);
         self::assertStringContainsString("hash('sha256', \$bytes)",$service);

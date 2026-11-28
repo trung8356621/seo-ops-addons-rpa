@@ -2097,6 +2097,7 @@ paths:
     get:
       tags: [RPA Client]
       summary: Pull published, enabled and tenant-authorized Recovery configurations
+      description: Requires Client API Key, active registered Agent, and same installation. Grants access to the key owner's Recovery configurations and, for an active Staff key owner (`role=staff`), their assigned Manager/Owner (`users.parent_id`, active `owner|admin`). Sharing an installation alone does not grant cross-owner access.
       security: [{ RpaClientApiKey: [] }]
       responses:
         '200':
@@ -2106,7 +2107,7 @@ paths:
     post:
       tags: [RPA Client]
       summary: Retrieve an authorized Recovery Visual Template source image
-      description: Requires Client API Key and active connection lease. Resolves only an enabled template owned by the key owner and installation; verifies stored screenshot SHA-256 before returning bytes. Never exposes storage paths or public URLs.
+      description: Requires Client API Key, active registered Agent, and active connection lease. Resolves only an enabled template owned by the key owner (or an active Staff key owner's assigned `users.parent_id` Manager/Owner) in the same installation; verifies stored screenshot SHA-256 before returning bytes. Never exposes storage paths or public URLs.
       security: [{ RpaClientApiKey: [] }]
       requestBody:
         required: true
@@ -2123,7 +2124,7 @@ paths:
     post:
       tags: [RPA Client]
       summary: Pull the exact separately bound Recovery Handler Release
-      description: Requires Client API Key and active connection lease. The Error Tag must belong to the key owner and installation, and release_id must equal its currently bound, enabled, published, recovery_handler_v1-compatible Script Release. This does not use or alter the Campaign Job script pin.
+      description: Requires Client API Key, active registered Agent, and active connection lease. The Error Tag must belong to the key owner (or an active Staff key owner's assigned `users.parent_id` Manager/Owner) in the same installation, and release_id must equal its currently bound, enabled, published, recovery_handler_v1-compatible Script Release owned by that Error Tag owner. This does not use or alter the Campaign Job script pin.
       security: [{ RpaClientApiKey: [] }]
       requestBody:
         required: true

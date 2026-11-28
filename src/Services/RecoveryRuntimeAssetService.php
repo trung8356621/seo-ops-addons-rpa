@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Omnichannel\Addons\SocialAutomation\Services;
 
 use Illuminate\Support\Facades\Storage;
+use Omnichannel\Addons\SocialAutomation\Domain\RecoveryClientAuthorization;
 use Omnichannel\Addons\SocialAutomation\Models\SaArtifact;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackage;
 use Omnichannel\Addons\SocialAutomation\Models\SaPackageRelease;
@@ -16,9 +17,13 @@ final class RecoveryRuntimeAssetService
 {
     public function __construct(private readonly ScriptReleaseAssetReader $assets = new ScriptReleaseAssetReader) {}
 
-    /** @return array<string, mixed> */
-    public function templateImage(int $ownerUserId, string $installationId, string $templateUuid): array
+    /**
+     * @param  int|list<int>  $ownerUserIds
+     * @return array<string, mixed>
+     */
+    public function templateImage(int|array $ownerUserIds, string $installationId, string $templateUuid): array
     {
+        $permittedOwners = RecoveryClientAuthorization::normalizeOwnerIds($ownerUserIds);
         $template = SaRecoveryVisualTemplate::query()
             ->with('errorTag')
             ->where('template_uuid', trim($templateUuid))
@@ -26,7 +31,7 @@ final class RecoveryRuntimeAssetService
             ->first();
         $tag = $template?->errorTag;
         if (! $template || ! $tag || ! $tag->is_enabled
-            || (int) $tag->owner_user_id !== $ownerUserId
+            || ! in_array((int) $tag->owner_user_id, $permittedOwners, true)
             || (string) $tag->installation_id !== $installationId) {
             return ['ok' => false, 'errors' => ['visual_template_not_found'], 'http' => 404];
         }
@@ -58,10 +63,13 @@ final class RecoveryRuntimeAssetService
             'visual_template_id' => (string) $template->template_uuid];
     }
 
-    /** @return array<string, mixed> */
-    public function pullHandler(int $ownerUserId, string $installationId, string $tagUuid, int $releaseId): array
+    /**
+     * @param  int|list<int>  $ownerUserIds
+     * @return array<string, mixed>
+     */
+    public function pullHandler(int|array $ownerUserIds, string $installationId, string $tagUuid, int $releaseId): array
     {
-        $authorized = $this->authorizeHandler($ownerUserId, $installationId, $tagUuid, $releaseId);
+        $authorized = $this->authorizeHandler($ownerUserIds, $installationId, $tagUuid, $releaseId);
         if (! ($authorized['ok'] ?? false)) return $authorized;
         /** @var SaPackage $package */ $package = $authorized['package'];
         /** @var SaPackageRelease $release */ $release = $authorized['release'];
@@ -77,10 +85,13 @@ final class RecoveryRuntimeAssetService
         ]];
     }
 
-    /** @return array<string, mixed> */
-    public function handlerAsset(int $ownerUserId, string $installationId, string $tagUuid, int $releaseId, string $assetPath, string $expectedSha256): array
+    /**
+     * @param  int|list<int>  $ownerUserIds
+     * @return array<string, mixed>
+     */
+    public function handlerAsset(int|array $ownerUserIds, string $installationId, string $tagUuid, int $releaseId, string $assetPath, string $expectedSha256): array
     {
-        $authorized = $this->authorizeHandler($ownerUserId, $installationId, $tagUuid, $releaseId);
+        $authorized = $this->authorizeHandler($ownerUserIds, $installationId, $tagUuid, $releaseId);
         if (! ($authorized['ok'] ?? false)) return $authorized;
         /** @var SaPackageRelease $release */ $release = $authorized['release'];
         $manifest = is_array($release->manifest) ? $release->manifest : [];
@@ -88,11 +99,15 @@ final class RecoveryRuntimeAssetService
             is_array($manifest['assets'] ?? null) ? $manifest['assets'] : []);
     }
 
-    /** @return array<string, mixed> */
-    private function authorizeHandler(int $ownerUserId, string $installationId, string $tagUuid, int $releaseId): array
+    /**
+     * @param  int|list<int>  $ownerUserIds
+     * @return array<string, mixed>
+     */
+    private function authorizeHandler(int|array $ownerUserIds, string $installationId, string $tagUuid, int $releaseId): array
     {
-        if ($releaseId < 1 || trim($tagUuid) === '') return ['ok' => false, 'errors' => ['handler_request_invalid'], 'http' => 422];
-        $tag = SaRecoveryErrorTag::query()->where('error_tag_uuid', trim($tagUuid))->where('owner_user_id', $ownerUserId)
+        $permittedOwners = RecoveryClientAuthorization::normalizeOwnerIds($ownerUserIds);
+        if ($releaseId < 1 || trim($tagUuid) === '' || $permittedOwners === []) return ['ok' => false, 'errors' => ['handler_request_invalid'], 'http' => 422];
+        $tag = SaRecoveryErrorTag::query()->where('error_tag_uuid', trim($tagUuid))->whereIn('owner_user_id', $permittedOwners)
             ->where('installation_id', $installationId)->where('is_enabled', true)->first();
         if (! $tag) return ['ok' => false, 'errors' => ['recovery_handler_not_found'], 'http' => 404];
         if ((int) $tag->handler_release_id !== $releaseId) return ['ok' => false, 'errors' => ['handler_release_not_bound'], 'http' => 403];
@@ -100,7 +115,7 @@ final class RecoveryRuntimeAssetService
         $package = $release?->package;
         if (! $release || ! $package || (int) $tag->handler_package_id !== (int) $package->id
             || $package->kind !== 'script' || ! ($package->is_enabled ?? true)
-            || (int) ($package->created_by_user_id ?? 0) !== $ownerUserId || ! $this->compatible($release)) {
+            || (int) ($package->created_by_user_id ?? 0) !== (int) $tag->owner_user_id || ! $this->compatible($release)) {
             return ['ok' => false, 'errors' => ['handler_release_unavailable'], 'http' => 403];
         }
         return ['ok' => true, 'package' => $package, 'release' => $release];
