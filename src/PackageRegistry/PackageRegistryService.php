@@ -36,6 +36,9 @@ final class PackageRegistryService
      */
     public function publish(array $input, array $audit = [], array $options = []): PackagePublishResult
     {
+        $userId = isset($audit['user_id']) ? (int) $audit['user_id'] : null;
+        $syncSource = isset($audit['sync_source']) ? trim((string) $audit['sync_source']) : null;
+        $options['allow_recovery_handler'] = $userId > 0 && $syncSource === 'rpa_admin';
         $validated = $this->validator->validate($input, $options);
         if (! ($validated['ok'] ?? false)) {
             return new PackagePublishResult(
@@ -46,8 +49,15 @@ final class PackageRegistryService
 
         /** @var array<string, mixed> $data */
         $data = $validated['data'];
-        $userId = isset($audit['user_id']) ? (int) $audit['user_id'] : null;
-        $syncSource = isset($audit['sync_source']) ? trim((string) $audit['sync_source']) : null;
+        $isRecoveryHandler = ($data['manifest']['runtime_contract'] ?? null) === 'recovery_handler_v1'
+            && $data['kind'] === 'script';
+
+        if ($isRecoveryHandler && ! $options['allow_recovery_handler']) {
+            return new PackagePublishResult(
+                PackagePublishResult::OUTCOME_VALIDATION,
+                errors: ['recovery_handler_admin_required'],
+            );
+        }
 
         if (! $this->tablesReady()) {
             return new PackagePublishResult(
@@ -112,7 +122,7 @@ final class PackageRegistryService
         }
 
         try {
-            $result = DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($data, $userId, $syncSource, $input): PackagePublishResult {
+            $result = DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($data, $userId, $syncSource, $input, $isRecoveryHandler): PackagePublishResult {
                 $manifestForAuth = is_array($data['manifest'] ?? null) ? $data['manifest'] : [];
                 $actionTagKeyForAuth = trim((string) ($manifestForAuth['action_tag_key'] ?? $input['action_tag_key'] ?? ''));
                 // Authentication Path is source of truth when Admin omits is_authentication.
@@ -143,6 +153,13 @@ final class PackageRegistryService
                     return new PackagePublishResult(
                         PackagePublishResult::OUTCOME_CONFLICT,
                         errors: ['package_kind_conflict'],
+                    );
+                }
+
+                if ($isRecoveryHandler && (int) $package->created_by_user_id !== $userId) {
+                    return new PackagePublishResult(
+                        PackagePublishResult::OUTCOME_CONFLICT,
+                        errors: ['recovery_handler_package_owner_required'],
                     );
                 }
 

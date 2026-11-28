@@ -33,7 +33,7 @@ final class PackagePublishValidator
 
     /**
      * @param  array<string, mixed>  $input
-     * @param  array{allow_missing_video_demo?: bool}  $options
+     * @param  array{allow_missing_video_demo?: bool, allow_recovery_handler?: bool}  $options
      * @return array{ok: true, data: array<string, mixed>}|array{ok: false, errors: list<string>}
      */
     public function validate(array $input, array $options = []): array
@@ -145,6 +145,18 @@ final class PackagePublishValidator
             }
         } elseif ($kind === 'script') {
             $allowMissingVideoDemo = (bool) ($options['allow_missing_video_demo'] ?? false);
+            $isRecoveryHandler = ($manifest['runtime_contract'] ?? null) === 'recovery_handler_v1';
+            if ($isRecoveryHandler) {
+                $supported = $this->isSupportedRecoveryHandler($manifest)
+                    && ! $isAuthentication
+                    && empty($input['action_tag_key'])
+                    && empty($input['script_request_id'])
+                    && $normalizedDeps === [];
+                if (! $supported) {
+                    $errors[] = 'recovery_handler_structure_invalid';
+                }
+                $allowMissingVideoDemo = $supported && ($options['allow_recovery_handler'] ?? false) === true;
+            }
             foreach ($this->validateScriptManifest($manifest, $allowMissingVideoDemo) as $err) {
                 $errors[] = $err;
             }
@@ -185,6 +197,39 @@ final class PackagePublishValidator
                 'is_authentication' => $isAuthentication,
             ],
         ];
+    }
+
+    /** @param array<string, mixed> $manifest */
+    private function isSupportedRecoveryHandler(array $manifest): bool
+    {
+        $steps = $manifest['steps'] ?? null;
+        $step = is_array($steps) && array_is_list($steps) && count($steps) === 1 ? $steps[0] : null;
+
+        $outputs = [
+            ['key' => 'status', 'type' => 'text'],
+            ['key' => 'message', 'type' => 'text'],
+            ['key' => 'runId', 'type' => 'text'],
+            ['key' => 'scenarioId', 'type' => 'text'],
+        ];
+
+        return array_diff(array_keys($manifest), [
+            'runtime_contract', 'script_id', 'result_type', 'variables', 'outputs', 'steps',
+            'runtime_requirements', 'assets', 'zoom', 'default_pattern', 'groups', 'video_demo',
+        ]) === []
+            && is_array($step)
+            && array_diff(array_keys($step), ['id', 'version', 'name', 'action', 'targetSource', 'target']) === []
+            && is_string($step['id'] ?? null) && trim($step['id']) !== ''
+            && is_int($step['version'] ?? null) && $step['version'] >= 1
+            && is_string($step['name'] ?? null)
+            && ($step['action'] ?? null) === 'CLICK_TARGET'
+            && ($step['targetSource'] ?? null) === 'recovery_runtime'
+            && ($step['target'] ?? null) === 'click_coordinates'
+            && ($manifest['variables'] ?? null) === []
+            && ($manifest['assets'] ?? []) === []
+            && ($manifest['groups'] ?? []) === []
+            && ($manifest['default_pattern'] ?? ['values' => []]) === ['values' => []]
+            && in_array($manifest['outputs'] ?? [], [[], $outputs], true)
+            && ($manifest['result_type'] ?? 'status') === 'status';
     }
 
     /**

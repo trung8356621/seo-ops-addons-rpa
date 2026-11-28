@@ -140,6 +140,57 @@ final class PackagePublishValidatorTest extends TestCase
         self::assertSame('script', $result['data']['kind']);
     }
 
+    public function test_only_a_supported_recovery_handler_can_publish_without_demo(): void
+    {
+        $step = ['id' => 'dismiss', 'version' => 1, 'name' => 'Dismiss modal',
+            'action' => 'CLICK_TARGET', 'targetSource' => 'recovery_runtime', 'target' => 'click_coordinates'];
+        $payload = $this->basePayload([
+            'kind' => 'script', 'package_key' => 'recovery.dismiss.modal', 'version' => '1',
+            'manifest' => ['script_id' => 'dismiss-modal', 'runtime_contract' => 'recovery_handler_v1',
+                'result_type' => 'status', 'variables' => [], 'assets' => [], 'steps' => [$step],
+                'default_pattern' => ['values' => []]],
+        ]);
+        $option = ['allow_recovery_handler' => true];
+        $valid = $this->validator->validate($payload, $option);
+        self::assertTrue($valid['ok']);
+        self::assertContains('script_video_demo_required', $this->validator->validate($payload)['errors']);
+        self::assertContains('content_digest_mismatch', $this->validator->validate(
+            $payload + ['content_digest' => str_repeat('a', 64)], $option,
+        )['errors']);
+
+        foreach ([
+            [],
+            [$step, $step],
+            [array_replace($step, ['target' => ['x' => 10, 'y' => 20]])],
+            [array_replace($step, ['action' => 'CLICK_AND_TYPE'])],
+            [array_replace($step, ['targetSource' => 'visual'])],
+            [$step + ['selector' => '#publish']],
+            [$step + ['code' => 'forbidden']],
+        ] as $steps) {
+            $invalid = $payload;
+            $invalid['manifest']['steps'] = $steps;
+            self::assertContains(
+                'recovery_handler_structure_invalid',
+                $this->validator->validate($invalid, $option)['errors'],
+            );
+        }
+
+        foreach ([
+            ['assets' => [['path' => 'test.png']]],
+            ['action_tag_key' => 'facebook.group.post'],
+            ['variables' => [['id' => 'v1', 'key' => 'input', 'type' => 'text']]],
+            ['default_pattern' => ['values' => ['x' => 10]]],
+        ] as $patch) {
+            $invalid = $payload;
+            $invalid['manifest'] = array_replace($invalid['manifest'], $patch);
+            self::assertContains('recovery_handler_structure_invalid', $this->validator->validate($invalid, $option)['errors']);
+        }
+
+        unset($payload['manifest']['runtime_contract']);
+        $payload['runtime_compatibility']['recovery_handler_v1'] = true;
+        self::assertContains('script_video_demo_required', $this->validator->validate($payload, $option)['errors']);
+    }
+
     public function test_script_without_video_demo_rejected(): void
     {
         $result = $this->validator->validate([
