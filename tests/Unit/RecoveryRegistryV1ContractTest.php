@@ -66,5 +66,26 @@ final class RecoveryRegistryV1ContractTest extends TestCase
         self::assertStringContainsString('click_coordinates',$api);
     }
 
+    public function test_runtime_asset_access_is_owner_installation_and_exact_binding_scoped(): void
+    {
+        $service=$this->read('src/Services/RecoveryRuntimeAssetService.php');
+        foreach(["where('owner_user_id', \$ownerUserId)","where('installation_id', \$installationId)","where('is_enabled', true)",'handler_release_not_bound','handler_release_unavailable','recovery_handler_v1'] as $gate)self::assertStringContainsString($gate,$service);
+        self::assertStringContainsString('ScriptReleaseAssetReader',$service);
+        self::assertStringContainsString("where('kind', 'screenshot')",$service);
+        self::assertStringContainsString("hash('sha256', \$bytes)",$service);
+        self::assertStringNotContainsString("'storage_path' =>",$service);
+    }
+
+    public function test_runtime_routes_require_connection_lease_and_preserve_job_pinned_routes(): void
+    {
+        $provider=$this->read('src/SocialAutomationServiceProvider.php');
+        foreach(['/recovery/templates/image','/recovery/handlers/pull','/recovery/handlers/asset','/scripts/pull','/scripts/asset'] as $path)self::assertStringContainsString($path,$provider);
+        self::assertStringContainsString('EnsureClientConnectionLease::class',$provider);
+        $api=$this->read('openapi/openapi.yaml');
+        self::assertStringContainsString('Fractional ROI relative to the current viewport',$api);
+        self::assertStringContainsString('click_coordinates: { x: 796, y: 590 }',$api);
+        self::assertStringContainsString('modal_bounding_box: { x: 0.2222',$api);
+    }
+
     private function read(string $path): string { return (string)file_get_contents($this->root.'/'.$path); }
 }

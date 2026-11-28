@@ -648,6 +648,9 @@ final class SocialAutomationServiceProvider extends ServiceProvider
 
                 // CP8 Auth Script + Action Script pull/asset — API key + active connection lease
                 Route::middleware([EnsureClientConnectionLease::class])->group(function (): void {
+                    Route::post('/recovery/templates/image', [ClientRecoveryController::class, 'templateImage']);
+                    Route::post('/recovery/handlers/pull', [ClientRecoveryController::class, 'pullHandler']);
+                    Route::post('/recovery/handlers/asset', [ClientRecoveryController::class, 'handlerAsset']);
                     Route::post('/auth/context', [RpaClientApiController::class, 'authContext'])
                         ->name('social-automation.client.auth.context');
                     Route::post('/auth/resolve', [RpaClientApiController::class, 'resolveAuthScript'])

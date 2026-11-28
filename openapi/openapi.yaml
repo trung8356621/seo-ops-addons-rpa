@@ -174,12 +174,36 @@ components:
   schemas:
     NormalizedRoi:
       type: object
+      description: Fractional ROI relative to the current viewport. x + width and y + height MUST each be <= 1.
       required: [x, y, width, height]
       properties:
         x: { type: number, minimum: 0, maximum: 1 }
         y: { type: number, minimum: 0, maximum: 1 }
         width: { type: number, minimum: 0, maximum: 1 }
         height: { type: number, minimum: 0, maximum: 1 }
+    RecoveryTemplateImageRequest:
+      type: object
+      required: [connection_token, visual_template_id]
+      properties:
+        connection_token: { type: string, description: Active Client connection lease token }
+        visual_template_id: { type: string, format: uuid }
+        format: { type: string, enum: [json, binary], default: json }
+    RecoveryHandlerPullRequest:
+      type: object
+      required: [connection_token, error_tag_id, release_id]
+      properties:
+        connection_token: { type: string, description: Active Client connection lease token }
+        error_tag_id: { type: string, format: uuid, description: 'Registry error_tag_id UUID, not the numeric database id' }
+        release_id: { type: integer, minimum: 1, description: Exact separately bound Handler Release id }
+    RecoveryHandlerAssetRequest:
+      allOf:
+        - { $ref: '#/components/schemas/RecoveryHandlerPullRequest' }
+        - type: object
+          required: [asset_path, expected_sha256]
+          properties:
+            asset_path: { type: string, description: Exact path declared by the bound Handler manifest }
+            expected_sha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+            format: { type: string, enum: [json, binary], default: json }
     RecoveryVisualTemplateInput:
       type: object
       required: [attempt_uuid, artifact_uuid, modal_roi]
@@ -2078,6 +2102,59 @@ paths:
         '200':
           description: Executable registry with enabled Templates only
           content: { application/json: { example: { ok: true, schema_version: 1, runtime_input_contract: { matched_error_tag_id: integer, matched_visual_template_id: integer, modal_bounding_box: normalized_roi, selected_target_bounding_box: normalized_roi, click_coordinates: viewport_pixels, viewport: { width: integer, height: integer } }, error_tags: [] } } }
+  /api/v1/social-automation/client/recovery/templates/image:
+    post:
+      tags: [RPA Client]
+      summary: Retrieve an authorized Recovery Visual Template source image
+      description: Requires Client API Key and active connection lease. Resolves only an enabled template owned by the key owner and installation; verifies stored screenshot SHA-256 before returning bytes. Never exposes storage paths or public URLs.
+      security: [{ RpaClientApiKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecoveryTemplateImageRequest' }
+            example: { connection_token: conn_lease_token, visual_template_id: 7bc46324-cf13-42ef-9f99-bafccb6ad0eb, format: json }
+      responses:
+        '200': { description: 'JSON base64 image by default, or verified raw image bytes when format=binary' }
+        '404': { description: Template/artifact absent or outside owner/installation scope }
+        '409': { description: Stored screenshot digest mismatch or connection lease invalid }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /api/v1/social-automation/client/recovery/handlers/pull:
+    post:
+      tags: [RPA Client]
+      summary: Pull the exact separately bound Recovery Handler Release
+      description: Requires Client API Key and active connection lease. The Error Tag must belong to the key owner and installation, and release_id must equal its currently bound, enabled, published, recovery_handler_v1-compatible Script Release. This does not use or alter the Campaign Job script pin.
+      security: [{ RpaClientApiKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecoveryHandlerPullRequest' }
+            example: { connection_token: conn_lease_token, error_tag_id: 1a59db14-87ad-4aca-8b45-0c779351dbcb, release_id: 418 }
+      responses:
+        '200': { description: Exact Handler manifest with distinct content_digest and execution_digest }
+        '403': { description: 'Release not bound, disabled, unpublished, incompatible, or cross-owner' }
+        '404': { description: Error Tag absent or outside installation scope }
+        '409': { description: Connection lease invalid }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /api/v1/social-automation/client/recovery/handlers/asset:
+    post:
+      tags: [RPA Client]
+      summary: Download a verified asset from the exact bound Recovery Handler Release
+      description: Applies the same Handler authorization as pull, then reuses ScriptReleaseAssetReader to require a manifest-declared path and matching expected SHA-256, stored digest, and byte digest.
+      security: [{ RpaClientApiKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecoveryHandlerAssetRequest' }
+            example: { connection_token: conn_lease_token, error_tag_id: 1a59db14-87ad-4aca-8b45-0c779351dbcb, release_id: 418, asset_path: handlers/session-expired.py, expected_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, format: json }
+      responses:
+        '200': { description: 'JSON base64 asset by default, or verified raw bytes when format=binary' }
+        '403': { description: Handler authorization failed }
+        '404': { description: Handler or declared asset not found }
+        '409': { description: Connection lease invalid }
+        '422': { $ref: '#/components/responses/ValidationError' }
   /api/v1/social-automation/client/recovery-results:
     post:
       tags: [RPA Client]
@@ -2098,7 +2175,7 @@ paths:
               recovery_attempt_no: 1
               match_confidence: 0.9472
               is_handler_execution: false
-              runtime_input: { matched_error_tag_id: 31, matched_visual_template_id: 72, modal_bounding_box: { x: 320, y: 180, width: 640, height: 420 }, selected_target_bounding_box: { x: 721, y: 564, width: 151, height: 52 }, click_coordinates: { x: 796, y: 590 }, viewport: { width: 1440, height: 900 } }
+              runtime_input: { matched_error_tag_id: 31, matched_visual_template_id: 72, modal_bounding_box: { x: 0.2222, y: 0.2, width: 0.4444, height: 0.4667 }, selected_target_bounding_box: { x: 0.5007, y: 0.6267, width: 0.1049, height: 0.0578 }, click_coordinates: { x: 796, y: 590 }, viewport: { width: 1440, height: 900 } }
               verification_outcome: passed
               final_job_outcome: resumed
               idempotency_key: recovery:3425c3d5:publish_post:1
