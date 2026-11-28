@@ -52,6 +52,8 @@ final class PackageRegistryService
         $isRecoveryHandler = ($data['manifest']['runtime_contract'] ?? null) === 'recovery_handler_v1'
             && $data['kind'] === 'script';
 
+        $publishWithoutMedia = $isRecoveryHandler && ! isset($data['manifest']['video_demo']);
+
         if ($isRecoveryHandler && ! $options['allow_recovery_handler']) {
             return new PackagePublishResult(
                 PackagePublishResult::OUTCOME_VALIDATION,
@@ -122,7 +124,7 @@ final class PackageRegistryService
         }
 
         try {
-            $result = DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($data, $userId, $syncSource, $input, $isRecoveryHandler): PackagePublishResult {
+            $result = DB::connection(SocialAutomationServiceConfig::CONNECTION)->transaction(function () use ($data, $userId, $syncSource, $input, $isRecoveryHandler, $publishWithoutMedia): PackagePublishResult {
                 $manifestForAuth = is_array($data['manifest'] ?? null) ? $data['manifest'] : [];
                 $actionTagKeyForAuth = trim((string) ($manifestForAuth['action_tag_key'] ?? $input['action_tag_key'] ?? ''));
                 // Authentication Path is source of truth when Admin omits is_authentication.
@@ -183,6 +185,16 @@ final class PackageRegistryService
 
                 if ($existing instanceof SaPackageRelease) {
                     if (PackageDigest::equals((string) $existing->content_digest, (string) $data['content_digest'])) {
+                        if ($publishWithoutMedia && $existing->status === 'pending_media') {
+                            if ((int) $existing->created_by_user_id !== $userId ||
+                                ! PackageDigest::equals((string) $existing->execution_digest, ScriptExecutionDigest::fromManifest($data['manifest']))) {
+                                return new PackagePublishResult(
+                                    PackagePublishResult::OUTCOME_CONFLICT,
+                                    errors: ['recovery_handler_pending_release_mismatch'],
+                                );
+                            }
+                            $existing->fill(['status' => 'published', 'published_at' => now()])->save();
+                        }
                         $this->linkActionTagAndRequest($package, $existing, $data, $input);
                         return new PackagePublishResult(
                             PackagePublishResult::OUTCOME_IDEMPOTENT,
@@ -231,7 +243,7 @@ final class PackageRegistryService
                     );
                 }
 
-                $isScript = (string) $data['kind'] === 'script';
+                $pendingMedia = $data['kind'] === 'script' && ! $publishWithoutMedia;
                 $release = SaPackageRelease::query()->create([
                     'package_id' => $package->id,
                     'version' => $data['version'],
@@ -240,8 +252,8 @@ final class PackageRegistryService
                     'schema_version' => $data['schema_version'],
                     'runtime_compatibility' => $data['runtime_compatibility'],
                     'manifest' => $data['manifest'],
-                    'status' => $isScript ? 'pending_media' : 'published',
-                    'published_at' => $isScript ? null : now(),
+                    'status' => $pendingMedia ? 'pending_media' : 'published',
+                    'published_at' => $pendingMedia ? null : now(),
                     'created_by_user_id' => $userId,
                     'sync_source' => $syncSource,
                 ]);

@@ -87,5 +87,15 @@ final class RecoveryRegistryV1ContractTest extends TestCase
         self::assertStringContainsString('modal_bounding_box: { x: 0.2222',$api);
     }
 
+    public function test_demo_free_release_creation_and_retry_reach_published(): void
+    {
+        $service = $this->read('src/PackageRegistry/PackageRegistryService.php');
+        self::assertStringContainsString("\$pendingMedia ? 'pending_media' : 'published'", $service);
+        self::assertStringContainsString("\$publishWithoutMedia && \$existing->status === 'pending_media'", $service);
+        self::assertStringContainsString("created_by_user_id !== \$userId", $service);
+        self::assertStringContainsString("existing->execution_digest", $service);
+        self::assertStringContainsString("\$existing->fill(['status' => 'published', 'published_at' => now()])->save()", $service);
+    }
+
     private function read(string $path): string { return (string)file_get_contents($this->root.'/'.$path); }
 }
